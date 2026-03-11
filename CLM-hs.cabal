@@ -1,0 +1,72 @@
+cabal-version:       2.4
+
+name:                CLM-hs
+version:             0.1.0.0
+synopsis:            Haskell port of the Community Land Model (CLM/CTSM)
+description:         A Haskell port of CLM from Fortran 90, targeting process fidelity,
+                     type safety, and automatic differentiation.
+license:             BSD-3-Clause
+license-file:        LICENSE
+build-type:          Simple
+extra-source-files:  README.md
+                     CHANGELOG.md
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     CLM
+                     , CLM.Constants.PhysicalConstants
+                     , CLM.Constants.ControlFlags
+                     , CLM.Types.ColumnData
+                     , CLM.Types.PatchData
+                     , CLM.Types.WaterStateData
+                     , CLM.Types.TemperatureData
+                     , CLM.Types.EnergyFluxData
+                     , CLM.Types.WaterFluxData
+                     , CLM.Infrastructure.Tridiagonal
+                     , CLM.Infrastructure.Filters
+                     , CLM.Infrastructure.ColdStart
+                     , CLM.BioGeoPhys.SoilTemperature
+                     , CLM.BioGeoPhys.SoilHydrology
+                     , CLM.BioGeoPhys.CanopyFluxes
+                     , CLM.BioGeoPhys.Photosynthesis
+                     , CLM.BioGeoPhys.SnowHydrology
+                     , CLM.BioGeoPhys.SurfaceAlbedo
+                     , CLM.Driver.CLMDriver
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
+                     , vector
+                     , massiv
+                     , hmatrix
+                     , bytestring
+                     , text
+                     , containers
+                     , mtl
+                     , transformers
+  ghc-options:         -Wall
+                       -Wcompat
+                       -Widentities
+                       -Wincomplete-record-updates
+                       -Wincomplete-uni-patterns
+                       -Wmissing-export-lists
+                       -Wredundant-constraints
+                       -O2
+
+executable clm-hs
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
+                     , CLM-hs
+  ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
+
+test-suite clm-hs-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
+                     , CLM-hs
+                     , vector
+                     , hspec
+                     , QuickCheck
+  ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
