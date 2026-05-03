@@ -16,32 +16,176 @@ library
   exposed-modules:     CLM
                      , CLM.Constants.PhysicalConstants
                      , CLM.Constants.ControlFlags
+                     , CLM.Constants.VarPar
+                     , CLM.Constants.PFTConstants
+                     , CLM.Constants.LandunitConstants
+                     , CLM.Constants.ColumnConstants
                      , CLM.Types.ColumnData
                      , CLM.Types.PatchData
                      , CLM.Types.WaterStateData
                      , CLM.Types.TemperatureData
                      , CLM.Types.EnergyFluxData
                      , CLM.Types.WaterFluxData
+                     , CLM.Types.CanopyStateData
+                     , CLM.Types.SoilStateData
+                     , CLM.Types.FrictionVelocityData
+                     , CLM.Types.Atm2LndData
+                     , CLM.Types.SolarAbsorbedData
+                     , CLM.Types.WaterDiagnosticBulkData
+                     , CLM.Types.WaterStateBulkData
+                     , CLM.Types.WaterFluxBulkData
+                     , CLM.Types.LakeStateData
                      , CLM.Infrastructure.Tridiagonal
+                     , CLM.Infrastructure.BandDiagonal
+                     , CLM.Infrastructure.Decomp
+                     , CLM.Infrastructure.InitVertical
+                     , CLM.Infrastructure.TimeManager
+                     , CLM.Infrastructure.Orbital
+                     , CLM.Infrastructure.Accumulator
                      , CLM.Infrastructure.Filters
                      , CLM.Infrastructure.ColdStart
+                     , CLM.Infrastructure.InitSubgrid
+                     , CLM.Infrastructure.InitGridcells
+                     , CLM.Infrastructure.SubgridAverage
+                     , CLM.Infrastructure.DownscaleForcings
+                     , CLM.Infrastructure.Lnd2Atm
+                     , CLM.Infrastructure.BinaryIO
                      , CLM.BioGeoPhys.SoilTemperature
                      , CLM.BioGeoPhys.SoilHydrology
                      , CLM.BioGeoPhys.CanopyFluxes
                      , CLM.BioGeoPhys.Photosynthesis
                      , CLM.BioGeoPhys.SnowHydrology
                      , CLM.BioGeoPhys.SurfaceAlbedo
+                     , CLM.BioGeoPhys.QSat
+                     , CLM.BioGeoPhys.DayLength
+                     , CLM.BioGeoPhys.SurfaceRadiation
+                     , CLM.BioGeoPhys.SurfaceHumidity
+                     , CLM.BioGeoPhys.SurfaceResistance
+                     , CLM.BioGeoPhys.Aerosol
+                     , CLM.BioGeoPhys.SnowSNICAR
+                     , CLM.BioGeoPhys.BaregroundFluxes
+                     , CLM.BioGeoPhys.PreFluxCalcs
+                     , CLM.BioGeoPhys.BalanceCheck
+                     , CLM.BioGeoPhys.TotalWaterHeat
+                     , CLM.BioGeoPhys.ActiveLayer
+                     , CLM.BioGeoPhys.RootBioPhys
+                     , CLM.BioGeoPhys.SoilWaterPlantSink
+                     , CLM.BioGeoPhys.Ozone
+                     , CLM.BioGeoPhys.SatellitePhenology
+                     , CLM.BioGeoPhys.CanopyHydrology
+                     , CLM.BioGeoPhys.HydrologyNoDrainage
+                     , CLM.BioGeoPhys.SoilWaterMovement
+                     , CLM.BioGeoPhys.SoilFluxes
+                     , CLM.BioGeoPhys.SoilMoistStress
+                     , CLM.BioGeoPhys.InfiltExcessRunoff
+                     , CLM.BioGeoPhys.SatExcessRunoff
+                     , CLM.BioGeoPhys.SurfaceWater
+                     , CLM.BioGeoPhys.UrbanRadiation
+                     , CLM.BioGeoPhys.UrbanFluxes
+                     , CLM.BioGeoPhys.UrbanAlbedo
+                     , CLM.BioGeoPhys.HydrologyDrainage
+                     , CLM.BioGeoPhys.HillslopeHydrology
+                     , CLM.BioGeoPhys.Irrigation
+                     , CLM.BioGeoPhys.Luna
+                     , CLM.BioGeoPhys.DryDepVelocity
+                     , CLM.BioGeoPhys.SWRC
+                     , CLM.BioGeoPhys.LakeCon
+                     , CLM.BioGeoPhys.LakeFluxes
+                     , CLM.BioGeoPhys.LakeHydrology
+                     , CLM.BioGeoPhys.LakeTemperature
+                     , CLM.BioGeoPhys.SnowCoverFraction
+                     , CLM.BioGeoChem.VegStructUpdate
+                     , CLM.BioGeoChem.VegComputeSeed
+                     , CLM.BioGeoChem.VegetationFacade
+                     , CLM.BioGeoChem.CIsoFlux
+                     , CLM.BioGeoChem.CarbonIsotopes
+                     , CLM.BioGeoChem.FATESInterface
+                     , CLM.BioGeoChem.CStateUpdate1
+                     , CLM.BioGeoChem.CStateUpdate2
+                     , CLM.BioGeoChem.CStateUpdate3
+                     , CLM.BioGeoChem.NStateUpdate1
+                     , CLM.BioGeoChem.NStateUpdate2
+                     , CLM.BioGeoChem.NStateUpdate3
+                     , CLM.BioGeoChem.FireBase
+                     , CLM.BioGeoChem.FireLi2014
+                     , CLM.BioGeoChem.Methane
+                     , CLM.BioGeoChem.VOCEmission
+                     , CLM.BioGeoChem.DustEmission
+                     , CLM.BioGeoChem.CNDriver
+                     , CLM.BioGeoChem.CNBalanceCheck
+                     , CLM.BioGeoChem.CNPrecisionControl
+                     , CLM.BioGeoChem.CNProducts
+                     , CLM.BioGeoChem.CNAnnualUpdate
+                     , CLM.BioGeoChem.NutrientCompetition
+                     , CLM.BioGeoChem.FUN
+                     , CLM.BioGeoChem.CNDV
+                     , CLM.BioGeoChem.Decomp
+                     , CLM.BioGeoChem.DecompBGC
+                     , CLM.BioGeoChem.DecompMIMICS
+                     , CLM.BioGeoChem.DecompCompetition
+                     , CLM.BioGeoChem.DecompPotential
+                     , CLM.BioGeoChem.DecompPrecisionControl
+                     , CLM.BioGeoChem.DecompVerticalProfile
+                     , CLM.BioGeoChem.Phenology
+                     , CLM.BioGeoChem.Allocation
+                     , CLM.BioGeoChem.GrowthResp
+                     , CLM.BioGeoChem.MaintResp
+                     , CLM.BioGeoChem.GapMortality
+                     , CLM.BioGeoChem.LitterVertTransp
+                     , CLM.BioGeoChem.NitrifDenitrif
+                     , CLM.BioGeoChem.NLeaching
+                     , CLM.BioGeoChem.NDynamics
+                     , CLM.Types.GridcellData
+                     , CLM.Types.LandunitData
+                     , CLM.Types.Lnd2AtmData
+                     , CLM.Types.SoilHydrologyData
+                     , CLM.Types.WaterBalanceData
+                     , CLM.Types.WaterData
+                     , CLM.Types.WaterInfoBase
+                     , CLM.Types.CropData
+                     , CLM.Types.LunaParamsData
+                     , CLM.Types.UrbanParamsData
+                     , CLM.Types.CNVegStateData
+                     , CLM.Types.CNVegCarbonStateData
+                     , CLM.Types.CNVegNitrogenStateData
+                     , CLM.Types.CNVegCarbonFluxData
+                     , CLM.Types.CNVegNitrogenFluxData
+                     , CLM.Types.SoilBGCStateData
+                     , CLM.Types.SoilBGCCarbonStateData
+                     , CLM.Types.SoilBGCNitrogenStateData
+                     , CLM.Types.SoilBGCCarbonFluxData
+                     , CLM.Types.SoilBGCNitrogenFluxData
+                     , CLM.Types.CNSharedParamsData
+                     , CLM.Types.CNProductsData
+                     , CLM.Types.DGVSData
+                     , CLM.Infrastructure.Control
+                     , CLM.Infrastructure.SubgridWeights
+                     , CLM.Infrastructure.Topo
+                     , CLM.Infrastructure.SurfData
+                     , CLM.Infrastructure.SurfRdUtils
+                     , CLM.Infrastructure.ForcingReader
+                     , CLM.Infrastructure.HistoryWriter
+                     , CLM.Infrastructure.ReadParams
+                     , CLM.Infrastructure.RestartIO
+                     , CLM.Infrastructure.Instances
                      , CLM.Driver.CLMDriver
+                     , CLM.Driver.CLMInitialize
+                     , CLM.Driver.CLMRun
+                     , CLM.Driver.PhysicsAdapters
+                     , CLM.Driver.Simulation
   default-language:    Haskell2010
   build-depends:       base >= 4.7 && < 5
                      , vector
                      , massiv
                      , hmatrix
                      , bytestring
+                     , binary
                      , text
                      , containers
                      , mtl
                      , transformers
+                     , filepath
+                     , directory
   ghc-options:         -Wall
                        -Wcompat
                        -Widentities
@@ -57,6 +201,8 @@ executable clm-hs
   default-language:    Haskell2010
   build-depends:       base >= 4.7 && < 5
                      , CLM-hs
+                     , vector
+                     , filepath
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
 
 test-suite clm-hs-test

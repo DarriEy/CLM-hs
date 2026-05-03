@@ -14,6 +14,9 @@ module CLM.Constants.PhysicalConstants
   , hfus
   , hvap
   , hsub
+    -- * Atmospheric
+  , rair
+  , cpair
     -- * Soil/snow
   , tkwat
   , tkice
@@ -69,9 +72,17 @@ hvap = 2.501e6
 hsub :: Double
 hsub = 2.501e6 + 0.3337e6
 
+-- | Dry air gas constant [J/kg/K]
+rair :: Double
+rair = 287.0423
+
+-- | Specific heat of dry air at constant pressure [J/kg/K]
+cpair :: Double
+cpair = 1004.64
+
 -- | Thermal conductivity of water [W/m/K]
 tkwat :: Double
-tkwat = 0.6
+tkwat = 0.57
 
 -- | Thermal conductivity of ice [W/m/K]
 tkice :: Double
@@ -91,7 +102,7 @@ nlevgrnd = 25
 
 -- | Maximum number of snow layers
 nlevsno :: Int
-nlevsno = 5
+nlevsno = 12
 
 -- | Number of radiation bands (visible + NIR)
 numrad :: Int

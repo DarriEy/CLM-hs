@@ -1,0 +1,180 @@
+{
+  "coldstart": {
+    "col_z": {
+      "shape": [
+        2,
+        37
+      ],
+      "file": "coldstart/col_z.bin"
+    },
+    "h2osoi_liq": {
+      "shape": [
+        2,
+        37
+      ],
+      "file": "coldstart/h2osoi_liq.bin"
+    },
+    "col_dz": {
+      "shape": [
+        2,
+        37
+      ],
+      "file": "coldstart/col_dz.bin"
+    },
+    "h2osoi_ice": {
+      "shape": [
+        2,
+        37
+      ],
+      "file": "coldstart/h2osoi_ice.bin"
+    },
+    "watsat": {
+      "shape": [
+        2,
+        25
+      ],
+      "file": "coldstart/watsat.bin"
+    },
+    "col_zi": {
+      "shape": [
+        2,
+        38
+      ],
+      "file": "coldstart/col_zi.bin"
+    },
+    "t_soisno": {
+      "shape": [
+        2,
+        37
+      ],
+      "file": "coldstart/t_soisno.bin"
+    }
+  },
+  "year": 2002,
+  "dimensions": {
+    "lat": 0.8964127206976188,
+    "nl": 2,
+    "np": 4,
+    "nc": 2,
+    "numpft": 79,
+    "year": 2002,
+    "nlevgrnd": 25,
+    "lon": -2.024795318117548,
+    "nlevsno": 12,
+    "nlevsoi": 20,
+    "ng": 1,
+    "nlevtot": 37,
+    "dtime": 1800,
+    "ntimes": 8759
+  },
+  "reference": {
+    "variables": [
+      "T_GRND",
+      "TSA",
+      "FSA",
+      "EFLX_LH_TOT",
+      "EFLX_SH_TOT",
+      "H2OSNO",
+      "QRUNOFF",
+      "ZWT",
+      "TLAI",
+      "QFLX_EVAP_TOT",
+      "SNOW_DEPTH",
+      "FRAC_SNO"
+    ],
+    "file": "julia_daily_avg.csv"
+  },
+  "created": "2026-03-12T15:19:40.694",
+  "surfdata": {
+    "monthly_hbot": {
+      "shape": [
+        1,
+        16,
+        12
+      ],
+      "file": "surfdata/monthly_hbot.bin"
+    },
+    "monthly_lai": {
+      "shape": [
+        1,
+        16,
+        12
+      ],
+      "file": "surfdata/monthly_lai.bin"
+    },
+    "pct_sand": {
+      "shape": [
+        1,
+        20
+      ],
+      "file": "surfdata/pct_sand.bin"
+    },
+    "organic": {
+      "shape": [
+        1,
+        20
+      ],
+      "file": "surfdata/organic.bin"
+    },
+    "monthly_sai": {
+      "shape": [
+        1,
+        16,
+        12
+      ],
+      "file": "surfdata/monthly_sai.bin"
+    },
+    "monthly_htop": {
+      "shape": [
+        1,
+        16,
+        12
+      ],
+      "file": "surfdata/monthly_htop.bin"
+    },
+    "wt_nat_patch": {
+      "shape": [
+        1,
+        16
+      ],
+      "file": "surfdata/wt_nat_patch.bin"
+    },
+    "pct_clay": {
+      "shape": [
+        1,
+        20
+      ],
+      "file": "surfdata/pct_clay.bin"
+    },
+    "wt_lunit": {
+      "shape": [
+        1,
+        9
+      ],
+      "file": "surfdata/wt_lunit.bin"
+    }
+  },
+  "site": "Bow at Banff (single column)",
+  "forcing": {
+    "units": [
+      "K",
+      "Pa",
+      "m/s",
+      "W/m2",
+      "W/m2",
+      "mm/s",
+      "kg/kg"
+    ],
+    "fields": [
+      "tbot",
+      "psrf",
+      "wind",
+      "flds",
+      "fsds",
+      "precip",
+      "qbot"
+    ],
+    "ntimes": 8759
+  },
+  "description": "CLM.jl test data export for Haskell port verification"
+}
