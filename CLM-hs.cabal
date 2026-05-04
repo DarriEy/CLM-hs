@@ -173,6 +173,7 @@ library
                      , CLM.Driver.CLMRun
                      , CLM.Driver.PhysicsAdapters
                      , CLM.Driver.Simulation
+                     , CLM.Driver.PipelineRunner
   default-language:    Haskell2010
   build-depends:       base >= 4.7 && < 5
                      , vector

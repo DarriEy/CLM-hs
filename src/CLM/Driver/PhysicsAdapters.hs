@@ -160,7 +160,7 @@ wiredPhysicsPipeline = defaultPhysicsPipeline
   , ppSoilTemperature    = soilTemperatureFullStep
   , ppLakeTemperature    = lakeTemperatureStep
   , ppSoilFluxes         = soilFluxesStep
-  , ppSnowWater          = snowWaterStep
+  , ppSnowWater          = snowPercolationStep
   , ppSoilHydrology      = soilHydrologyStep
   , ppWaterTable         = waterTableStep
   , ppSnowCompaction     = snowCompactionStep
@@ -420,7 +420,11 @@ baregroundFluxesStep _cfg ctx st =
         , fvel_ustar_patch = VU.singleton (bgo_ustar bgOut)
         }
 
+      wf = clmWaterFlux st
+      wf' = wf { qflx_evap_grnd_col = bgo_qflx_evap_soi bgOut }
+
   in st { clmEnergyFlux = ef'
+        , clmWaterFlux = wf'
         , clmTemp = temp'
         , clmFrictionVel = fv'
         }
@@ -684,8 +688,13 @@ soilTemperatureFullStep _cfg ctx st =
       nlyr_sabg = nlevsno + 1
       sabg_lyr = VU.generate nlyr_sabg (\j -> if j == 0 then sabg_val else 0.0)
 
-      hs_top = eflx_soil_grnd_col ef
-      dhsdT = 0.0
+      lwrad_emit = emg * sb * t_grnd ** 4
+      dlwrad_emit = 4.0 * emg * sb * t_grnd ** 3
+      sh_grnd = eflx_sh_grnd_patch ef
+      qflx_evap = qflx_evap_grnd_col (clmWaterFlux st)
+      hs_top = sabg_val + emg * forc_lwrad - lwrad_emit
+             - (sh_grnd + qflx_evap * htvp)
+      dhsdT = -dlwrad_emit
 
       stInput = SoilTempInput
         { sti_snl              = snl
@@ -739,6 +748,13 @@ soilTemperatureFullStep _cfg ctx st =
   in st { clmTemp = temp'
         , clmWaterState = ws'
         }
+
+-- ============================================================================
+-- Snow Percolation (placeholder — liquid routing through snow layers)
+-- ============================================================================
+
+snowPercolationStep :: PhysicsStep
+snowPercolationStep _cfg _ctx st = st
 
 -- ============================================================================
 -- Snow Water adapter (new snow accumulation + sublimation)

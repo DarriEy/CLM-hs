@@ -79,6 +79,8 @@ import CLM.BioGeoPhys.PreFluxCalcs
   )
 import CLM.Driver.Simulation
   ( SimState(..), initSimState, runSimulation, DailyAvg(..) )
+import CLM.Driver.PipelineRunner
+  ( PipelineConfig(..), defaultPipelineConfig, runPipeline )
 
 main :: IO ()
 main = do
@@ -91,7 +93,25 @@ main = do
     ["--soiltemp-test", dir] -> soilTempTestMode dir
     ["--run", dir, ndaysStr] -> runMode dir (read ndaysStr)
     ["--run", dir] -> runMode dir 30
+    ["--pipeline", dir, ndaysStr] -> pipelineMode dir (read ndaysStr)
+    ["--pipeline", dir] -> pipelineMode dir 30
     _ -> demoMode
+
+-- ============================================================================
+-- Pipeline mode: use clmDrv + wiredPhysicsPipeline
+-- ============================================================================
+
+pipelineMode :: FilePath -> Int -> IO ()
+pipelineMode dir ndays = do
+  putStrLn "=============================================="
+  putStrLn " CLM-hs Pipeline Runner"
+  putStrLn "=============================================="
+  dailies <- runPipeline defaultPipelineConfig
+    { pcDataDir = dir
+    , pcNdays   = ndays
+    , pcVerbose = True
+    }
+  putStrLn $ "\nCompleted " ++ show (length dailies) ++ " days via pipeline."
 
 -- ============================================================================
 -- Test data mode: load binary data exported by Julia
