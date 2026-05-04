@@ -790,30 +790,22 @@ snowWaterStep _cfg ctx st =
       h2osoi_ice_cur = h2osoi_ice_col ws
       dz_cur = colDz col
 
-      accum_factor = 0.1 :: Double
-
       h2osno_total_prev =
         (sum [ safeIdx h2osoi_ice_cur j + safeIdx h2osoi_liq_cur j
              | j <- [nlevsno + snl .. nlevsno - 1] ])
         + h2osno_nl
 
+      h2osno_after = h2osno_total_prev + new_snow_mass
+
       frac_sno_new =
-        if h2osno_total_prev == 0.0
-        then if new_snow_mass > 0.0
-             then tanh (accum_factor * new_snow_mass)
-             else 0.0
-        else if new_snow_mass > 0.0
-             then frac_sno_cur + tanh (accum_factor * new_snow_mass) * (1.0 - frac_sno_cur)
-             else frac_sno_cur
+        if h2osno_after <= 0.0 then 0.0
+        else min 1.0 (tanh (h2osno_after / 2.5))
 
       snow_depth_new =
-        if h2osno_total_prev == 0.0
-        then if new_snow_mass > 0.0 && frac_sno_new > 0.0
-             then (new_snow_mass / bifall) / frac_sno_new
+        if h2osno_after <= 0.0 then 0.0
+        else if frac_sno_new > 0.0
+             then h2osno_after / (bifall * frac_sno_new)
              else 0.0
-        else if new_snow_mass > 0.0 && frac_sno_new > 0.0
-             then snow_depth_cur + new_snow_mass / (bifall * frac_sno_new)
-             else snow_depth_cur
 
       (h2osno_nl', ice_new, dz_new) =
         if snl < 0 && new_snow_mass > 0.0
@@ -824,16 +816,14 @@ snowWaterStep _cfg ctx st =
              in (0.0, ice_upd, dz_upd)
         else (h2osno_nl + new_snow_mass, h2osoi_ice_cur, dz_cur)
 
-      snow_dzmin_1 = 0.010 :: Double
-      shouldCreateLayer = snl == 0 && h2osno_nl' > 0.0
-                        && frac_sno_new > 0.0
-                        && snow_depth_new * frac_sno_new >= snow_dzmin_1
+      shouldCreateLayer = snl == 0 && h2osno_nl' >= 0.5
+                        && frac_sno_new > 0.01
 
       (snl_final, h2osno_nl_final, t_soisno_new, liq_new, ice_final, dz_final) =
         if shouldCreateLayer
         then let layerIdx = nlevsno - 1
                  snow_t = min tfrz forc_t
-                 layer_dz = h2osno_nl' / bifall
+                 layer_dz = max 0.02 (h2osno_nl' / bifall)
                  t_new = t_soisno_col (clmTemp st) VU.// [(layerIdx, snow_t)]
                  liq_n = h2osoi_liq_cur VU.// [(layerIdx, 0.0)]
                  ice_n = ice_new VU.// [(layerIdx, h2osno_nl')]

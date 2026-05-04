@@ -340,6 +340,8 @@ runPipeline cfg = do
               dayAcc' = accumDiag dayAcc st'
               isEndDay = step `mod` spd == 0
 
+          return ()
+
           when (t_grnd_col (clmTemp st') > 400.0 ||
                 t_grnd_col (clmTemp st') < 100.0) $
             putStrLn $ "  *** WARNING step " ++ show step
