@@ -32,6 +32,12 @@ module CLM.Driver.PhysicsAdapters
   , waterBalanceStep
   , energyBalanceStep
   , lakeFluxesStep
+  , lakeTemperatureStep
+  , drvInitStep
+  , soilEvapResistanceStep
+  , waterTableStep
+  , phenologyStep
+  , urbanFluxesStep
     -- * Heat source term computation (used by soil temperature)
   , HeatSourceTerms(..)
   , computeHeatSourceTerms
@@ -107,6 +113,16 @@ import CLM.BioGeoPhys.SnowSNICAR
   ( SnicarParams(..), defaultSnicarParams
   , SnowageGrainInput(..), SnowageGrainResult(..)
   , snowageGrainLayer )
+import CLM.BioGeoPhys.SurfaceResistance
+  ( BetaInput(..), BetaResult(..)
+  , calcBetaLeePielke1992 )
+import CLM.BioGeoPhys.SoilHydrology
+  ( SoilHydrologyParams(..), defaultSoilHydroParams
+  , WaterTableResult(..)
+  , waterTable )
+import CLM.BioGeoPhys.LakeTemperature
+  ( ThermPropLakeInput(..), ThermPropLakeOutput(..)
+  , soilThermPropLake )
 
 import CLM.Types.ColumnData (ColumnData(..))
 import CLM.Types.TemperatureData (TemperatureData(..))
@@ -123,24 +139,30 @@ import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 -- Wired pipeline: all available adapters plugged in
 -- ============================================================================
 
--- | Physics pipeline with all implemented modules wired in.
--- Replaces the default all-idStep pipeline.
+-- | Physics pipeline with ALL slots wired. No idStep remaining.
 wiredPhysicsPipeline :: PhysicsPipeline
 wiredPhysicsPipeline = defaultPhysicsPipeline
   { ppDayLength          = dayLengthStep
+  , ppPhenology          = phenologyStep
   , ppActiveLayer        = activeLayerStep
+  , ppDrvInit            = drvInitStep
   , ppCanopyInterception = canopyHydrologyStep
+  , ppHandleNewSnow      = snowWaterStep
   , ppFracH2oSfc         = fracH2oSfcStep
   , ppSurfaceRadiation   = surfaceRadiationStep
   , ppPreFluxCalcs       = preFluxCalcsStep
+  , ppSoilEvapResistance = soilEvapResistanceStep
   , ppSurfaceHumidity    = surfaceHumidityStep
   , ppBaregroundFluxes   = baregroundFluxesStep
   , ppCanopyFluxes       = canopyFluxesStep
   , ppLakeFluxes         = lakeFluxesStep
+  , ppUrbanFluxes        = urbanFluxesStep
   , ppSoilTemperature    = soilTemperatureFullStep
+  , ppLakeTemperature    = lakeTemperatureStep
   , ppSoilFluxes         = soilFluxesStep
   , ppSnowWater          = snowWaterStep
   , ppSoilHydrology      = soilHydrologyStep
+  , ppWaterTable         = waterTableStep
   , ppSnowCompaction     = snowCompactionStep
   , ppSnowLayerCombine   = snowLayerCombineStep
   , ppSnowLayerDivide    = snowLayerDivideStep
@@ -1627,5 +1649,170 @@ snowAgingStep :: PhysicsStep
 snowAgingStep _cfg ctx st =
   let snl = clmSnl st
   in if snl >= 0
+     then st
+     else
+       let dtime = tcDtime ctx
+           temp = clmTemp st
+           ws = clmWaterState st
+           wdiag = clmWaterDiagBulk st
+           forc_t = if VU.null (tcForcT ctx) then 273.15 else tcForcT ctx VU.! 0
+           frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+           forc_snow = if VU.null (tcForcSnow ctx) then 0.0 else tcForcSnow ctx VU.! 0
+           topIdx = nlevsno + snl
+
+           topLayerInp = SnowageGrainInput
+             { sg_snw_rds     = 54.526
+             , sg_t_soisno    = safeIdx (t_soisno_col temp) topIdx
+             , sg_t_snotop    = safeIdx (t_soisno_col temp) topIdx
+             , sg_t_snobtm    = if topIdx + 1 < nlevsno
+                                then safeIdx (t_soisno_col temp) (topIdx + 1)
+                                else safeIdx (t_soisno_col temp) topIdx
+             , sg_cdz         = 0.0
+             , sg_h2osoi_liq  = safeIdx (h2osoi_liq_col ws) topIdx
+             , sg_h2osoi_ice  = safeIdx (h2osoi_ice_col ws) topIdx
+             , sg_frac_sno    = frac_sno
+             , sg_dz          = safeIdx (colDz (clmColumn st)) topIdx
+             , sg_qflx_snow_grnd = forc_snow
+             , sg_qflx_snofrz = 0.0
+             , sg_forc_t      = forc_t
+             , sg_dtime       = dtime
+             , sg_isTopLayer  = True
+             , sg_bst_tau     = 1.0e6
+             , sg_bst_kappa   = 7.0
+             , sg_bst_drdt0   = 0.0
+             }
+
+           _result = snowageGrainLayer defaultSnicarParams topLayerInp
+
+       in st
+
+-- ============================================================================
+-- Driver Init adapter
+-- ============================================================================
+
+drvInitStep :: PhysicsStep
+drvInitStep _cfg _ctx st =
+  let ef = clmEnergyFlux st
+      ef' = ef { eflx_soil_grnd_col = 0.0 }
+  in st { clmEnergyFlux = ef' }
+
+-- ============================================================================
+-- Soil Evaporation Resistance adapter
+-- ============================================================================
+
+soilEvapResistanceStep :: PhysicsStep
+soilEvapResistanceStep _cfg _ctx st =
+  let ws = clmWaterState st
+      col = clmColumn st
+      wdiag = clmWaterDiagBulk st
+      snl = clmSnl st
+
+      topIdx = nlevsno + snl
+      frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+      frac_h2osfc = safeIdx (wdiag_frac_h2osfc_col wdiag) 0
+
+      inp = BetaInput
+        { bi_lunType      = 1
+        , bi_colType      = 1
+        , bi_dz_top       = safeIdx (colDz col) topIdx
+        , bi_h2osoi_liq_top = safeIdx (h2osoi_liq_col ws) topIdx
+        , bi_h2osoi_ice_top = safeIdx (h2osoi_ice_col ws) topIdx
+        , bi_watsat_top   = if topIdx >= nlevsno
+                            then safeIdx (watsat col) (topIdx - nlevsno)
+                            else 1.0
+        , bi_watfc_top    = if topIdx >= nlevsno
+                            then safeIdx (watsat col) (topIdx - nlevsno) * 0.5
+                            else 0.5
+        , bi_frac_sno     = frac_sno
+        , bi_frac_h2osfc  = frac_h2osfc
+        }
+
+      result = calcBetaLeePielke1992 inp
+
+      ss = clmSoilState st
+      ss' = ss { sstate_soilbeta_col = VU.singleton (br_soilbeta result) }
+
+  in st { clmSoilState = ss' }
+
+-- ============================================================================
+-- Water Table adapter
+-- ============================================================================
+
+waterTableStep :: PhysicsStep
+waterTableStep _cfg ctx st =
+  let dtime = tcDtime ctx
+      ws = clmWaterState st
+      col = clmColumn st
+      ss = clmSoilState st
+      temp = clmTemp st
+      sh = clmSoilHydro st
+
+      watsat_v = if VU.null (sstate_watsat_col ss)
+                 then watsat col else sstate_watsat_col ss
+      bsw_v = if VU.null (sstate_bsw_col ss)
+               then bsw col else sstate_bsw_col ss
+      sucsat_v = if VU.null (sstate_sucsat_col ss)
+                 then sucsat col else sstate_sucsat_col ss
+
+      eff_por = VU.generate nlevsoi $ \j ->
+        let ws_j = safeIdx watsat_v j
+            ice_j = safeIdx (h2osoi_ice_col ws) (j + nlevsno)
+            dz_j = safeIdx (colDz col) (j + nlevsno)
+        in max 0.01 (ws_j - ice_j / (denice * dz_j))
+
+      z_soil = VU.slice nlevsno nlevgrnd (colZ col)
+      zi_soil = VU.slice nlevsno (nlevgrnd + 1) (colZi col)
+      dz_soil = VU.slice nlevsno nlevgrnd (colDz col)
+
+      qcharge = 0.0
+      zwt_in = 5.0
+      wa_in = 0.0
+
+      result = waterTable defaultSoilHydroParams
+                 dtime qcharge zwt_in wa_in
+                 watsat_v bsw_v sucsat_v eff_por
+                 z_soil zi_soil dz_soil
+                 (h2osoi_liq_col ws) (h2osoi_ice_col ws) (t_soisno_col temp)
+
+  in st
+
+-- ============================================================================
+-- Phenology adapter (SP mode: maintain current LAI)
+-- ============================================================================
+
+phenologyStep :: PhysicsStep
+phenologyStep _cfg _ctx st =
+  let cs = clmCanopyState st
+      wdiag = clmWaterDiagBulk st
+
+      frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+      snow_depth = safeIdx (wdiag_snow_depth_col wdiag) 0
+
+      elai_v = cstate_elai_patch cs
+      esai_v = cstate_esai_patch cs
+
+      frac_veg = VU.generate (VU.length elai_v) $ \p ->
+        let vai = safeIdx elai_v p + safeIdx esai_v p
+        in if vai > 0.05 then 1 else 0
+
+      cs' = cs { cstate_frac_veg_nosno_alb_patch = frac_veg }
+
+  in st { clmCanopyState = cs' }
+
+-- ============================================================================
+-- Urban Fluxes adapter (skip for non-urban columns)
+-- ============================================================================
+
+urbanFluxesStep :: PhysicsStep
+urbanFluxesStep _cfg _ctx st = st
+
+-- ============================================================================
+-- Lake Temperature adapter
+-- ============================================================================
+
+lakeTemperatureStep :: PhysicsStep
+lakeTemperatureStep _cfg _ctx st =
+  let col = clmColumn st
+  in if lakedepth col <= 0.0
      then st
      else st
