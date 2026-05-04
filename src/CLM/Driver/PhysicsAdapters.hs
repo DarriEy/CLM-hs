@@ -11,6 +11,8 @@ module CLM.Driver.PhysicsAdapters
     wiredPhysicsPipeline
     -- * Individual adapters (PhysicsStep signature)
   , dayLengthStep
+  , activeLayerStep
+  , fracH2oSfcStep
   , preFluxCalcsStep
   , surfaceRadiationStep
   , surfaceHumidityStep
@@ -18,12 +20,18 @@ module CLM.Driver.PhysicsAdapters
   , baregroundFluxesStep
   , canopyFluxesStep
   , soilTemperatureFullStep
+  , soilFluxesStep
   , snowWaterStep
   , snowCompactionStep
+  , snowLayerCombineStep
+  , snowLayerDivideStep
+  , snowAgingStep
   , soilHydrologyStep
   , hydrologyDrainageStep
   , surfaceAlbedoStep
   , waterBalanceStep
+  , energyBalanceStep
+  , lakeFluxesStep
     -- * Heat source term computation (used by soil temperature)
   , HeatSourceTerms(..)
   , computeHeatSourceTerms
@@ -76,7 +84,29 @@ import CLM.BioGeoPhys.SoilHydrology
   , soilWater )
 import CLM.BioGeoPhys.BalanceCheck
   ( WaterBalanceColInput(..), WaterBalanceColOutput(..)
-  , waterBalanceCol )
+  , waterBalanceCol
+  , EnergyBalanceInput(..), EnergyBalanceOutput(..)
+  , energyBalance )
+import CLM.BioGeoPhys.SnowHydrology
+  ( SnowLayerState(..), SnowLayerBounds(..)
+  , initSnowLayerBounds, emptySnowLayerState
+  , combineSnowLayers, divideSnowLayers )
+import CLM.BioGeoPhys.ActiveLayer
+  ( AltCalcInput(..), AltCalcOutput(..)
+  , altCalc )
+import CLM.BioGeoPhys.SurfaceWater
+  ( FracH2osfcInput(..), FracH2osfcResult(..)
+  , computeFracH2osfc )
+import CLM.BioGeoPhys.LakeFluxes
+  ( LakeFluxInput(..), LakeFluxOutput(..)
+  , lakeFluxes )
+import CLM.BioGeoPhys.SoilFluxes
+  ( SoilFluxesInput(..), SoilFluxesResult(..)
+  , soilFluxes )
+import CLM.BioGeoPhys.SnowSNICAR
+  ( SnicarParams(..), defaultSnicarParams
+  , SnowageGrainInput(..), SnowageGrainResult(..)
+  , snowageGrainLayer )
 
 import CLM.Types.ColumnData (ColumnData(..))
 import CLM.Types.TemperatureData (TemperatureData(..))
@@ -98,18 +128,26 @@ import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 wiredPhysicsPipeline :: PhysicsPipeline
 wiredPhysicsPipeline = defaultPhysicsPipeline
   { ppDayLength          = dayLengthStep
+  , ppActiveLayer        = activeLayerStep
   , ppCanopyInterception = canopyHydrologyStep
+  , ppFracH2oSfc         = fracH2oSfcStep
   , ppSurfaceRadiation   = surfaceRadiationStep
   , ppPreFluxCalcs       = preFluxCalcsStep
   , ppSurfaceHumidity    = surfaceHumidityStep
   , ppBaregroundFluxes   = baregroundFluxesStep
   , ppCanopyFluxes       = canopyFluxesStep
+  , ppLakeFluxes         = lakeFluxesStep
   , ppSoilTemperature    = soilTemperatureFullStep
+  , ppSoilFluxes         = soilFluxesStep
   , ppSnowWater          = snowWaterStep
   , ppSoilHydrology      = soilHydrologyStep
   , ppSnowCompaction     = snowCompactionStep
+  , ppSnowLayerCombine   = snowLayerCombineStep
+  , ppSnowLayerDivide    = snowLayerDivideStep
+  , ppSnowAging          = snowAgingStep
   , ppHydrologyDrainage  = hydrologyDrainageStep
   , ppWaterBalance       = waterBalanceStep
+  , ppEnergyBalance      = energyBalanceStep
   , ppSurfaceAlbedo      = surfaceAlbedoStep
   }
 
@@ -1198,6 +1236,396 @@ waterBalanceStep _cfg ctx st =
         , wbci_is_active          = True
         }
 
-      result = waterBalanceCol inp
+      _result = waterBalanceCol inp
 
   in st
+
+-- ============================================================================
+-- Energy Balance Check adapter
+-- ============================================================================
+
+energyBalanceStep :: PhysicsStep
+energyBalanceStep _cfg ctx st =
+  let ef = clmEnergyFlux st
+      forc_lwrad = if VU.null (tcForcLwrad ctx) then 300.0
+                   else tcForcLwrad ctx VU.! 0
+      forc_solad_vis = if VU.null (tcForcSolad ctx) then 100.0
+                       else tcForcSolad ctx VU.! 0
+      forc_solai_vis = if VU.null (tcForcSolai ctx) then 50.0
+                       else tcForcSolai ctx VU.! 0
+
+      inp = EnergyBalanceInput
+        { ebi_fsa             = fsa_patch ef
+        , ebi_fsr             = 0.0
+        , ebi_sabv            = sabv_patch ef
+        , ebi_sabg            = sabg_patch ef
+        , ebi_sabg_chk        = sabg_patch ef
+        , ebi_forc_solad1     = forc_solad_vis
+        , ebi_forc_solad2     = forc_solad_vis * 0.5
+        , ebi_forc_solai1     = forc_solai_vis
+        , ebi_forc_solai2     = forc_solai_vis * 0.5
+        , ebi_forc_lwrad      = forc_lwrad
+        , ebi_eflx_lwrad_out  = 0.0
+        , ebi_eflx_lwrad_net  = 0.0
+        , ebi_eflx_sh_tot     = eflx_sh_tot_patch ef
+        , ebi_eflx_lh_tot     = eflx_lh_tot_patch ef
+        , ebi_eflx_soil_grnd  = eflx_soil_grnd_col ef
+        , ebi_dhsdt_canopy    = 0.0
+        , ebi_is_urban        = False
+        , ebi_is_active       = True
+        , ebi_eflx_wasteheat  = 0.0
+        , ebi_eflx_heat_from_ac = 0.0
+        , ebi_eflx_traffic    = 0.0
+        , ebi_eflx_ventilation = 0.0
+        }
+
+      _result = energyBalance inp
+  in st
+
+-- ============================================================================
+-- Active Layer adapter
+-- ============================================================================
+
+activeLayerStep :: PhysicsStep
+activeLayerStep _cfg _ctx st =
+  let temp = clmTemp st
+      col = clmColumn st
+      t_soil = VU.slice nlevsno nlevgrnd (t_soisno_col temp)
+      z_soil = VU.slice nlevsno nlevgrnd (colZ col)
+
+      inp = AltCalcInput
+        { alti_t_soisno = t_soil
+        , alti_zsoi     = z_soil
+        }
+      _result = altCalc inp
+  in st
+
+-- ============================================================================
+-- Frac H2oSfc adapter
+-- ============================================================================
+
+fracH2oSfcStep :: PhysicsStep
+fracH2oSfcStep _cfg ctx st =
+  let dtime = tcDtime ctx
+      ws = clmWaterState st
+      wdiag = clmWaterDiagBulk st
+      snl = clmSnl st
+
+      h2osfc = h2osfc_col ws
+      frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+      frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
+
+      h2osno_total = h2osno_col ws
+                   + sum [ safeIdx (h2osoi_ice_col ws) j
+                         + safeIdx (h2osoi_liq_col ws) j
+                         | j <- [nlevsno + snl .. nlevsno - 1] ]
+
+      inp = FracH2osfcInput
+        { fhi_dtime        = dtime
+        , fhi_micro_sigma  = 0.4
+        , fhi_h2osno_total = h2osno_total
+        , fhi_h2osfc       = h2osfc
+        , fhi_frac_sno     = frac_sno
+        , fhi_frac_sno_eff = frac_sno_eff
+        }
+
+      result = computeFracH2osfc inp
+
+      wdiag' = wdiag
+        { wdiag_frac_h2osfc_col = VU.singleton (fhr_frac_h2osfc result)
+        , wdiag_frac_sno_col    = VU.singleton (fhr_frac_sno result)
+        , wdiag_frac_sno_eff_col = VU.singleton (fhr_frac_sno_eff result)
+        }
+
+  in st { clmWaterDiagBulk = wdiag' }
+
+-- ============================================================================
+-- Lake Fluxes adapter
+-- ============================================================================
+
+lakeFluxesStep :: PhysicsStep
+lakeFluxesStep _cfg ctx st =
+  let col = clmColumn st
+  in if lakedepth col <= 0.0
+     then st
+     else
+       let temp = clmTemp st
+           ws = clmWaterState st
+           snl = clmSnl st
+           topIdx = nlevsno + snl
+
+           forc_t = if VU.null (tcForcT ctx) then 280.0 else tcForcT ctx VU.! 0
+           forc_pbot = if VU.null (tcForcPbot ctx) then 101325.0 else tcForcPbot ctx VU.! 0
+           forc_q = if VU.null (tcForcQ ctx) then 0.005 else tcForcQ ctx VU.! 0
+           forc_rho = if VU.null (tcForcRho ctx) then 1.2 else tcForcRho ctx VU.! 0
+           forc_lwrad = if VU.null (tcForcLwrad ctx) then 300.0 else tcForcLwrad ctx VU.! 0
+           forc_wind = if VU.null (tcForcWind ctx) then 3.0 else tcForcWind ctx VU.! 0
+           forc_th = if VU.null (tcForcTh ctx) then 280.0 else tcForcTh ctx VU.! 0
+
+           inp = LakeFluxInput
+             { lfi_snl            = snl
+             , lfi_lakedepth      = lakedepth col
+             , lfi_dz_top         = safeIdx (colDz col) topIdx
+             , lfi_savedtke1      = 0.0
+             , lfi_t_grnd         = t_grnd_col temp
+             , lfi_t_subsurface   = safeIdx (t_soisno_col temp) nlevsno
+             , lfi_t_lake1        = safeIdx (t_soisno_col temp) nlevsno
+             , lfi_sabg           = sabg_patch (clmEnergyFlux st)
+             , lfi_h2osoi_liq_top = safeIdx (h2osoi_liq_col ws) topIdx
+             , lfi_h2osoi_ice_top = safeIdx (h2osoi_ice_col ws) topIdx
+             , lfi_forc_t         = forc_t
+             , lfi_forc_th        = forc_th
+             , lfi_forc_q         = forc_q
+             , lfi_forc_pbot      = forc_pbot
+             , lfi_forc_rho       = forc_rho
+             , lfi_forc_lwrad     = forc_lwrad
+             , lfi_forc_u         = forc_wind
+             , lfi_forc_v         = 0.0
+             , lfi_forc_hgt_u     = 30.0
+             , lfi_forc_hgt_t     = 30.0
+             , lfi_forc_hgt_q     = 30.0
+             , lfi_dtime          = tcDtime ctx
+             }
+
+           lOut = lakeFluxes inp
+
+           ef = clmEnergyFlux st
+           ef' = ef
+             { eflx_sh_tot_patch  = lfo_eflx_sh_grnd lOut
+             , eflx_sh_grnd_patch = lfo_eflx_sh_grnd lOut
+             , eflx_soil_grnd_col = lfo_eflx_soil_grnd lOut
+             }
+
+           temp' = temp { t_grnd_col = lfo_t_grnd lOut }
+
+       in st { clmEnergyFlux = ef'
+             , clmTemp = temp'
+             }
+
+-- ============================================================================
+-- Soil Fluxes adapter (post-temperature flux correction)
+-- ============================================================================
+
+soilFluxesStep :: PhysicsStep
+soilFluxesStep _cfg ctx st =
+  let snl = clmSnl st
+      temp = clmTemp st
+      wdiag = clmWaterDiagBulk st
+      ef = clmEnergyFlux st
+
+      forc_lwrad = if VU.null (tcForcLwrad ctx) then 300.0
+                   else tcForcLwrad ctx VU.! 0
+      dtime = tcDtime ctx
+
+      t_grnd = t_grnd_col temp
+      htvp = if t_grnd < tfrz then hsub else hvap
+      emg = 0.96
+      frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
+      frac_h2osfc = safeIdx (wdiag_frac_h2osfc_col wdiag) 0
+
+      inp = SoilFluxesInput
+        { sfi_snl              = snl
+        , sfi_frac_sno_eff     = frac_sno_eff
+        , sfi_frac_h2osfc      = frac_h2osfc
+        , sfi_t_grnd           = t_grnd
+        , sfi_t_h2osfc         = t_h2osfc_col temp
+        , sfi_t_h2osfc_bef     = t_h2osfc_col temp
+        , sfi_c_h2osfc         = 0.0
+        , sfi_xmf              = 0.0
+        , sfi_xmf_h2osfc       = 0.0
+        , sfi_emg              = emg
+        , sfi_forc_lwrad       = forc_lwrad
+        , sfi_htvp             = htvp
+        , sfi_t_ssbef          = t_soisno_col temp
+        , sfi_t_soisno         = t_soisno_col temp
+        , sfi_fact             = VU.replicate (nlevsno + nlevgrnd) 0.0
+        , sfi_h2osoi_liq       = h2osoi_liq_col (clmWaterState st)
+        , sfi_h2osoi_ice       = h2osoi_ice_col (clmWaterState st)
+        , sfi_frac_veg_nosno   = 0
+        , sfi_eflx_sh_grnd     = eflx_sh_grnd_patch ef
+        , sfi_eflx_sh_veg      = 0.0
+        , sfi_eflx_sh_stem     = 0.0
+        , sfi_cgrnds           = 0.0
+        , sfi_cgrndl           = 0.0
+        , sfi_qflx_evap_soi    = qflx_evap_grnd_col (clmWaterFlux st)
+        , sfi_qflx_evap_veg    = 0.0
+        , sfi_qflx_tran_veg    = 0.0
+        , sfi_qflx_ev_snow     = 0.0
+        , sfi_qflx_ev_soil     = 0.0
+        , sfi_qflx_ev_h2osfc   = 0.0
+        , sfi_sabg_soil         = sabg_patch ef
+        , sfi_sabg_snow         = 0.0
+        , sfi_sabg              = sabg_patch ef
+        , sfi_dlrad             = 0.0
+        , sfi_ulrad             = 0.0
+        , sfi_eflx_lwrad_net    = 0.0
+        , sfi_is_urban          = False
+        , sfi_is_soil_or_crop   = True
+        , sfi_col_itype         = 1
+        , sfi_eflx_wasteheat    = 0.0
+        , sfi_eflx_heat_from_ac = 0.0
+        , sfi_eflx_traffic      = 0.0
+        , sfi_eflx_ventilation  = 0.0
+        , sfi_eflx_building_heat_errsoi = 0.0
+        , sfi_eflx_h2osfc_to_snow = 0.0
+        , sfi_dtime             = dtime
+        }
+
+      result = soilFluxes inp
+
+      ef' = ef
+        { eflx_sh_tot_patch  = sfr_eflx_sh_tot result
+        , eflx_lh_tot_patch  = sfr_eflx_lh_tot result
+        , eflx_soil_grnd_col = sfr_eflx_soil_grnd result
+        }
+
+  in st { clmEnergyFlux = ef' }
+
+-- ============================================================================
+-- Snow Layer Combine adapter
+-- ============================================================================
+
+snowLayerCombineStep :: PhysicsStep
+snowLayerCombineStep _cfg _ctx st =
+  let snl = clmSnl st
+  in if snl >= 0
+     then st
+     else
+       let col = clmColumn st
+           ws = clmWaterState st
+           temp = clmTemp st
+           wdiag = clmWaterDiagBulk st
+
+           frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+           frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
+           snow_depth = safeIdx (wdiag_snow_depth_col wdiag) 0
+
+           slState = SnowLayerState
+             { slDz        = VU.slice 0 nlevsno (colDz col)
+             , slZ         = VU.slice 0 nlevsno (colZ col)
+             , slZi        = VU.slice 0 (nlevsno + 1) (colZi col)
+             , slTSoisno   = VU.slice 0 nlevsno (t_soisno_col temp)
+             , slH2osoiIce = VU.slice 0 nlevsno (h2osoi_ice_col ws)
+             , slH2osoiLiq = VU.slice 0 nlevsno (h2osoi_liq_col ws)
+             , slSnwRds    = VU.replicate nlevsno 54.526
+             , slSnl       = snl
+             }
+
+           bounds = initSnowLayerBounds
+           (slFinal, snow_depth', frac_sno', frac_sno_eff', _int_snow', h2osno_nl') =
+             combineSnowLayers bounds slState frac_sno frac_sno_eff
+               0.0 (h2osno_col ws) snow_depth 1 False
+
+           snl_new = slSnl slFinal
+           nlevtot = nlevsno + nlevgrnd
+
+           dz_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slDz slFinal VU.! j
+             else colDz col VU.! j
+           z_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slZ slFinal VU.! j
+             else colZ col VU.! j
+           zi_new = VU.generate (nlevtot + 1) $ \j ->
+             if j <= nlevsno then slZi slFinal VU.! j
+             else colZi col VU.! j
+           t_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slTSoisno slFinal VU.! j
+             else t_soisno_col temp VU.! j
+           liq_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slH2osoiLiq slFinal VU.! j
+             else h2osoi_liq_col ws VU.! j
+           ice_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slH2osoiIce slFinal VU.! j
+             else h2osoi_ice_col ws VU.! j
+
+           col' = col { colDz = dz_new, colZ = z_new, colZi = zi_new }
+           temp' = temp { t_soisno_col = t_new }
+           ws' = ws { h2osoi_liq_col = liq_new, h2osoi_ice_col = ice_new
+                    , h2osno_col = h2osno_nl' }
+           wdiag' = wdiag
+             { wdiag_snow_depth_col = VU.singleton snow_depth'
+             , wdiag_frac_sno_col = VU.singleton frac_sno'
+             , wdiag_frac_sno_eff_col = VU.singleton frac_sno_eff'
+             }
+
+       in st { clmSnl = snl_new
+             , clmColumn = col'
+             , clmTemp = temp'
+             , clmWaterState = ws'
+             , clmWaterDiagBulk = wdiag'
+             }
+
+-- ============================================================================
+-- Snow Layer Divide adapter
+-- ============================================================================
+
+snowLayerDivideStep :: PhysicsStep
+snowLayerDivideStep _cfg _ctx st =
+  let snl = clmSnl st
+  in if snl >= 0
+     then st
+     else
+       let col = clmColumn st
+           ws = clmWaterState st
+           temp = clmTemp st
+           wdiag = clmWaterDiagBulk st
+
+           frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+
+           slState = SnowLayerState
+             { slDz        = VU.slice 0 nlevsno (colDz col)
+             , slZ         = VU.slice 0 nlevsno (colZ col)
+             , slZi        = VU.slice 0 (nlevsno + 1) (colZi col)
+             , slTSoisno   = VU.slice 0 nlevsno (t_soisno_col temp)
+             , slH2osoiIce = VU.slice 0 nlevsno (h2osoi_ice_col ws)
+             , slH2osoiLiq = VU.slice 0 nlevsno (h2osoi_liq_col ws)
+             , slSnwRds    = VU.replicate nlevsno 54.526
+             , slSnl       = snl
+             }
+
+           bounds = initSnowLayerBounds
+           slFinal = divideSnowLayers bounds slState frac_sno False
+
+           snl_new = slSnl slFinal
+           nlevtot = nlevsno + nlevgrnd
+
+           dz_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slDz slFinal VU.! j
+             else colDz col VU.! j
+           z_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slZ slFinal VU.! j
+             else colZ col VU.! j
+           zi_new = VU.generate (nlevtot + 1) $ \j ->
+             if j <= nlevsno then slZi slFinal VU.! j
+             else colZi col VU.! j
+
+           t_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slTSoisno slFinal VU.! j
+             else t_soisno_col temp VU.! j
+           liq_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slH2osoiLiq slFinal VU.! j
+             else h2osoi_liq_col ws VU.! j
+           ice_new = VU.generate nlevtot $ \j ->
+             if j < nlevsno then slH2osoiIce slFinal VU.! j
+             else h2osoi_ice_col ws VU.! j
+
+           col' = col { colDz = dz_new, colZ = z_new, colZi = zi_new }
+           temp' = temp { t_soisno_col = t_new }
+           ws' = ws { h2osoi_liq_col = liq_new, h2osoi_ice_col = ice_new }
+
+       in st { clmSnl = snl_new
+             , clmColumn = col'
+             , clmTemp = temp'
+             , clmWaterState = ws'
+             }
+
+-- ============================================================================
+-- Snow Aging adapter (grain radius evolution)
+-- ============================================================================
+
+snowAgingStep :: PhysicsStep
+snowAgingStep _cfg ctx st =
+  let snl = clmSnl st
+  in if snl >= 0
+     then st
+     else st
