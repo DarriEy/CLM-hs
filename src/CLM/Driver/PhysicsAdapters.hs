@@ -734,16 +734,20 @@ soilTemperatureFullStep _cfg ctx st =
 
       stOutput = solveSoilTemperature stInput
 
-      temp' = temp
+      outputOK = not (isNaN (sto_t_grnd stOutput))
+
+      temp' = if outputOK then temp
         { t_soisno_col = sto_t_soisno stOutput
         , t_grnd_col   = sto_t_grnd stOutput
         , t_h2osfc_col = sto_t_h2osfc stOutput
         }
+        else temp
 
-      ws' = ws
+      ws' = if outputOK then ws
         { h2osoi_liq_col = sto_h2osoi_liq stOutput
         , h2osoi_ice_col = sto_h2osoi_ice stOutput
         }
+        else ws
 
   in st { clmTemp = temp'
         , clmWaterState = ws'
@@ -1371,8 +1375,6 @@ fracH2oSfcStep _cfg ctx st =
 
       wdiag' = wdiag
         { wdiag_frac_h2osfc_col = VU.singleton (fhr_frac_h2osfc result)
-        , wdiag_frac_sno_col    = VU.singleton (fhr_frac_sno result)
-        , wdiag_frac_sno_eff_col = VU.singleton (fhr_frac_sno_eff result)
         }
 
   in st { clmWaterDiagBulk = wdiag' }

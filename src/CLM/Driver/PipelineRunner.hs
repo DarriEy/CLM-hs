@@ -340,11 +340,10 @@ runPipeline cfg = do
               dayAcc' = accumDiag dayAcc st'
               isEndDay = step `mod` spd == 0
 
-          when (isNaN (t_grnd_col (clmTemp st')) &&
-                not (isNaN (t_grnd_col (clmTemp st)))) $
-            putStrLn $ "  *** NaN at step " ++ show step
-                    ++ ": snl=" ++ show (clmSnl st')
-                    ++ " T_before=" ++ show (t_grnd_col (clmTemp st))
+          when (t_grnd_col (clmTemp st') > 400.0 ||
+                t_grnd_col (clmTemp st') < 100.0) $
+            putStrLn $ "  *** WARNING step " ++ show step
+                    ++ ": T_GRND=" ++ show (t_grnd_col (clmTemp st'))
 
           if isEndDay
             then do
