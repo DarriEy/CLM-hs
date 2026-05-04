@@ -216,4 +216,5 @@ test-suite clm-hs-test
                      , vector
                      , hspec
                      , QuickCheck
+                     , directory
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N

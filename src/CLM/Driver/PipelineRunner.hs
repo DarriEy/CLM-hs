@@ -261,6 +261,7 @@ buildTimestepContext fr nstep dtime =
     , tcForcSolad     = VU.fromList [forc_solad_vis, forc_solad_nir]
     , tcForcSolai     = VU.fromList [forc_solai_vis, forc_solai_nir]
     , tcForcWind      = VU.singleton forc_wind
+    , tcForcHgt       = 30.0
     }
 
 -- ============================================================================

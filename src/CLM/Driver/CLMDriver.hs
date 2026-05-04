@@ -132,6 +132,7 @@ data TimestepContext = TimestepContext
   , tcForcSolad      :: !(VU.Vector Double)  -- ^ Direct solar by band [W/m^2]
   , tcForcSolai      :: !(VU.Vector Double)  -- ^ Diffuse solar by band [W/m^2]
   , tcForcWind       :: !(VU.Vector Double)  -- ^ Wind speed [m/s]
+  , tcForcHgt        :: !Double              -- ^ Forcing reference height [m]
   } deriving (Show)
 
 defaultTimestepContext :: TimestepContext
@@ -157,6 +158,7 @@ defaultTimestepContext = TimestepContext
   , tcForcSolad     = VU.empty
   , tcForcSolai     = VU.empty
   , tcForcWind      = VU.empty
+  , tcForcHgt       = 30.0
   }
 
 -- ============================================================================
@@ -353,10 +355,12 @@ clmDrvInit _cfg _ctx st = st
 --
 -- Corresponds to clm_drv_patch2col in clm_driver.F90.
 clmDrvPatch2Col :: CLMState -> CLMState
-clmDrvPatch2Col st = st
-  -- In full implementation: weighted average of patch fluxes → column fluxes
-  -- for qflx_ev_snow, qflx_ev_soil, qflx_ev_h2osfc,
-  -- qflx_evap_soi, qflx_evap_tot, qflx_tran_veg, etc.
+clmDrvPatch2Col st =
+  let ef = clmEnergyFlux st
+      wf = clmWaterFlux st
+      ef' = ef { eflx_soil_grnd_col = eflx_sh_grnd_patch ef }
+      wf' = wf { qflx_evap_grnd_col = qflx_evap_tot_patch wf }
+  in st { clmEnergyFlux = ef', clmWaterFlux = wf' }
 
 -- ============================================================================
 -- Main driver: clm_drv

@@ -1,9 +1,12 @@
 import Test.Hspec
 import qualified Data.Vector.Unboxed as VU
+import System.Directory (doesDirectoryExist)
 
 import CLM.Constants.PhysicalConstants
 import CLM.Infrastructure.Tridiagonal (tridiagonalSolve)
 import CLM.Infrastructure.Filters (maskToIndices)
+import CLM.Driver.PipelineRunner
+  ( PipelineConfig(..), defaultPipelineConfig, runPipeline, DailyDiag(..) )
 
 main :: IO ()
 main = hspec $ do
@@ -53,3 +56,43 @@ main = hspec $ do
       let mask = VU.fromList [False, False, False]
           idxs = maskToIndices mask
       VU.length idxs `shouldBe` 0
+
+  describe "Pipeline integration (vs Julia reference)" $ do
+    it "runs 10 days without crashing" $ do
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      if not hasData
+        then pendingWith "test/data not available"
+        else do
+          dailies <- runPipeline defaultPipelineConfig
+            { pcDataDir = "test/data"
+            , pcNdays   = 10
+            , pcVerbose = False
+            }
+          length dailies `shouldBe` 10
+
+    it "Day 1 T_GRND within 15K of Julia reference (259.8K)" $ do
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      if not hasData
+        then pendingWith "test/data not available"
+        else do
+          dailies <- runPipeline defaultPipelineConfig
+            { pcDataDir = "test/data"
+            , pcNdays   = 1
+            , pcVerbose = False
+            }
+          let tg = dd_t_grnd (head dailies)
+          -- Julia Day 1: T_GRND = 259.81 K
+          abs (tg - 259.81) `shouldSatisfy` (< 15.0)
+
+    it "T_GRND stays in physical range (200-320K) for 30 days" $ do
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      if not hasData
+        then pendingWith "test/data not available"
+        else do
+          dailies <- runPipeline defaultPipelineConfig
+            { pcDataDir = "test/data"
+            , pcNdays   = 30
+            , pcVerbose = False
+            }
+          let tgs = map dd_t_grnd dailies
+          all (\t -> t > 200.0 && t < 320.0) tgs `shouldBe` True

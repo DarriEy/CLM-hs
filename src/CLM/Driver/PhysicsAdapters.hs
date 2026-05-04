@@ -340,7 +340,7 @@ baregroundFluxesStep _cfg ctx st =
       forc_rho = if VU.null (tcForcRho ctx) then 1.2 else tcForcRho ctx VU.! 0
       forc_t = if VU.null (tcForcT ctx) then 280.0 else tcForcT ctx VU.! 0
       forc_wind = if VU.null (tcForcWind ctx) then 3.0 else tcForcWind ctx VU.! 0
-      forc_hgt = 30.0
+      forc_hgt = tcForcHgt ctx
 
       htvp = if t_grnd < tfrz then hsub else hvap
 
@@ -455,7 +455,7 @@ canopyFluxesStep _cfg ctx st =
       forc_t = if VU.null (tcForcT ctx) then 280.0 else tcForcT ctx VU.! 0
       forc_lwrad = if VU.null (tcForcLwrad ctx) then 300.0 else tcForcLwrad ctx VU.! 0
       forc_wind = if VU.null (tcForcWind ctx) then 3.0 else tcForcWind ctx VU.! 0
-      forc_hgt = 30.0
+      forc_hgt = tcForcHgt ctx
       dtime = tcDtime ctx
 
       htvp = if t_grnd < tfrz then hsub else hvap
@@ -485,7 +485,7 @@ canopyFluxesStep _cfg ctx st =
       displa = safeIdx (cstate_displa_patch cs) 0
       displa' = if displa > 0.0 then displa else 0.67 * htop
 
-      emg = 0.96
+      emg = 0.96 :: Double
       avmuir = 1.0
       emv = 1.0 - exp (-(elai + esai) / avmuir)
 
@@ -552,8 +552,8 @@ canopyFluxesStep _cfg ctx st =
              , cfi_fdry           = fdry
              , cfi_liqcan         = 0.0
              , cfi_snocan         = 0.0
-             , cfi_rssun          = 200.0
-             , cfi_rssha          = 200.0
+             , cfi_rssun          = 200.0  -- TODO: from Photosynthesis module
+             , cfi_rssha          = 200.0  -- TODO: from Photosynthesis module
              , cfi_laisun         = laisun'
              , cfi_laisha         = laisha'
              , cfi_btran          = 1.0
@@ -676,7 +676,7 @@ soilTemperatureFullStep _cfg ctx st =
       forc_lwrad = if VU.null (tcForcLwrad ctx) then 300.0
                    else tcForcLwrad ctx VU.! 0
       htvp = if t_grnd < tfrz then hsub else hvap
-      emg = 0.96
+      emg = 0.96 :: Double
 
       frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
       frac_h2osfc = safeIdx (wdiag_frac_h2osfc_col wdiag) 0
@@ -997,9 +997,9 @@ preFluxCalcsStep _cfg ctx st =
       forc_t = if VU.null (tcForcT ctx) then 280.0 else tcForcT ctx VU.! 0
       forc_q = if VU.null (tcForcQ ctx) then 0.005 else tcForcQ ctx VU.! 0
       forc_th = if VU.null (tcForcTh ctx) then 280.0 else tcForcTh ctx VU.! 0
-      forc_hgt = 30.0
+      forc_hgt = tcForcHgt ctx
 
-      emg = 0.96
+      emg = 0.96 :: Double
       htvp = if t_grnd < tfrz then hsub else hvap
       thm = forc_t + 0.0098 * forc_hgt
       thv = forc_th * (1.0 + 0.61 * forc_q)
@@ -1452,7 +1452,7 @@ soilFluxesStep _cfg ctx st =
 
       t_grnd = t_grnd_col temp
       htvp = if t_grnd < tfrz then hsub else hvap
-      emg = 0.96
+      emg = 0.96 :: Double
       frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
       frac_h2osfc = safeIdx (wdiag_frac_h2osfc_col wdiag) 0
 
