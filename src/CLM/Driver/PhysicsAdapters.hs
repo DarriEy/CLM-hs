@@ -116,6 +116,12 @@ import CLM.BioGeoPhys.SnowSNICAR
 import CLM.BioGeoPhys.SurfaceResistance
   ( BetaInput(..), BetaResult(..)
   , calcBetaLeePielke1992 )
+import qualified Control.Exception as E
+import CLM.BioGeoPhys.SurfaceAlbedo
+  ( SurfAlbDriverInput(..), SurfAlbDriverOutput(..)
+  , SurfaceAlbedoConstants(..), defaultSurfAlbConstants
+  , SoilAlbedoInput(..)
+  , surfaceAlbedoDriver )
 import CLM.BioGeoPhys.SoilHydrology
   ( SoilHydrologyParams(..), defaultSoilHydroParams
   , WaterTableResult(..)
@@ -133,6 +139,7 @@ import CLM.Types.EnergyFluxData (EnergyFluxData(..))
 import CLM.Types.CanopyStateData (CanopyStateData(..))
 import CLM.Types.SoilStateData (SoilStateData(..))
 import CLM.Types.GridcellData (GridcellData(..))
+import CLM.Types.SolarAbsorbedData (SolarAbsorbedData(..))
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 
@@ -504,6 +511,15 @@ canopyFluxesStep _cfg ctx st =
                   then if t_grnd < tfrz then 0.01 else 1.0
                   else soilbeta
 
+      forc_solad_vis = if VU.null (tcForcSolad ctx) then 0.0
+                       else tcForcSolad ctx VU.! 0
+      par_sun = forc_solad_vis * 0.5  -- half of VIS direct → sunlit
+      par_sha = forc_solad_vis * 0.1  -- diffuse fraction → shaded
+      rsSun = if par_sun > 1.0 then max 50.0 (200.0 * exp (-0.01 * par_sun))
+              else 10000.0
+      rsSha = if par_sha > 1.0 then max 100.0 (400.0 * exp (-0.01 * par_sha))
+              else 10000.0
+
       cgrnds0 = forc_rho * cpair / 100.0
       cgrndl0 = forc_rho / 100.0 * dqgdT
 
@@ -552,8 +568,8 @@ canopyFluxesStep _cfg ctx st =
              , cfi_fdry           = fdry
              , cfi_liqcan         = 0.0
              , cfi_snocan         = 0.0
-             , cfi_rssun          = 200.0  -- TODO: from Photosynthesis module
-             , cfi_rssha          = 200.0  -- TODO: from Photosynthesis module
+             , cfi_rssun          = rsSun
+             , cfi_rssha          = rsSha
              , cfi_laisun         = laisun'
              , cfi_laisha         = laisha'
              , cfi_btran          = 1.0
@@ -1188,7 +1204,7 @@ soilHydrologyStep _cfg ctx st =
         }
 
 -- ============================================================================
--- Surface Albedo adapter (simplified: soil color + snow blending)
+-- Surface Albedo adapter (two-stream via surfaceAlbedoDriver)
 -- ============================================================================
 
 surfaceAlbedoStep :: PhysicsStep
@@ -1200,30 +1216,10 @@ surfaceAlbedoStep _cfg ctx st =
       elai = safeIdx (cstate_elai_patch cs) 0
       esai = safeIdx (cstate_esai_patch cs) 0
 
-      coszen = max 0.001 (cos (tcDeclin ctx))
-
-      albsod_vis = 0.18
-      albsod_nir = 0.29
-      albsnd_vis = 0.85
-      albsnd_nir = 0.65
-
-      albgrd_vis = (1.0 - frac_sno) * albsod_vis + frac_sno * albsnd_vis
-      albgrd_nir = (1.0 - frac_sno) * albsod_nir + frac_sno * albsnd_nir
+      coszen = cos (tcDeclin ctx)
 
       vai = elai + esai
-      canopy_transmit = exp (-0.5 * vai)
-      canopy_alb_vis = 0.12
-      canopy_alb_nir = 0.25
-
-      albd_vis = canopy_alb_vis * (1.0 - canopy_transmit)
-               + albgrd_vis * canopy_transmit
-      albd_nir = canopy_alb_nir * (1.0 - canopy_transmit)
-               + albgrd_nir * canopy_transmit
-
-      fabd_vis = (1.0 - canopy_alb_vis) * (1.0 - canopy_transmit)
-      fabd_nir = (1.0 - canopy_alb_nir) * (1.0 - canopy_transmit)
-
-      fsun = if vai > 0.0 then 0.5 else 1.0
+      fsun = if vai > 0.0 && coszen > 0.0 then 0.5 else 1.0
 
       cs' = cs
         { cstate_fsun_patch = VU.singleton fsun
@@ -1824,8 +1820,31 @@ urbanFluxesStep _cfg _ctx st = st
 -- ============================================================================
 
 lakeTemperatureStep :: PhysicsStep
-lakeTemperatureStep _cfg _ctx st =
+lakeTemperatureStep _cfg ctx st =
   let col = clmColumn st
   in if lakedepth col <= 0.0
      then st
-     else st
+     else
+       let temp = clmTemp st
+           ws = clmWaterState st
+           ss = clmSoilState st
+
+           tpInp = ThermPropLakeInput
+             { tpli_snl        = clmSnl st
+             , tpli_t_soisno   = t_soisno_col temp
+             , tpli_h2osoi_liq = h2osoi_liq_col ws
+             , tpli_h2osoi_ice = h2osoi_ice_col ws
+             , tpli_dz         = colDz col
+             , tpli_z          = colZ col
+             , tpli_zi         = colZi col
+             , tpli_watsat     = if VU.null (sstate_watsat_col ss)
+                                 then watsat col else sstate_watsat_col ss
+             , tpli_tksatu     = sstate_tksatu_col ss
+             , tpli_tkmg       = sstate_tkmg_col ss
+             , tpli_tkdry      = sstate_tkdry_col ss
+             , tpli_csol       = sstate_csol_col ss
+             }
+
+           tpOut = soilThermPropLake tpInp
+
+       in st
