@@ -10,6 +10,9 @@ module CLM.Driver.PhysicsAdapters
   ( -- * Wired pipeline
     wiredPhysicsPipeline
     -- * Individual adapters (PhysicsStep signature)
+  , dayLengthStep
+  , preFluxCalcsStep
+  , surfaceRadiationStep
   , surfaceHumidityStep
   , canopyHydrologyStep
   , baregroundFluxesStep
@@ -17,7 +20,10 @@ module CLM.Driver.PhysicsAdapters
   , soilTemperatureFullStep
   , snowWaterStep
   , snowCompactionStep
+  , soilHydrologyStep
   , hydrologyDrainageStep
+  , surfaceAlbedoStep
+  , waterBalanceStep
     -- * Heat source term computation (used by soil temperature)
   , HeatSourceTerms(..)
   , computeHeatSourceTerms
@@ -58,6 +64,19 @@ import CLM.BioGeoPhys.HydrologyDrainage
   ( TotalRunoffInput(..), TotalRunoffResult(..)
   , computeTotalRunoff )
 import CLM.BioGeoPhys.QSat (QSatResult(..), qsat)
+import CLM.BioGeoPhys.DayLength (daylength)
+import CLM.BioGeoPhys.SurfaceRadiation
+  ( SurfRadColumnInput(..), SurfRadPatchInput(..)
+  , SurfRadConfig(..), defaultSurfRadConfig
+  , SurfRadResult(..)
+  , surfaceRadiationPatch )
+import CLM.BioGeoPhys.SoilHydrology
+  ( SoilWaterMovementConfig(..), defaultSoilWaterConfig
+  , SoilWaterResult(..)
+  , soilWater )
+import CLM.BioGeoPhys.BalanceCheck
+  ( WaterBalanceColInput(..), WaterBalanceColOutput(..)
+  , waterBalanceCol )
 
 import CLM.Types.ColumnData (ColumnData(..))
 import CLM.Types.TemperatureData (TemperatureData(..))
@@ -78,14 +97,20 @@ import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 -- Replaces the default all-idStep pipeline.
 wiredPhysicsPipeline :: PhysicsPipeline
 wiredPhysicsPipeline = defaultPhysicsPipeline
-  { ppSurfaceHumidity   = surfaceHumidityStep
+  { ppDayLength          = dayLengthStep
   , ppCanopyInterception = canopyHydrologyStep
+  , ppSurfaceRadiation   = surfaceRadiationStep
+  , ppPreFluxCalcs       = preFluxCalcsStep
+  , ppSurfaceHumidity    = surfaceHumidityStep
   , ppBaregroundFluxes   = baregroundFluxesStep
   , ppCanopyFluxes       = canopyFluxesStep
   , ppSoilTemperature    = soilTemperatureFullStep
   , ppSnowWater          = snowWaterStep
+  , ppSoilHydrology      = soilHydrologyStep
   , ppSnowCompaction     = snowCompactionStep
   , ppHydrologyDrainage  = hydrologyDrainageStep
+  , ppWaterBalance       = waterBalanceStep
+  , ppSurfaceAlbedo      = surfaceAlbedoStep
   }
 
 -- ============================================================================
@@ -861,3 +886,318 @@ hydrologyDrainageStep _cfg _ctx st =
       result = computeTotalRunoff inp
       wf' = wf { qflx_surf_col = trr_qflx_runoff result }
   in st { clmWaterFlux = wf' }
+
+-- ============================================================================
+-- Day Length adapter
+-- ============================================================================
+
+dayLengthStep :: PhysicsStep
+dayLengthStep _cfg ctx st =
+  let grc = clmGridcell st
+      lat = if VU.null (grc_lat grc) then 0.88 else grc_lat grc VU.! 0
+      declin = tcDeclin ctx
+      dayl = case daylength lat declin of
+               Just d  -> d
+               Nothing -> 43200.0
+      maxDayl = case daylength lat (tcObliqr ctx) of
+                  Just d  -> d
+                  Nothing -> 86400.0
+      grc' = grc
+        { grc_dayl     = VU.singleton dayl
+        , grc_max_dayl = VU.singleton maxDayl
+        }
+  in st { clmGridcell = grc' }
+
+-- ============================================================================
+-- Pre-Flux Calcs adapter
+-- ============================================================================
+
+preFluxCalcsStep :: PhysicsStep
+preFluxCalcsStep _cfg ctx st =
+  let temp = clmTemp st
+      ws = clmWaterState st
+      wdiag = clmWaterDiagBulk st
+      snl = clmSnl st
+
+      t_grnd = t_grnd_col temp
+      frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
+      frac_h2osfc = safeIdx (wdiag_frac_h2osfc_col wdiag) 0
+
+      forc_t = if VU.null (tcForcT ctx) then 280.0 else tcForcT ctx VU.! 0
+      forc_q = if VU.null (tcForcQ ctx) then 0.005 else tcForcQ ctx VU.! 0
+      forc_th = if VU.null (tcForcTh ctx) then 280.0 else tcForcTh ctx VU.! 0
+      forc_hgt = 30.0
+
+      emg = 0.96
+      htvp = if t_grnd < tfrz then hsub else hvap
+      thm = forc_t + 0.0098 * forc_hgt
+      thv = forc_th * (1.0 + 0.61 * forc_q)
+
+      topLayerIdx = nlevsno + snl
+      h2osoi_liq_top = safeIdx (h2osoi_liq_col ws) topLayerIdx
+      h2osoi_ice_top = safeIdx (h2osoi_ice_col ws) topLayerIdx
+      totalWater = h2osoi_liq_top + h2osoi_ice_top
+      frac_iceold = if totalWater > 0.0
+                    then h2osoi_ice_top / totalWater
+                    else 0.0
+
+      wdiag' = wdiag
+        { wdiag_frac_iceold_col = VU.singleton frac_iceold
+        }
+
+      ss = clmSoilState st
+      soilbeta = if t_grnd < tfrz then 0.01 else 1.0
+      ss' = ss
+        { sstate_soilbeta_col = VU.singleton soilbeta
+        }
+
+  in st { clmWaterDiagBulk = wdiag'
+        , clmSoilState = ss'
+        }
+
+-- ============================================================================
+-- Surface Radiation adapter
+-- ============================================================================
+
+surfaceRadiationStep :: PhysicsStep
+surfaceRadiationStep _cfg ctx st =
+  let snl = clmSnl st
+      wdiag = clmWaterDiagBulk st
+      cs = clmCanopyState st
+
+      forc_solad_vis = if VU.null (tcForcSolad ctx) then 100.0
+                       else tcForcSolad ctx VU.! 0
+      forc_solai_vis = if VU.null (tcForcSolai ctx) then 50.0
+                       else tcForcSolai ctx VU.! 0
+      forc_solad_nir = forc_solad_vis * 0.5
+      forc_solai_nir = forc_solai_vis * 0.5
+
+      frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+      snow_depth = safeIdx (wdiag_snow_depth_col wdiag) 0
+
+      elai = safeIdx (cstate_elai_patch cs) 0
+      esai = safeIdx (cstate_esai_patch cs) 0
+
+      albsod_vis = 0.18
+      albsod_nir = 0.29
+      albsoi_vis = 0.18
+      albsoi_nir = 0.29
+      albsnd_vis = 0.85
+      albsnd_nir = 0.65
+      albsni_vis = 0.85
+      albsni_nir = 0.65
+
+      albgrd_vis = (1.0 - frac_sno) * albsod_vis + frac_sno * albsnd_vis
+      albgrd_nir = (1.0 - frac_sno) * albsod_nir + frac_sno * albsnd_nir
+      albgri_vis = (1.0 - frac_sno) * albsoi_vis + frac_sno * albsni_vis
+      albgri_nir = (1.0 - frac_sno) * albsoi_nir + frac_sno * albsni_nir
+
+      nlyr = nlevsno + 1
+      colInp = SurfRadColumnInput
+        { src_snl         = snl
+        , src_albsod      = VU.fromList [albsod_vis, albsod_nir]
+        , src_albsoi      = VU.fromList [albsoi_vis, albsoi_nir]
+        , src_albsnd_hst  = VU.fromList [albsnd_vis, albsnd_nir]
+        , src_albsni_hst  = VU.fromList [albsni_vis, albsni_nir]
+        , src_albgrd      = VU.fromList [albgrd_vis, albgrd_nir]
+        , src_albgri      = VU.fromList [albgri_vis, albgri_nir]
+        , src_flx_absdv   = VU.replicate nlyr 0.0
+        , src_flx_absdn   = VU.replicate nlyr 0.0
+        , src_flx_absiv   = VU.replicate nlyr 0.0
+        , src_flx_absin   = VU.replicate nlyr 0.0
+        , src_snow_depth  = snow_depth
+        , src_frac_sno    = frac_sno
+        }
+
+      vai = elai + esai
+      canopy_transmit = exp (-0.5 * vai)
+
+      patchInp = SurfRadPatchInput
+        { srp_lunType    = 1
+        , srp_londeg     = 0.0
+        , srp_fabd       = VU.fromList [0.4 * (1.0 - canopy_transmit),
+                                         0.3 * (1.0 - canopy_transmit)]
+        , srp_fabi       = VU.fromList [0.4 * (1.0 - canopy_transmit),
+                                         0.3 * (1.0 - canopy_transmit)]
+        , srp_ftdd       = VU.fromList [canopy_transmit, canopy_transmit]
+        , srp_ftid       = VU.fromList [canopy_transmit, canopy_transmit]
+        , srp_ftii       = VU.fromList [canopy_transmit, canopy_transmit]
+        , srp_albd       = VU.fromList [0.15, 0.25]
+        , srp_albi       = VU.fromList [0.15, 0.25]
+        , srp_forc_solad = VU.fromList [forc_solad_vis, forc_solad_nir]
+        , srp_forc_solai = VU.fromList [forc_solai_vis, forc_solai_nir]
+        }
+
+      radResult = surfaceRadiationPatch defaultSurfRadConfig colInp patchInp
+
+      ef = clmEnergyFlux st
+      ef' = ef
+        { sabg_patch = srr_sabg radResult
+        , sabv_patch = srr_sabv radResult
+        , fsa_patch  = srr_fsa radResult
+        }
+
+  in st { clmEnergyFlux = ef' }
+
+-- ============================================================================
+-- Soil Hydrology adapter (Richards equation)
+-- ============================================================================
+
+soilHydrologyStep :: PhysicsStep
+soilHydrologyStep _cfg ctx st =
+  let dtime = tcDtime ctx
+      ws = clmWaterState st
+      col = clmColumn st
+      ss = clmSoilState st
+      wf = clmWaterFlux st
+      wdiag = clmWaterDiagBulk st
+      snl = clmSnl st
+      temp = clmTemp st
+
+      forc_rain = if VU.null (tcForcRain ctx) then 0.0
+                  else tcForcRain ctx VU.! 0
+
+      h2osoi_liq = h2osoi_liq_col ws
+      h2osoi_ice = h2osoi_ice_col ws
+      t_soisno = t_soisno_col temp
+
+      watsat_v = if VU.null (sstate_watsat_col ss)
+                 then watsat col else sstate_watsat_col ss
+      bsw_v = if VU.null (sstate_bsw_col ss)
+               then bsw col else sstate_bsw_col ss
+      hksat_v = if VU.null (sstate_hksat_col ss)
+                then hksat col else sstate_hksat_col ss
+      sucsat_v = if VU.null (sstate_sucsat_col ss)
+                 then sucsat col else sstate_sucsat_col ss
+
+      dz_soil = VU.slice nlevsno nlevgrnd (colDz col)
+      z_soil = VU.slice nlevsno nlevgrnd (colZ col)
+      zi_soil = VU.slice nlevsno (nlevgrnd + 1) (colZi col)
+
+      h2osoi_liq_soil = VU.slice nlevsno nlevgrnd h2osoi_liq
+      h2osoi_ice_soil = VU.slice nlevsno nlevgrnd h2osoi_ice
+      t_soisno_soil = VU.slice nlevsno nlevgrnd t_soisno
+
+      icefrac = VU.generate nlevgrnd $ \j ->
+        let liq = safeIdx h2osoi_liq_soil j
+            ice = safeIdx h2osoi_ice_soil j
+            total = liq + ice
+        in if total > 0.0 then ice / total else 0.0
+
+      h2osoi_vol = VU.generate nlevgrnd $ \j ->
+        let liq = safeIdx h2osoi_liq_soil j
+            ice = safeIdx h2osoi_ice_soil j
+            dz_j = safeIdx dz_soil j
+        in if dz_j > 0.0
+           then (liq / denh2o + ice / denice) / dz_j
+           else 0.0
+
+      qflx_rootsoi = VU.replicate nlevgrnd 0.0
+
+      qflx_rain_grnd = qflx_rain_grnd_col wf
+      qflx_snow_grnd = qflx_snow_grnd_col wf
+      qflx_in_soil = forc_rain + qflx_rain_grnd
+
+      swResult = soilWater defaultSoilWaterConfig
+                   nlevsoi dtime qflx_in_soil 0.0
+                   watsat_v bsw_v hksat_v sucsat_v
+                   icefrac h2osoi_vol qflx_rootsoi
+                   z_soil zi_soil dz_soil
+                   h2osoi_liq_soil h2osoi_ice_soil t_soisno_soil
+
+      h2osoi_liq_new = VU.generate (nlevsno + nlevgrnd) $ \j ->
+        if j < nlevsno then safeIdx h2osoi_liq j
+        else safeIdx (swr_h2osoi_liq swResult) (j - nlevsno)
+
+      ws' = ws { h2osoi_liq_col = h2osoi_liq_new }
+
+      qflx_drain_est = max 0.0 (swr_qcharge swResult)
+      wf' = wf { qflx_drain_col = qflx_drain_est }
+
+  in st { clmWaterState = ws'
+        , clmWaterFlux = wf'
+        }
+
+-- ============================================================================
+-- Surface Albedo adapter (simplified: soil color + snow blending)
+-- ============================================================================
+
+surfaceAlbedoStep :: PhysicsStep
+surfaceAlbedoStep _cfg ctx st =
+  let wdiag = clmWaterDiagBulk st
+      cs = clmCanopyState st
+
+      frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
+      elai = safeIdx (cstate_elai_patch cs) 0
+      esai = safeIdx (cstate_esai_patch cs) 0
+
+      coszen = max 0.001 (cos (tcDeclin ctx))
+
+      albsod_vis = 0.18
+      albsod_nir = 0.29
+      albsnd_vis = 0.85
+      albsnd_nir = 0.65
+
+      albgrd_vis = (1.0 - frac_sno) * albsod_vis + frac_sno * albsnd_vis
+      albgrd_nir = (1.0 - frac_sno) * albsod_nir + frac_sno * albsnd_nir
+
+      vai = elai + esai
+      canopy_transmit = exp (-0.5 * vai)
+      canopy_alb_vis = 0.12
+      canopy_alb_nir = 0.25
+
+      albd_vis = canopy_alb_vis * (1.0 - canopy_transmit)
+               + albgrd_vis * canopy_transmit
+      albd_nir = canopy_alb_nir * (1.0 - canopy_transmit)
+               + albgrd_nir * canopy_transmit
+
+      fabd_vis = (1.0 - canopy_alb_vis) * (1.0 - canopy_transmit)
+      fabd_nir = (1.0 - canopy_alb_nir) * (1.0 - canopy_transmit)
+
+      fsun = if vai > 0.0 then 0.5 else 1.0
+
+      cs' = cs
+        { cstate_fsun_patch = VU.singleton fsun
+        }
+
+  in if coszen <= 0.0
+     then st
+     else st { clmCanopyState = cs' }
+
+-- ============================================================================
+-- Water Balance Check adapter
+-- ============================================================================
+
+waterBalanceStep :: PhysicsStep
+waterBalanceStep _cfg ctx st =
+  let dtime = tcDtime ctx
+      wf = clmWaterFlux st
+      forc_rain = if VU.null (tcForcRain ctx) then 0.0
+                  else tcForcRain ctx VU.! 0
+      forc_snow = if VU.null (tcForcSnow ctx) then 0.0
+                  else tcForcSnow ctx VU.! 0
+
+      wb = clmWaterBalance st
+      inp = WaterBalanceColInput
+        { wbci_endwb              = 0.0
+        , wbci_begwb              = 0.0
+        , wbci_forc_rain          = forc_rain
+        , wbci_forc_snow          = forc_snow
+        , wbci_qflx_flood         = 0.0
+        , wbci_qflx_sfc_irrig     = 0.0
+        , wbci_qflx_glcice_dyn    = 0.0
+        , wbci_qflx_evap_tot      = qflx_evap_tot_patch wf
+        , wbci_qflx_surf          = qflx_surf_col wf
+        , wbci_qflx_qrgwl         = 0.0
+        , wbci_qflx_drain         = qflx_drain_col wf
+        , wbci_qflx_drain_perch   = 0.0
+        , wbci_qflx_ice_runoff    = 0.0
+        , wbci_qflx_snwcp_disc_liq = 0.0
+        , wbci_qflx_snwcp_disc_ice = 0.0
+        , wbci_dtime              = dtime
+        , wbci_is_active          = True
+        }
+
+      result = waterBalanceCol inp
+
+  in st

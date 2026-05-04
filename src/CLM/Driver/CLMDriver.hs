@@ -242,38 +242,46 @@ type PhysicsStep = CLMDriverConfig -> TimestepContext -> CLMState -> CLMState
 -- Stub implementations are identity (no-op); real implementations
 -- are plugged in as they are ported.
 data PhysicsPipeline = PhysicsPipeline
-  { -- Phase 1: Initialization
-    ppDrvInit              :: !PhysicsStep
-    -- Phase 2: Surface radiation
+  { -- Phase 0: Pre-physics
+    ppDayLength            :: !PhysicsStep
+  , ppPhenology            :: !PhysicsStep
+  , ppActiveLayer          :: !PhysicsStep
+    -- Phase 1: Initialization
+  , ppDrvInit              :: !PhysicsStep
+    -- Phase 2: Canopy hydrology
   , ppCanopyInterception   :: !PhysicsStep
   , ppHandleNewSnow        :: !PhysicsStep
+  , ppFracH2oSfc           :: !PhysicsStep
+    -- Phase 3: Surface radiation
   , ppSurfaceRadiation     :: !PhysicsStep
-    -- Phase 3: Pre-flux calculations
+    -- Phase 4: Pre-flux calculations
   , ppPreFluxCalcs         :: !PhysicsStep
+  , ppSoilEvapResistance   :: !PhysicsStep
   , ppSurfaceHumidity      :: !PhysicsStep
-    -- Phase 4: Fluxes
+    -- Phase 5: Fluxes
   , ppBaregroundFluxes     :: !PhysicsStep
   , ppCanopyFluxes         :: !PhysicsStep
   , ppLakeFluxes           :: !PhysicsStep
-    -- Phase 5: Temperatures
+  , ppUrbanFluxes          :: !PhysicsStep
+    -- Phase 6: Temperatures
   , ppSoilTemperature      :: !PhysicsStep
   , ppLakeTemperature      :: !PhysicsStep
   , ppSoilFluxes           :: !PhysicsStep
-    -- Phase 6: Hydrology
+    -- Phase 7: Hydrology stage 2
   , ppSnowWater            :: !PhysicsStep
   , ppSoilHydrology        :: !PhysicsStep
   , ppWaterTable           :: !PhysicsStep
-    -- Phase 7: Snow management
+    -- Phase 8: Snow management
   , ppSnowCompaction       :: !PhysicsStep
   , ppSnowLayerCombine     :: !PhysicsStep
   , ppSnowLayerDivide      :: !PhysicsStep
   , ppSnowAging            :: !PhysicsStep
-    -- Phase 8: Hydrology drainage
+    -- Phase 9: Hydrology drainage
   , ppHydrologyDrainage    :: !PhysicsStep
-    -- Phase 9: Balance and diagnostics
+    -- Phase 10: Balance and diagnostics
   , ppWaterBalance         :: !PhysicsStep
   , ppEnergyBalance        :: !PhysicsStep
-    -- Phase 10: Albedo for next step
+    -- Phase 11: Albedo for next step
   , ppSurfaceAlbedo        :: !PhysicsStep
   }
 
@@ -284,15 +292,21 @@ idStep _cfg _ctx st = st
 -- | Default pipeline: all steps are no-ops.
 defaultPhysicsPipeline :: PhysicsPipeline
 defaultPhysicsPipeline = PhysicsPipeline
-  { ppDrvInit            = idStep
+  { ppDayLength          = idStep
+  , ppPhenology          = idStep
+  , ppActiveLayer        = idStep
+  , ppDrvInit            = idStep
   , ppCanopyInterception = idStep
   , ppHandleNewSnow      = idStep
+  , ppFracH2oSfc         = idStep
   , ppSurfaceRadiation   = idStep
   , ppPreFluxCalcs       = idStep
+  , ppSoilEvapResistance = idStep
   , ppSurfaceHumidity    = idStep
   , ppBaregroundFluxes   = idStep
   , ppCanopyFluxes       = idStep
   , ppLakeFluxes         = idStep
+  , ppUrbanFluxes        = idStep
   , ppSoilTemperature    = idStep
   , ppLakeTemperature    = idStep
   , ppSoilFluxes         = idStep
@@ -393,27 +407,35 @@ clmDrv cfg pipeline ctx drvState st0 =
     -- Apply each phase in sequence
     apply step = step cfg ctx
 
-    -- Phase 1: Driver init
-    st1  = apply (ppDrvInit pipeline) st0
+    -- Phase 0: Pre-physics (daylength, phenology, active layer)
+    st_dl = apply (ppDayLength pipeline) st0
+    st_ph = apply (ppPhenology pipeline) st_dl
+    st_al = apply (ppActiveLayer pipeline) st_ph
 
-    -- Phase 2: Hydrology stage 1
+    -- Phase 1: Driver init
+    st1  = apply (ppDrvInit pipeline) st_al
+
+    -- Phase 2: Canopy hydrology
     st2  = apply (ppCanopyInterception pipeline) st1
     st3  = apply (ppHandleNewSnow pipeline) st2
+    st3b = apply (ppFracH2oSfc pipeline) st3
 
     -- Phase 3: Surface radiation
-    st4  = apply (ppSurfaceRadiation pipeline) st3
+    st4  = apply (ppSurfaceRadiation pipeline) st3b
 
     -- Phase 4: Pre-flux calculations
     st5  = apply (ppPreFluxCalcs pipeline) st4
-    st6  = apply (ppSurfaceHumidity pipeline) st5
+    st5b = apply (ppSoilEvapResistance pipeline) st5
+    st6  = apply (ppSurfaceHumidity pipeline) st5b
 
     -- Phase 5: Determine fluxes
     st7  = apply (ppBaregroundFluxes pipeline) st6
     st8  = apply (ppCanopyFluxes pipeline) st7
     st9  = apply (ppLakeFluxes pipeline) st8
+    st9b = apply (ppUrbanFluxes pipeline) st9
 
     -- Phase 6: Determine temperatures
-    st10 = apply (ppSoilTemperature pipeline) st9
+    st10 = apply (ppSoilTemperature pipeline) st9b
     st11 = apply (ppLakeTemperature pipeline) st10
     st12 = apply (ppSoilFluxes pipeline) st11
 
