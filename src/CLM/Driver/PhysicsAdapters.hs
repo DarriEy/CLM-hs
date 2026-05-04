@@ -133,6 +133,7 @@ import CLM.Types.EnergyFluxData (EnergyFluxData(..))
 import CLM.Types.CanopyStateData (CanopyStateData(..))
 import CLM.Types.SoilStateData (SoilStateData(..))
 import CLM.Types.GridcellData (GridcellData(..))
+import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 
 -- ============================================================================
@@ -1278,9 +1279,11 @@ waterBalanceStep _cfg ctx st =
         , wbci_is_active          = True
         }
 
-      _result = waterBalanceCol inp
+      result = waterBalanceCol inp
 
-  in st
+      wb' = wb { wb_errh2o_col = VU.singleton (wbco_errh2o result) }
+
+  in st { clmWaterBalance = wb' }
 
 -- ============================================================================
 -- Energy Balance Check adapter
@@ -1321,7 +1324,7 @@ energyBalanceStep _cfg ctx st =
         , ebi_eflx_ventilation = 0.0
         }
 
-      _result = energyBalance inp
+      _ebResult = energyBalance inp
   in st
 
 -- ============================================================================
@@ -1339,7 +1342,7 @@ activeLayerStep _cfg _ctx st =
         { alti_t_soisno = t_soil
         , alti_zsoi     = z_soil
         }
-      _result = altCalc inp
+      _altResult = altCalc inp
   in st
 
 -- ============================================================================
@@ -1700,9 +1703,13 @@ snowAgingStep _cfg ctx st =
              , sg_bst_drdt0   = 0.0
              }
 
-           _result = snowageGrainLayer defaultSnicarParams topLayerInp
+           result = snowageGrainLayer defaultSnicarParams topLayerInp
 
-       in st
+           wdiag' = wdiag
+             { wdiag_snw_rds_top_col = VU.singleton (sgr_snw_rds_top result)
+             }
+
+       in st { clmWaterDiagBulk = wdiag' }
 
 -- ============================================================================
 -- Driver Init adapter
