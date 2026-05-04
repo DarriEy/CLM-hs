@@ -693,9 +693,11 @@ soilTemperatureFullStep _cfg ctx st =
       dlwrad_emit = 4.0 * emg * sb * t_grnd ** 3
       sh_grnd = eflx_sh_grnd_patch ef
       qflx_evap = qflx_evap_grnd_col (clmWaterFlux st)
-      hs_top = sabg_val + emg * forc_lwrad - lwrad_emit
-             - (sh_grnd + qflx_evap * htvp)
-      dhsdT = -dlwrad_emit
+      hs_top_raw = sabg_val + emg * forc_lwrad - lwrad_emit
+                 - (sh_grnd + qflx_evap * htvp)
+      hs_top = if isNaN hs_top_raw then 0.0
+               else max (-500.0) (min 500.0 hs_top_raw)
+      dhsdT = if isNaN dlwrad_emit then -4.0 else -dlwrad_emit
 
       stInput = SoilTempInput
         { sti_snl              = snl
@@ -735,20 +737,16 @@ soilTemperatureFullStep _cfg ctx st =
 
       stOutput = solveSoilTemperature stInput
 
-      outputOK = not (isNaN (sto_t_grnd stOutput))
-
-      temp' = if outputOK then temp
+      temp' = temp
         { t_soisno_col = sto_t_soisno stOutput
         , t_grnd_col   = sto_t_grnd stOutput
         , t_h2osfc_col = sto_t_h2osfc stOutput
         }
-        else temp
 
-      ws' = if outputOK then ws
+      ws' = ws
         { h2osoi_liq_col = sto_h2osoi_liq stOutput
         , h2osoi_ice_col = sto_h2osoi_ice stOutput
         }
-        else ws
 
   in st { clmTemp = temp'
         , clmWaterState = ws'

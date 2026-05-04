@@ -80,7 +80,7 @@ import CLM.BioGeoPhys.PreFluxCalcs
 import CLM.Driver.Simulation
   ( SimState(..), initSimState, runSimulation, DailyAvg(..) )
 import CLM.Driver.PipelineRunner
-  ( PipelineConfig(..), defaultPipelineConfig, runPipeline )
+  ( PipelineConfig(..), defaultPipelineConfig, runPipeline, writeDailyCSV )
 
 main :: IO ()
 main = do
@@ -106,11 +106,14 @@ pipelineMode dir ndays = do
   putStrLn "=============================================="
   putStrLn " CLM-hs Pipeline Runner"
   putStrLn "=============================================="
+  let csvPath = dir </> "haskell_pipeline_daily.csv"
   dailies <- runPipeline defaultPipelineConfig
     { pcDataDir = dir
     , pcNdays   = ndays
     , pcVerbose = True
+    , pcOutputCSV = csvPath
     }
+  writeDailyCSV csvPath dailies
   putStrLn $ "\nCompleted " ++ show (length dailies) ++ " days via pipeline."
 
 -- ============================================================================

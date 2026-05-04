@@ -14,6 +14,8 @@ module CLM.Driver.PipelineRunner
     -- * Daily diagnostics
   , DailyDiag(..)
   , zeroDailyDiag
+    -- * CSV output
+  , writeDailyCSV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -64,6 +66,7 @@ data PipelineConfig = PipelineConfig
   , pcNdays       :: !Int
   , pcDataDir     :: !FilePath
   , pcVerbose     :: !Bool
+  , pcOutputCSV   :: !FilePath
   } deriving (Show)
 
 defaultPipelineConfig :: PipelineConfig
@@ -72,6 +75,7 @@ defaultPipelineConfig = PipelineConfig
   , pcNdays   = 30
   , pcDataDir = "test/data"
   , pcVerbose = True
+  , pcOutputCSV = ""
   }
 
 -- ============================================================================
@@ -360,3 +364,22 @@ runPipeline cfg = do
               go st' drvSt' fr (step + 1) zeroDailyDiag (avg : results) total spd drvCfg dtime
             else
               go st' drvSt' fr (step + 1) dayAcc' results total spd drvCfg dtime
+
+-- ============================================================================
+-- CSV output (matching Julia daily_avg format)
+-- ============================================================================
+
+writeDailyCSV :: FilePath -> [DailyDiag] -> IO ()
+writeDailyCSV path dailies = do
+  let header = "day,T_GRND,EFLX_LH_TOT,EFLX_SH_TOT,H2OSNO,SNOW_DEPTH,FRAC_SNO"
+      rows = zipWith mkRow [1::Int ..] dailies
+      mkRow d dd = show d
+                ++ "," ++ showE (dd_t_grnd dd)
+                ++ "," ++ showE (dd_eflx_lh dd)
+                ++ "," ++ showE (dd_eflx_sh dd)
+                ++ "," ++ showE (dd_h2osno dd)
+                ++ "," ++ showE (dd_snow_depth dd)
+                ++ "," ++ showE (dd_frac_sno dd)
+      showE x = show x
+  writeFile path (unlines (header : rows))
+  putStrLn $ "Wrote " ++ show (length dailies) ++ " daily averages to " ++ path

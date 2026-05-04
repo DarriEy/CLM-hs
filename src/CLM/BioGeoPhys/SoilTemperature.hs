@@ -289,14 +289,13 @@ computeHeatDiffFlux inp = HeatDiffOutput
     factVec = VU.generate nlev $ \jj ->
       let j = jj - joff
       in if j >= snl_ + 1 && j <= nlevgrnd
-         then let cv_j = cv VU.! jj
+         then let cv_j = max 1.0e-6 (cv VU.! jj)
               in if j == snl_ + 1
                  then let z_j  = z  VU.! jj
-                          zi_j = zi VU.! jj       -- zi(c, snl+1) = zi at top of top layer
+                          zi_j = zi VU.! jj
                           z_j1 = z  VU.! (jj + 1)
-                          zi_j1 = zi VU.! (jj + 1) -- interface below layer j
                           dz_j = dz_v VU.! jj
-                          denom = 0.5 * (z_j - zi_j + capr * (z_j1 - zi_j))
+                          denom = max 1.0e-6 (0.5 * (z_j - zi_j + capr * (z_j1 - zi_j)))
                       in (dt / cv_j) * dz_j / denom
                  else dt / cv_j
          else 0.0
@@ -499,12 +498,13 @@ buildTridiagSystem inp = (tNew, t_h2osfc_new)
     -- Solve
     tSoln = tridiagonalSolve aVec bVec' cVec rVec'
 
-    -- Write solved temperatures back into full vector
+    -- Write solved temperatures back into full vector (NaN-safe)
     tNew = VU.generate (VU.length t) $ \jj ->
       let j = jj - joff
           ki_ = j - jtop
       in if j >= jtop && j <= jbot
-         then tSoln VU.! ki_
+         then let tv = tSoln VU.! ki_
+              in if isNaN tv then t VU.! jj else tv
          else t VU.! jj
 
     -- Surface water temperature (single implicit equation)
