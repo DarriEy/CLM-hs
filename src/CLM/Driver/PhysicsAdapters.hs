@@ -148,8 +148,8 @@ import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 -- ============================================================================
 
 -- | Physics pipeline with ALL slots wired. No idStep remaining.
-wiredPhysicsPipeline :: PhysicsPipeline
-wiredPhysicsPipeline = defaultPhysicsPipeline
+wiredPhysicsPipeline :: SurfaceAlbedoConstants -> PhysicsPipeline
+wiredPhysicsPipeline albConst = defaultPhysicsPipeline
   { ppDayLength          = dayLengthStep
   , ppPhenology          = phenologyStep
   , ppActiveLayer        = activeLayerStep
@@ -175,10 +175,13 @@ wiredPhysicsPipeline = defaultPhysicsPipeline
   , ppSnowLayerCombine   = snowLayerCombineStep
   , ppSnowLayerDivide    = snowLayerDivideStep
   , ppSnowAging          = snowAgingStep
+  , ppCNPreDrainage      = cnPreDrainageStep
+  , ppCNPostDrainage     = cnPostDrainageStep
+  , ppCNBalanceCheck     = cnBalanceCheckStep
   , ppHydrologyDrainage  = hydrologyDrainageStep
   , ppWaterBalance       = waterBalanceStep
   , ppEnergyBalance      = energyBalanceStep
-  , ppSurfaceAlbedo      = surfaceAlbedoStep
+  , ppSurfaceAlbedo      = surfaceAlbedoStep albConst
   }
 
 -- ============================================================================
@@ -1207,27 +1210,61 @@ soilHydrologyStep _cfg ctx st =
 -- Surface Albedo adapter (two-stream via surfaceAlbedoDriver)
 -- ============================================================================
 
-surfaceAlbedoStep :: PhysicsStep
-surfaceAlbedoStep _cfg ctx st =
+surfaceAlbedoStep :: SurfaceAlbedoConstants -> PhysicsStep
+surfaceAlbedoStep albConst _cfg ctx st =
   let wdiag = clmWaterDiagBulk st
       cs = clmCanopyState st
+      temp = clmTemp st
 
       frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
       elai = safeIdx (cstate_elai_patch cs) 0
       esai = safeIdx (cstate_esai_patch cs) 0
+      fwet = safeIdx (wdiag_fwet_patch wdiag) 0
+      fcansno = safeIdx (wdiag_fcansno_patch wdiag) 0
 
       coszen = cos (tcDeclin ctx)
 
-      vai = elai + esai
-      fsun = if vai > 0.0 && coszen > 0.0 then 0.5 else 1.0
-
-      cs' = cs
-        { cstate_fsun_patch = VU.singleton fsun
-        }
-
   in if coszen <= 0.0
      then st
-     else st { clmCanopyState = cs' }
+     else
+       let soilInp = SoilAlbedoInput
+             { sai_coszen      = coszen
+             , sai_lunType     = 1
+             , sai_h2osoi_vol1 = 0.3
+             , sai_soilColor   = 15
+             , sai_t_grnd      = t_grnd_col temp
+             , sai_snl         = clmSnl st
+             , sai_lakePuddling = False
+             , sai_lakeIcefrac1 = 0.0
+             , sai_lakeIcefrac2 = 0.0
+             }
+
+           albInp = SurfAlbDriverInput
+             { sadi_coszen      = coszen
+             , sadi_soilAlbIn   = soilInp
+             , sadi_fracSno     = frac_sno
+             , sadi_snowPersist = if frac_sno > 0.0 then 1.0 else 0.0
+             , sadi_elai        = elai
+             , sadi_esai        = esai
+             , sadi_tlai        = elai
+             , sadi_tsai        = esai
+             , sadi_t_veg       = t_veg_patch temp
+             , sadi_fwet        = fwet
+             , sadi_fcansno     = fcansno
+             , sadi_rhol        = VU.fromList [0.10, 0.45]
+             , sadi_rhos        = VU.fromList [0.16, 0.39]
+             , sadi_taul        = VU.fromList [0.05, 0.25]
+             , sadi_taus        = VU.fromList [0.001, 0.001]
+             , sadi_xl          = 0.01
+             }
+
+           albResult = surfaceAlbedoDriver albConst albInp
+
+           cs' = cs
+             { cstate_fsun_patch = VU.singleton (sado_fsun albResult)
+             }
+
+       in st { clmCanopyState = cs' }
 
 -- ============================================================================
 -- Water Balance Check adapter
@@ -1848,3 +1885,16 @@ lakeTemperatureStep _cfg ctx st =
            tpOut = soilThermPropLake tpInp
 
        in st
+
+-- ============================================================================
+-- CN Biogeochemistry adapters (SP mode: no-ops; CN mode: to be wired)
+-- ============================================================================
+
+cnPreDrainageStep :: PhysicsStep
+cnPreDrainageStep _cfg _ctx st = st
+
+cnPostDrainageStep :: PhysicsStep
+cnPostDrainageStep _cfg _ctx st = st
+
+cnBalanceCheckStep :: PhysicsStep
+cnBalanceCheckStep _cfg _ctx st = st

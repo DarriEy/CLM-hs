@@ -278,6 +278,10 @@ data PhysicsPipeline = PhysicsPipeline
   , ppSnowLayerCombine     :: !PhysicsStep
   , ppSnowLayerDivide      :: !PhysicsStep
   , ppSnowAging            :: !PhysicsStep
+    -- Phase 8b: Biogeochemistry (CN mode only)
+  , ppCNPreDrainage        :: !PhysicsStep
+  , ppCNPostDrainage       :: !PhysicsStep
+  , ppCNBalanceCheck       :: !PhysicsStep
     -- Phase 9: Hydrology drainage
   , ppHydrologyDrainage    :: !PhysicsStep
     -- Phase 10: Balance and diagnostics
@@ -319,6 +323,9 @@ defaultPhysicsPipeline = PhysicsPipeline
   , ppSnowLayerCombine   = idStep
   , ppSnowLayerDivide    = idStep
   , ppSnowAging          = idStep
+  , ppCNPreDrainage      = idStep
+  , ppCNPostDrainage     = idStep
+  , ppCNBalanceCheck     = idStep
   , ppHydrologyDrainage  = idStep
   , ppWaterBalance       = idStep
   , ppEnergyBalance      = idStep
@@ -457,17 +464,24 @@ clmDrv cfg pipeline ctx drvState st0 =
     st19 = apply (ppSnowLayerDivide pipeline) st18
     st20 = apply (ppSnowAging pipeline) st19
 
+    -- Phase 8b: CN biogeochemistry pre-drainage
+    st20b = apply (ppCNPreDrainage pipeline) st20
+
     -- Phase 9: Drainage
-    st21 = apply (ppHydrologyDrainage pipeline) st20
+    st21 = apply (ppHydrologyDrainage pipeline) st20b
+
+    -- Phase 9b: CN biogeochemistry post-drainage
+    st21b = apply (ppCNPostDrainage pipeline) st21
 
     -- Phase 10: Balance checks
-    st22 = apply (ppWaterBalance pipeline) st21
+    st22 = apply (ppWaterBalance pipeline) st21b
     st23 = apply (ppEnergyBalance pipeline) st22
+    st23b = apply (ppCNBalanceCheck pipeline) st23
 
     -- Phase 11: Albedo for next step
     st24 = if tcDoAlb ctx
-           then apply (ppSurfaceAlbedo pipeline) st23
-           else st23
+           then apply (ppSurfaceAlbedo pipeline) st23b
+           else st23b
 
     -- Advance driver state
     drvState' = advanceDriverState drvState (tcDtime ctx)

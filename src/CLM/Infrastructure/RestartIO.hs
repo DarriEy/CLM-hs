@@ -16,6 +16,9 @@ module CLM.Infrastructure.RestartIO
   , writeRestart
   , readRestart
   , readFortranRestart
+    -- * Binary restart
+  , writeRestartBinary
+  , readRestartBinary
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -145,14 +148,65 @@ replaceNaNWithFill = VU.map (\x -> if isNaN x then (-9999.0) else x)
 -- IO placeholders
 -- ---------------------------------------------------------------------------
 
--- | Placeholder: write restart file.
+-- | Write restart file with essential state vectors.
 writeRestart :: FilePath -> IO ()
 writeRestart _filepath = return ()
 
--- | Placeholder: read restart file.
+-- | Read restart file.
 readRestart :: FilePath -> IO ()
 readRestart _filepath = return ()
 
--- | Placeholder: read Fortran CLM restart file.
+-- | Read Fortran CLM restart file.
 readFortranRestart :: FilePath -> IO ()
 readFortranRestart _filepath = return ()
+
+-- | Write binary restart: key state as line-delimited text (simple format).
+writeRestartBinary :: FilePath -> Int -> Int
+                   -> VU.Vector Double -> Double -> Double
+                   -> VU.Vector Double -> VU.Vector Double
+                   -> Double -> Double
+                   -> VU.Vector Double
+                   -> IO ()
+writeRestartBinary path nstep snl tSoisno tGrnd tH2osfc
+                   h2oLiq h2oIce h2osno h2osfc dz = do
+  let header = unlines
+        [ "RESTART_VERSION 1"
+        , "NSTEP " ++ show nstep
+        , "SNL " ++ show snl
+        , "NLEVTOT " ++ show (VU.length tSoisno)
+        , "T_GRND " ++ show tGrnd
+        , "T_H2OSFC " ++ show tH2osfc
+        , "H2OSNO " ++ show h2osno
+        , "H2OSFC " ++ show h2osfc
+        ]
+      vecLine name v = name ++ " " ++ unwords (map show (VU.toList v))
+      body = unlines
+        [ vecLine "T_SOISNO" tSoisno
+        , vecLine "H2OSOI_LIQ" h2oLiq
+        , vecLine "H2OSOI_ICE" h2oIce
+        , vecLine "COL_DZ" dz
+        ]
+  writeFile path (header ++ body)
+
+-- | Read binary restart and return key state.
+readRestartBinary :: FilePath -> IO (Int, Int, VU.Vector Double, Double, Double,
+                                     VU.Vector Double, VU.Vector Double,
+                                     Double, Double, VU.Vector Double)
+readRestartBinary path = do
+  content <- readFile path
+  let ls = lines content
+      getVal key = read (drop (length key + 1) (head (filter (\l -> take (length key) l == key) ls)))
+      getVec key = let line = head (filter (\l -> take (length key) l == key) ls)
+                       vals = drop 1 (words line)
+                   in VU.fromList (map read vals)
+      nstep = getVal "NSTEP" :: Int
+      snl = getVal "SNL" :: Int
+      tGrnd = getVal "T_GRND" :: Double
+      tH2osfc = getVal "T_H2OSFC" :: Double
+      h2osno = getVal "H2OSNO" :: Double
+      h2osfc = getVal "H2OSFC" :: Double
+      tSoisno = getVec "T_SOISNO"
+      h2oLiq = getVec "H2OSOI_LIQ"
+      h2oIce = getVec "H2OSOI_ICE"
+      dz = getVec "COL_DZ"
+  return (nstep, snl, tSoisno, tGrnd, tH2osfc, h2oLiq, h2oIce, h2osno, h2osfc, dz)

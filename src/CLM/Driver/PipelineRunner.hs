@@ -16,6 +16,8 @@ module CLM.Driver.PipelineRunner
   , zeroDailyDiag
     -- * CSV output
   , writeDailyCSV
+    -- * Re-exports for pipeline users
+  , SurfaceAlbedoConstants(..)
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -56,6 +58,8 @@ import CLM.Infrastructure.ForcingReader
   , computePotentialTemperature, computeAirDensity )
 import CLM.Infrastructure.Orbital
   ( computeOrbital, defaultOrbitalParams )
+import CLM.BioGeoPhys.SurfaceAlbedo
+  ( SurfaceAlbedoConstants(..), initSoilAlbedoTables )
 
 -- ============================================================================
 -- Configuration
@@ -82,7 +86,7 @@ defaultPipelineConfig = PipelineConfig
 -- CLMState initialization from binary test data
 -- ============================================================================
 
-initCLMStateFromDir :: FilePath -> IO (CLMState, ForcingReaderState)
+initCLMStateFromDir :: FilePath -> IO (CLMState, ForcingReaderState, SurfaceAlbedoConstants)
 initCLMStateFromDir dir = do
   dims <- readManifestDims (dir </> "manifest.json")
   let nc = mdNc dims
@@ -208,7 +212,14 @@ initCLMStateFromDir dir = do
         , clmSnl = 0
         }
 
-  return (st, forcing)
+  soil_color_raw <- readFloat64Vector (dir </> "surfdata" </> "soil_color.bin")
+  let ng = mdNg dims
+      soil_color_int = VU.generate ng $ \i ->
+        max 1 (min 20 (round (soil_color_raw VU.! i) :: Int))
+      col_gc = VU.generate nc (\_ -> 0)
+      albConst = initSoilAlbedoTables 20 soil_color_int col_gc
+
+  return (st, forcing, albConst)
 
 -- ============================================================================
 -- Timestep context builder
@@ -327,21 +338,22 @@ runPipeline cfg = do
       stepsPerDay = round (86400.0 / dtime) :: Int
       totalSteps = ndays * stepsPerDay
 
-  (st0, forcing) <- initCLMStateFromDir dir
+  (st0, forcing, albConst) <- initCLMStateFromDir dir
 
   when (pcVerbose cfg) $
     putStrLn $ "Pipeline runner: " ++ show ndays ++ " days, "
             ++ show stepsPerDay ++ " steps/day, dtime=" ++ show dtime ++ "s"
 
   let drvCfg = defaultDriverConfig
+      pipeline = wiredPhysicsPipeline albConst
 
-  go st0 defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime
+  go st0 defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
-    go !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime
+    go !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime !pl
       | step > total = return (reverse results)
       | otherwise = do
           let ctx = buildTimestepContext fr step dtime
-              (!drvSt', !st') = clmDrv drvCfg wiredPhysicsPipeline ctx drvSt st
+              (!drvSt', !st') = clmDrv drvCfg pl ctx drvSt st
               dayAcc' = accumDiag dayAcc st'
               isEndDay = step `mod` spd == 0
 
@@ -361,9 +373,9 @@ runPipeline cfg = do
                         ++ ": T_GRND=" ++ show (dd_t_grnd avg) ++ " K"
                         ++ ", H2OSNO=" ++ show (dd_h2osno avg) ++ " kg/m2"
                         ++ ", SNOW_DEPTH=" ++ show (dd_snow_depth avg) ++ " m"
-              go st' drvSt' fr (step + 1) zeroDailyDiag (avg : results) total spd drvCfg dtime
+              go st' drvSt' fr (step + 1) zeroDailyDiag (avg : results) total spd drvCfg dtime pl
             else
-              go st' drvSt' fr (step + 1) dayAcc' results total spd drvCfg dtime
+              go st' drvSt' fr (step + 1) dayAcc' results total spd drvCfg dtime pl
 
 -- ============================================================================
 -- CSV output (matching Julia daily_avg format)
