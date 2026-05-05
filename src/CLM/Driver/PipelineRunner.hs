@@ -231,7 +231,8 @@ buildTimestepContext
   -> Double    -- ^ dtime [s]
   -> TimestepContext
 buildTimestepContext fr nstep dtime =
-  let (fts, _fr') = readForcingStepPure fr (nstep - 1)
+  let forcIdx = (nstep - 1) `div` 2
+      (fts, _fr') = readForcingStepPure fr forcIdx
 
       forc_t    = ft_tbot fts
       forc_pbot = ft_psrf fts
