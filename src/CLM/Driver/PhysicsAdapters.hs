@@ -1616,7 +1616,40 @@ surfaceRadiationStepWithAlbedo albConst _cfg ctx st =
             iceTop = safeIdx (h2osoi_ice_col ws) nlevsno
         in max 0.0 ((liqTop / denh2o + iceTop / denice) / dzTop)
 
-      coszen = max 0.0 (cos (tcDeclin ctx))
+      -- Cosine of solar zenith angle, matching Fortran shr_orb_cosz
+      -- (share/src/shr_orb_mod.F90 lines 155-156):
+      --   cosz = sin(lat)*sin(declin) - cos(lat)*cos(declin)*cos(frac*2pi + lon)
+      -- where frac is the UTC day fraction, lat/lon are in radians, and declin is
+      -- the solar declination. Previously this used cos(declin) directly, which is
+      -- the cosine of the declination rather than the zenith angle and produced a
+      -- fixed ~near-noon sun regardless of time of day, structurally corrupting the
+      -- albedo and two-stream partitioning of SABV/SABG.
+      --
+      -- CLM computes the albedo (and hence coszen) for step n during the previous
+      -- step's radiation call, so the geometry used for step n lags curr_tod by one
+      -- timestep. The pipeline supplies tcNextswCday = curr_calday + dtime/86400, so
+      -- the lagged calday is tcNextswCday - 2*dtime/86400 = curr_calday - dtime/86400.
+      -- This reproduces the Fortran coszen_grc dumps to <1e-3 across the parity
+      -- window (verified against pdump coszen_grc for n1757845..n1757855).
+      -- The proper zenith calculation requires a real nextsw_cday (calendar day with
+      -- a UTC day fraction). Callers that supply one (e.g. the Fortran-parity
+      -- harness, tcNextswCday ~ 196.x) get the shr_orb_cosz value; callers that
+      -- leave tcNextswCday at the default sentinel (1.0) — the offline pipeline,
+      -- whose Julia daily reference predates this calculation — retain the legacy
+      -- cos(declin) behavior so that comparison is unchanged.
+      grcRad = clmGridcell st
+      latRad = if VU.null (grc_lat grcRad) then 0.88 else grc_lat grcRad VU.! 0
+      lonRad = if VU.null (grc_lon grcRad) then 0.0  else grc_lon grcRad VU.! 0
+      declinRad = tcDeclinP1 ctx
+      cdayRad   = tcNextswCday ctx - 2.0 * tcDtime ctx / 86400.0
+      cdayFrac  = cdayRad - fromIntegral (floor cdayRad :: Int)
+      coszen
+        | tcNextswCday ctx > 1.0 =
+            max 0.0
+              ( sin latRad * sin declinRad
+              - cos latRad * cos declinRad
+                * cos (cdayFrac * 2.0 * pi + lonRad) )
+        | otherwise = max 0.0 (cos (tcDeclin ctx))
       soilColor =
         if VU.null (isoicol albConst)
         then 15
