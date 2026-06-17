@@ -52,7 +52,8 @@ import System.FilePath ((</>))
 import System.Directory (doesFileExist)
 import Text.Printf (printf)
 import Control.Monad (forM, forM_)
-import Data.List (foldl', nub)
+import Data.List (foldl', nub, minimumBy)
+import Data.Ord (comparing)
 
 import CLM.Infrastructure.NetCDF
   ( NcFile, ncOpen, ncClose, ncHasVar, ncReadDouble1D )
@@ -144,24 +145,39 @@ cumDaysNoLeap = [0,31,59,90,120,151,181,212,243,273,304,334]
 dayOfYear :: Int -> Int -> Int
 dayOfYear m d = (cumDaysNoLeap !! (max 0 (min 11 (m - 1)))) + d
 
--- | Read FSDS / WIND / QBOT (and TBOT for an index cross-check) from the Bow
--- forcing file at an hourly index. 'Nothing' if the file or index is missing.
-readForcingAt :: Int -> IO (Maybe (Double, Double, Double, Double))
-readForcingAt idx = do
+-- | Read FSDS / WIND / QBOT from the Bow forcing file, calibrating the time
+-- index against the dump's air temperature. T is present in BOTH the dump
+-- (@FORC_T_G@) and the forcing file (@TBOT@); CLM forcing is interval-averaged
+-- / one-step-lagged, so the nominal @(doy,hour)@ index can be off by one. We
+-- search a small window around the nominal index and pick the record whose
+-- TBOT best matches the dump's exact forcing temperature, then read the
+-- (undumped) shortwave/wind/humidity from that aligned record.
+readForcingCalibrated :: Int -> Double -> IO (Maybe (Double, Double, Double))
+readForcingCalibrated idx0 targetT = do
   r <- ncOpen bowForcingFile
   case r of
     Left _   -> return Nothing
     Right nc -> do
-      let pick name = do
-            m <- getVec nc name
-            return (m >>= \v -> if idx >= 0 && idx < VU.length v
-                                 then Just (v VU.! idx) else Nothing)
-      fsds <- pick "FSDS"
-      wind <- pick "WIND"
-      qbot <- pick "QBOT"
-      tbot <- pick "TBOT"
+      mtbot <- getVec nc "TBOT"
+      mfsds <- getVec nc "FSDS"
+      mwind <- getVec nc "WIND"
+      mqbot <- getVec nc "QBOT"
       ncClose nc
-      return ((,,,) <$> fsds <*> wind <*> qbot <*> tbot)
+      return $ do
+        tbot <- mtbot; fsds <- mfsds; wind <- mwind; qbot <- mqbot
+        let n = minimum [VU.length tbot, VU.length fsds, VU.length wind, VU.length qbot]
+            cands = [ i | d <- [-2 .. 2 :: Int], let i = idx0 + d, i >= 0, i < n ]
+        if null cands
+          then Nothing
+          else
+            -- Instantaneous fields (T, wind, humidity) align at the
+            -- temperature-matched index. Shortwave FSDS is the preceding
+            -- interval-average and CLM applies it one interval lagged
+            -- (verified: dump FORC_T_G ↔ TBOT[i], dump absorbed solar ↔
+            -- FSDS[i-1]); so read FSDS from i-1.
+            let best  = minimumBy (comparing (\i -> abs (tbot VU.! i - targetT))) cands
+                swIdx = max 0 (best - 1)
+            in Just (fsds VU.! swIdx, wind VU.! best, qbot VU.! best)
 
 -- ============================================================================
 -- Harness state
@@ -287,10 +303,10 @@ injectBeforeStep h path = do
       (declin, _eccf) = computeOrbital defaultOrbitalParams calday
       dtime  = if stepSec > 0 then stepSec else 1800.0
 
-  mfrc <- readForcingAt idx
+  mfrc <- readForcingCalibrated idx forc_t
   let (fsds, wind, forc_q) = case mfrc of
-        Just (s, w, q, _tbot) -> (s, w, q)
-        Nothing               -> (0.0, 2.0, 0.005)   -- forcing file absent
+        Just (s, w, q) -> (s, w, q)
+        Nothing        -> (0.0, 2.0, 0.005)   -- forcing file absent
       (solad_vis, solad_nir, solai_vis, solai_nir) = splitShortwaveBands fsds
       forc_vp  = computeVaporPressureFromQ forc_q forc_pbot
       forc_th  = computePotentialTemperature forc_t forc_pbot
