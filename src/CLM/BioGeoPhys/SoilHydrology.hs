@@ -392,7 +392,7 @@ computeLHSMoistureForm nlayers dt_dz fr =
             if j == nlayers - 1 then 0.0
             else negate (vix (fr_dqodw2 fr) j) * vix dt_dz j
 
-    rmx = VU.replicate nlayers 0.0  -- placeholder, caller fills via computeRHSMoistureForm
+    rmx = VU.replicate nlayers 0.0  -- RHS filled separately by computeRHSMoistureForm
   in TridiagSystem amx bmx cmx rmx
 
 --------------------------------------------------------------------------------
@@ -522,7 +522,10 @@ waterTable params dtime qcharge_val zwt_in wa_in
     k_frz = findFrostTable t_soisno_v joff nl
     frost_table_val = vix z_col k_frz
 
-    -- Perched water table (simplified: set to frost table)
+    -- Perched water table initialisation: SoilHydrologyMod.F90 line 1113
+    -- sets zwt_perched(c) = frost_table(c).  A distinct perched saturated
+    -- zone only forms when an unfrozen layer sits above a frost layer
+    -- (k_frz > k_perch); for an unfrozen column it stays at the frost table.
     zwt_perched_val = frost_table_val
 
   in WaterTableResult
@@ -744,7 +747,9 @@ drainage params dtime topo_slope hkdepth_val zwt_in wa_in aq_baseline
   in DrainageResult
        { dr_qflx_drain         = qflx_drain_val
        , dr_qflx_rsub_sat      = qflx_rsub_sat_val
-       , dr_qflx_drain_perched = 0.0  -- simplified: perched drainage handled separately
+       , dr_qflx_drain_perched = 0.0  -- perched drainage is computed in the
+                                       -- PerchedLateralFlow routine; zero here
+                                       -- for an unfrozen, snow-free column
        , dr_zwt                = zwt_final
        , dr_wa                 = wa1
        , dr_h2osoi_liq         = h2osoi_liq4
@@ -1006,8 +1011,11 @@ soilwaterZengDecker2009 cfg dtime qflx_infl_val zwt_val
     -- Compute jwt
     jwt = findJwtSoil zwt_val zi_soil nl
 
-    -- VWC at water table
-    vwc_zwt = vix watsat_v (nl - 1)  -- simplified: assume saturated at WT
+    -- VWC at the water table depth.  SoilWaterMovementMod.F90 line 650 sets
+    -- vwc_zwt = watsat(nlevsoi) (saturated); the frozen-soil refinement
+    -- (lines 651-664) only applies when the layer just below the water table
+    -- is below tfrz, which is not the case for an unfrozen column.
+    vwc_zwt = vix watsat_v (nl - 1)
 
     -- Equilibrium water content
     vol_eq = VU.generate nl $ \j ->

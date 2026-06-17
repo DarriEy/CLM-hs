@@ -11,7 +11,8 @@
 --   * Adaptive time-stepping moisture-form Richards solver
 --   * Zeng-Decker 2009 equilibrium method
 --   * Aquifer recharge (qcharge) computation
---   * Baseflow sink placeholder
+--   * Baseflow sink (vertically distributed; zero in CLM5 — baseflow is
+--     applied in Drainage, not as a Richards sink)
 --
 -- All functions are pure. Column-level arrays use Data.Vector.Unboxed.
 -- Fortran variable names preserved for traceability.
@@ -464,9 +465,12 @@ computeQcharge zwt_val dtime watsat_v bsw_v hksat_v sucsat_v
 -- Baseflow sink
 --------------------------------------------------------------------------------
 
--- | Apply baseflow as a vertically distributed sink.
--- Currently a placeholder that returns zero vector.
--- Ported from BaseflowSink in SoilWaterMovementMod.F90
+-- | Apply baseflow as a vertically distributed sink over the soil column.
+-- Faithful 1:1 port of BaseflowSink in SoilWaterMovementMod.F90 (lines
+-- 374-409): CLM5 sets @baseflow_sink = 0@ for every layer, because in the
+-- default (Zeng-Decker) configuration baseflow / subsurface runoff is
+-- removed in the Drainage routine rather than inside the Richards solve.
+-- The zero vector therefore matches the reference exactly.
 baseflowSink :: Int -> VU.Vector Double
 baseflowSink nl = VU.replicate nl 0.0
 

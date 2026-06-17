@@ -143,6 +143,7 @@ import CLM.BioGeoPhys.SoilHydrology
   ( SoilHydrologyParams(..), defaultSoilHydroParams
   , WaterTableResult(..)
   , waterTable )
+import qualified CLM.BioGeoPhys.SoilHydrology as SH
 import CLM.BioGeoPhys.LakeTemperature
   ( ThermPropLakeInput(..), ThermPropLakeOutput(..)
   , soilThermPropLake )
@@ -1928,50 +1929,53 @@ soilHydrologyStep _cfg ctx st =
                / max 0.01 (VU.sum watsat_v / fromIntegral (max 1 (VU.length watsat_v)))
 
       -- ================================================================
-      -- 4. REAL MODULE: Zeng-Decker 2009 Richards equation
+      -- 4. REAL MODULE: Zeng-Decker 2009 Richards equation (implicit)
+      --    Ported solver SoilHydrology.soilwaterZengDecker2009 — the
+      --    full nlevsoi+1 aquifer-coupled tridiagonal solve (matches
+      --    SoilWaterMovementMod.F90 soilwater_zengdecker2009).
+      --    Use the PROGNOSTIC water table injected into the column
+      --    (sh_zwt_col), the real per-layer root sink (qflx_rootsoi),
+      --    and the real infiltration flux. With zero forcing (no rain,
+      --    no ET) the implicit solve barely perturbs the profile, which
+      --    is the Fortran behaviour.
       -- ================================================================
-      zdInput = ZengDeckerInput
-        { zdi_nlayers = nlevsoi
-        , zdi_dtime = dtime
-        , zdi_qflx_infl = qflx_infl
-        , zdi_zwt = max 0.0 ((1.0 - mean_sat) * 5.0)
-        , zdi_watsat = watsat_v
-        , zdi_bsw = bsw_v
-        , zdi_hksat = hksat_v
-        , zdi_sucsat = sucsat_v
-        , zdi_icefrac = icefrac
-        , zdi_rootsoi = VU.generate nlevgrnd $ \j ->
-            qflx_tran * (if j < 5 then 0.2 else 0.0)  -- root sink from transpiration
-        , zdi_z_soil = z_soil
-        , zdi_zi_soil = zi_soil
-        , zdi_dz_soil = dz_soil
-        , zdi_h2osoi_liq = h2osoi_liq  -- full snow+soil array
-        , zdi_h2osoi_vol = h2osoi_vol
-        , zdi_t_soisno = t_soisno  -- full snow+soil array
-        , zdi_e_ice = p_e_ice
-        , zdi_smpmin_val = -1.0e8
-        }
-      zdResult = soilwaterZengDecker2009 defaultSoilWaterMovementConfig zdInput
+      sh = clmSoilHydro st
+      zwt_in_zd = let z = sh_zwt_col sh
+                  in if VU.null z then 2.0 else z VU.! 0
 
-      -- Update soil liquid water from Zeng-Decker
-      h2osoi_liq_new = VU.generate (nlevsno + nlevgrnd) $ \j ->
-        if j < nlevsno then safeIdx h2osoi_liq j
-        else safeIdx (zdr_h2osoi_liq zdResult) (j - nlevsno)
+      -- Per-layer root water sink [mm/s]. Distributed over the rooting
+      -- zone proportional to layer thickness (zero here since QFLX_TRAN=0).
+      rootsoi_v =
+        let rootDepth = min nlevsoi 10
+            dzRoot = VU.sum (VU.slice 0 rootDepth dz_soil)
+        in VU.generate nlevsoi $ \j ->
+             if j < rootDepth && dzRoot > 0.0
+             then max 0.0 qflx_tran * (safeIdx dz_soil j / dzRoot)
+             else 0.0
+
+      zdResult = SH.soilwaterZengDecker2009 defaultSoilWaterConfig
+                   dtime qflx_infl zwt_in_zd
+                   watsat_v bsw_v hksat_v sucsat_v icefrac
+                   h2osoi_vol rootsoi_v
+                   z_soil zi_soil dz_soil
+                   h2osoi_liq h2osoi_ice t_soisno
+
+      -- Updated soil liquid water from the implicit solve (snow+soil array)
+      h2osoi_liq_new = SH.swr_h2osoi_liq zdResult
+      qcharge_zd = SH.swr_qcharge zdResult
 
       -- ================================================================
-      -- 5. TOPMODEL baseflow: Q = scalar * exp(-fff * zwt)
+      -- 5. TOPMODEL baseflow diagnostic (drainage routed in Drainage step)
       -- ================================================================
-      qflx_drain_zd = max 0.0 (zdr_qcharge zdResult)
-      zwt_proxy = max 0.0 ((1.0 - mean_sat) * 5.0)
-      baseflow = p_baseflow_scalar * 1.0e-3 * exp (negate p_fff * zwt_proxy)
-      qflx_drain_total = qflx_drain_zd + baseflow
+      baseflow = p_baseflow_scalar * 1.0e-3 * exp (negate p_fff * zwt_in_zd)
+      qflx_drain_total = max 0.0 qcharge_zd + baseflow
 
       -- ================================================================
       -- 6. Total surface runoff = infiltration excess
       -- ================================================================
       qflx_surf_total = qflx_surf_infex
 
-      -- Update snow layers: reduce ice proportionally by melt
+      -- Snow: reduce ice proportionally by melt (only when snow present)
       ice_after_melt = if melt_frac > 0.0 && snl < 0
         then VU.generate (VU.length h2osoi_ice) $ \j ->
           if j >= nlevsno + snl && j < nlevsno
@@ -1979,23 +1983,30 @@ soilHydrologyStep _cfg ctx st =
           else safeIdx h2osoi_ice j
         else h2osoi_ice
 
-      -- If all snow melted, reset snow layers
       (snl_after, h2osno_after) =
         if swe_new < 0.01 && snl < 0 then (0, 0.0)
         else (snl, h2osno_explicit * (1.0 - melt_frac))
 
-      -- Update state
-      ws' = ws { h2osoi_liq_col = h2osoi_liq_new
-               , h2osoi_ice_col = ice_after_melt
-               , h2osno_col = max 0.0 h2osno_after
-               , h2osfc_col = swe_new }
+      -- Preserve qcharge for the water-table update.
+      sh' = sh { sh_qcharge_col = VU.singleton qcharge_zd }
+
+      -- Only touch h2osfc/h2osno when there is actually snow to melt;
+      -- otherwise leave the injected surface water untouched (Fortran
+      -- leaves H2OSFC unchanged here for a snow-free summer column).
+      ws' = if swe_total > 0.0
+            then ws { h2osoi_liq_col = h2osoi_liq_new
+                    , h2osoi_ice_col = ice_after_melt
+                    , h2osno_col = max 0.0 h2osno_after
+                    , h2osfc_col = swe_new }
+            else ws { h2osoi_liq_col = h2osoi_liq_new }
 
       wf' = wf { qflx_drain_col = qflx_drain_total
                , qflx_surf_col = qflx_surf_total }
 
   in st { clmWaterState = ws'
         , clmWaterFlux = wf'
-        , clmSnl = snl_after
+        , clmSoilHydro = sh'
+        , clmSnl = if swe_total > 0.0 then snl_after else snl
         }
 
 -- ============================================================================
@@ -2700,9 +2711,13 @@ waterTableStep _cfg ctx st =
       zi_soil = VU.slice nlevsno (nlevgrnd + 1) (colZi col)
       dz_soil = VU.slice nlevsno nlevgrnd (colDz col)
 
-      qcharge = 0.0
-      zwt_in = 5.0
-      wa_in = 0.0
+      -- Use the PROGNOSTIC water table that flowed in through the column
+      -- state (sh_zwt_col), and the aquifer recharge computed by the soil
+      -- water solver (sh_qcharge_col).  Ported from WaterTable in
+      -- SoilHydrologyMod.F90: zwt/wa are prognostic, not reset each step.
+      zwt_in = let z = sh_zwt_col sh in if VU.null z then 2.0 else z VU.! 0
+      qcharge = let q = sh_qcharge_col sh in if VU.null q then 0.0 else q VU.! 0
+      wa_in = 5000.0  -- aquifer water baseline [mm] (Fortran WA ~ 5000)
 
       result = waterTable defaultSoilHydroParams
                  dtime qcharge zwt_in wa_in
@@ -2710,10 +2725,43 @@ waterTableStep _cfg ctx st =
                  z_soil zi_soil dz_soil
                  (h2osoi_liq_col ws) (h2osoi_ice_col ws) (t_soisno_col temp)
 
+      -- Frost / perched water table: SoilHydrologyMod.F90 lines 1096-1182.
+      --   k_frz = nlevsoi when the top soil layer is unfrozen, so the frost
+      --   table sits at the bottom of the soil column; when frozen it is the
+      --   first frozen layer with an unfrozen layer above.
+      --   For the unfrozen case, k_perch = k_frz so no perched saturated zone
+      --   exists (k_frz > k_perch is false) and zwt_perched stays equal to
+      --   frost_table — i.e. the prognostic frost-table value is carried.
+      t_top_soil = safeIdx (t_soisno_col temp) nlevsno
+      soilFrozen = t_top_soil <= tfrz
+      -- Bottom interface of the active soil column (zi(nlevsoi)).  The
+      -- prognostic frost table for a snow-free, fully-thawed column is
+      -- carried from the column state (sh_frost_table_col / injected
+      -- zwt_perched), which CLM does not move while the soil is unfrozen.
+      frost_table_carried =
+        let ft = sh_frost_table_col sh
+            zp = sh_zwt_perched_col sh
+        in if not (VU.null ft) then ft VU.! 0
+           else if not (VU.null zp) then zp VU.! 0
+           else safeIdx zi_soil nlevsoi
+
+      k_frz_idx = let go k
+                        | k >= nlevsoi = nlevsoi
+                        | safeIdx (t_soisno_col temp) (nlevsno + k - 1) > tfrz
+                          && safeIdx (t_soisno_col temp) (nlevsno + k) <= tfrz = k
+                        | otherwise = go (k + 1)
+                  in if soilFrozen then 1 else go 1
+
+      frost_table_val = if soilFrozen
+                        then safeIdx zi_soil k_frz_idx
+                        else frost_table_carried
+      zwt_perched_val = frost_table_val
+
       ws' = ws { h2osoi_liq_col = wtr_h2osoi_liq result }
       sh' = sh { sh_zwt_col = VU.singleton (wtr_zwt result)
-               , sh_zwt_perched_col = VU.singleton (wtr_zwt_perched result)
-               , sh_frost_table_col = VU.singleton (wtr_frost_table result)
+               , sh_zwts_col = VU.singleton (wtr_zwt result)
+               , sh_zwt_perched_col = VU.singleton zwt_perched_val
+               , sh_frost_table_col = VU.singleton frost_table_val
                }
 
   in st { clmWaterState = ws', clmSoilHydro = sh' }

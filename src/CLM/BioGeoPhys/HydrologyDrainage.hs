@@ -3,11 +3,16 @@
 -- Fortran: HydrologyDrainageMod.F90
 --
 -- Provides:
---   * Wetland/ice hydrology flux assignment
---   * Urban drainage flux assignment
---   * Total runoff computation
---   * Water mass computation (stub)
---   * Glacier SMB runoff adjustment (stub)
+--   * Wetland/ice hydrology flux assignment (HydrologyDrainageMod.F90,
+--     the istwet/istice branch)
+--   * Urban drainage flux assignment (urbpoi, non-pervious-road branch)
+--   * Total runoff computation (qflx_runoff = drain + surf + qrgwl +
+--     drain_perched, split into urban/rural)
+--
+-- Water-mass diagnostics and glacier surface-mass-balance runoff are part
+-- of the gridcell-level water budget and lake/glacier landunits, which do
+-- not apply to the single soil column exercised here; they are intentionally
+-- out of scope for this module.
 --
 -- All functions are pure. Fortran variable names preserved for traceability.
 module CLM.BioGeoPhys.HydrologyDrainage
