@@ -35,6 +35,7 @@ library
                      , CLM.Types.WaterStateBulkData
                      , CLM.Types.WaterFluxBulkData
                      , CLM.Types.LakeStateData
+                     , CLM.Infrastructure.SmoothAD
                      , CLM.Infrastructure.Tridiagonal
                      , CLM.Infrastructure.BandDiagonal
                      , CLM.Infrastructure.Decomp
@@ -174,6 +175,12 @@ library
                      , CLM.Driver.PhysicsAdapters
                      , CLM.Driver.Simulation
                      , CLM.Driver.PipelineRunner
+                     , CLM.Calibration.ADSensitivity
+                     , CLM.Calibration.FortranParity
+                     , CLM.Calibration.FluxnetReader
+                     , CLM.Calibration.Optimize
+                     , CLM.Calibration.SiteCalibration
+                     , CLM.Infrastructure.NetCDF
   default-language:    Haskell2010
   build-depends:       base >= 4.7 && < 5
                      , vector
@@ -187,6 +194,8 @@ library
                      , transformers
                      , filepath
                      , directory
+                     , ad
+  pkgconfig-depends:   netcdf
   ghc-options:         -Wall
                        -Wcompat
                        -Widentities
@@ -217,4 +226,7 @@ test-suite clm-hs-test
                      , hspec
                      , QuickCheck
                      , directory
+                     , filepath
+                     , containers
+                     , ad
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N

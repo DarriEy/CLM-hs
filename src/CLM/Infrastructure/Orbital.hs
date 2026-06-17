@@ -1,6 +1,6 @@
 -- | Orbital mechanics for solar declination and earth-sun distance.
 -- Fortran: shr_orb_mod.F90
--- Simplified Berger (1978) analytical orbital parameters.
+-- Berger (1978) analytical orbital parameters.
 module CLM.Infrastructure.Orbital
   ( computeOrbital
   , OrbitalParams(..)

@@ -14,6 +14,15 @@ module CLM.BioGeoChem.NutrientCompetition
   , NAllocationInput(..)
   , NAllocationOutput(..)
   , calcNAllocation
+    -- * N Competition
+  , NCompetitionInput(..)
+  , NCompetitionOutput(..)
+  , calcNCompetition
+    -- * N Downregulation
+  , calcDownregulation
+    -- * Flexible CN
+  , FlexCNInput(..)
+  , calcFlexibleCN
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -113,3 +122,104 @@ calcNAllocation inp =
     { nao_plant_ndemand = plant_ndemand
     , nao_actual_nuptake = actual
     }
+
+-- =========================================================================
+-- Nitrogen competition (plant vs decomposer)
+-- =========================================================================
+
+data NCompetitionInput = NCompetitionInput
+  { nci_plant_ndemand     :: !Double  -- ^ plant N demand (gN/m2/s)
+  , nci_decomp_ndemand    :: !Double  -- ^ decomposer immobilization demand (gN/m2/s)
+  , nci_sminn             :: !Double  -- ^ soil mineral N pool (gN/m2)
+  , nci_dt                :: !Double  -- ^ timestep (s)
+  , nci_use_nitrif_denitrif :: !Bool
+  } deriving (Show)
+
+data NCompetitionOutput = NCompetitionOutput
+  { nco_fpi           :: !Double  -- ^ fraction of potential immobilization [0,1]
+  , nco_fpg           :: !Double  -- ^ fraction of potential growth (N downreg) [0,1]
+  , nco_actual_plant_nuptake :: !Double  -- ^ actual plant N uptake (gN/m2/s)
+  , nco_actual_immob  :: !Double  -- ^ actual immobilization (gN/m2/s)
+  , nco_sminn_to_plant :: !Double  -- ^ SMIN N flux to plant (gN/m2/s)
+  } deriving (Show)
+
+-- | Calculate N competition between plant uptake and decomposer immobilization.
+-- Uses the relative demand approach from CLM4.5:
+--   fpi = sminn_supply / (plant_demand + immob_demand)
+--   fpg = sminn_supply / (plant_demand + immob_demand) [symmetric]
+-- When supply exceeds total demand, both fpi and fpg = 1.
+calcNCompetition :: NCompetitionInput -> NCompetitionOutput
+calcNCompetition !inp =
+  let !pdem = nci_plant_ndemand inp
+      !idem = nci_decomp_ndemand inp
+      !sminn = nci_sminn inp
+      !dt = nci_dt inp
+      -- Available mineral N supply (limited to pool size / dt)
+      !supply = sminn / dt
+      !total_demand = pdem + idem
+  in if total_demand <= 0.0 || supply <= 0.0
+     then NCompetitionOutput
+          { nco_fpi = 1.0, nco_fpg = 1.0
+          , nco_actual_plant_nuptake = 0.0
+          , nco_actual_immob = 0.0
+          , nco_sminn_to_plant = 0.0 }
+     else if supply >= total_demand
+          then NCompetitionOutput
+               { nco_fpi = 1.0, nco_fpg = 1.0
+               , nco_actual_plant_nuptake = pdem
+               , nco_actual_immob = idem
+               , nco_sminn_to_plant = pdem }
+          else -- Supply-limited: partition proportionally
+            let !frac = supply / total_demand
+                !fpi = frac
+                !fpg = frac
+                !act_plant = pdem * frac
+                !act_immob = idem * frac
+            in NCompetitionOutput
+               { nco_fpi = fpi, nco_fpg = fpg
+               , nco_actual_plant_nuptake = act_plant
+               , nco_actual_immob = act_immob
+               , nco_sminn_to_plant = act_plant }
+
+-- =========================================================================
+-- N downregulation of GPP
+-- =========================================================================
+
+-- | Calculate N downregulation factor for GPP.
+-- When N is limiting, GPP is reduced to match available N for growth.
+-- downreg = actual_N_uptake / potential_N_demand
+calcDownregulation :: Double  -- ^ plant_ndemand (gN/m2/s)
+                   -> Double  -- ^ actual_nuptake (gN/m2/s)
+                   -> Double  -- ^ fpg [0,1]
+                   -> Double  -- ^ downregulation factor [0,1]
+calcDownregulation !demand !_actual !fpg
+  | demand <= 0.0 = 1.0
+  | otherwise = min 1.0 fpg
+
+-- =========================================================================
+-- Flexible C:N ratios
+-- =========================================================================
+
+data FlexCNInput = FlexCNInput
+  { fci_leafcn_target  :: !Double  -- ^ target leaf C:N
+  , fci_leafcn_min     :: !Double  -- ^ minimum leaf C:N (N-saturated)
+  , fci_leafcn_max     :: !Double  -- ^ maximum leaf C:N (N-starved)
+  , fci_fpg            :: !Double  -- ^ fraction of potential growth
+  , fci_flex_a         :: !Double  -- ^ flexibility parameter a
+  , fci_flex_b         :: !Double  -- ^ flexibility parameter b
+  , fci_flex_c         :: !Double  -- ^ flexibility parameter c
+  } deriving (Show)
+
+-- | Calculate flexible C:N ratio based on N availability.
+-- When N is abundant (fpg→1), CN approaches minimum (N-rich tissue).
+-- When N is scarce (fpg→0), CN approaches maximum (N-poor tissue).
+calcFlexibleCN :: FlexCNInput -> Double
+calcFlexibleCN !inp =
+  let !fpg = fci_fpg inp
+      !cn_min = fci_leafcn_min inp
+      !cn_max = fci_leafcn_max inp
+      -- Logistic interpolation between min and max CN
+      !x = fci_flex_a inp + fci_flex_b inp * fpg
+      !sigmoid = 1.0 / (1.0 + exp (-x))
+      !cn = cn_max - (cn_max - cn_min) * sigmoid
+  in max cn_min (min cn_max cn)

@@ -9,10 +9,16 @@ module CLM.BioGeoChem.Allocation
     AllocationParams(..)
   , defaultAllocationParams
   , PftConAllocation(..)
-    -- * Main computation
+    -- * GPP/MR computation
   , GPPMRInput(..)
   , GPPMROutput(..)
   , calcGppMrAvailC
+    -- * Allometric allocation
+  , AllocInput(..)
+  , AllocOutput(..)
+  , calcAllocation
+    -- * N demand
+  , calcNDemand
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -133,3 +139,105 @@ calcGppMrAvailC inp =
     , gmo_froot_xsmr         = perPatch (\p iv -> sel6 (computePatch p iv))
     , gmo_xsmrpool_recover   = perPatch (\p iv -> sel7 (computePatch p iv))
     }
+
+-- =========================================================================
+-- Allometric Allocation
+-- =========================================================================
+
+data AllocInput = AllocInput
+  { ali_availc        :: !Double  -- ^ available C for allocation (gC/m2/s)
+  , ali_ivt           :: !Int     -- ^ PFT index
+  , ali_woody         :: !Double  -- ^ 1.0 for woody PFTs
+  , ali_froot_leaf    :: !Double  -- ^ fine root to leaf ratio
+  , ali_croot_stem    :: !Double  -- ^ coarse root to stem ratio
+  , ali_stem_leaf     :: !Double  -- ^ stem to leaf ratio
+  , ali_flivewd       :: !Double  -- ^ fraction of wood that is live
+  , ali_leafcn        :: !Double  -- ^ leaf C:N ratio
+  , ali_frootcn       :: !Double  -- ^ fine root C:N
+  , ali_livewdcn      :: !Double  -- ^ live wood C:N
+  , ali_deadwdcn      :: !Double  -- ^ dead wood C:N
+  , ali_grperc        :: !Double  -- ^ growth respiration fraction
+  , ali_downreg       :: !Double  -- ^ N downregulation factor [0,1]
+  } deriving (Show)
+
+data AllocOutput = AllocOutput
+  { alo_cpool_to_leafc           :: !Double
+  , alo_cpool_to_frootc          :: !Double
+  , alo_cpool_to_livestemc       :: !Double
+  , alo_cpool_to_deadstemc       :: !Double
+  , alo_cpool_to_livecrootc      :: !Double
+  , alo_cpool_to_deadcrootc      :: !Double
+  , alo_cpool_leaf_gr            :: !Double  -- ^ growth resp for leaf
+  , alo_cpool_froot_gr           :: !Double
+  , alo_cpool_livestem_gr        :: !Double
+  , alo_cpool_deadstem_gr        :: !Double
+  , alo_cpool_livecroot_gr       :: !Double
+  , alo_cpool_deadcroot_gr       :: !Double
+  , alo_plant_ndemand            :: !Double  -- ^ total N demand (gN/m2/s)
+  } deriving (Show)
+
+-- | Calculate allometric allocation of available C to tissue pools.
+-- Partitions C according to fixed allometric ratios (leaf:froot:stem:croot).
+calcAllocation :: AllocInput -> AllocOutput
+calcAllocation !inp =
+  let !availc = ali_availc inp * ali_downreg inp
+      !grperc = ali_grperc inp
+      !isWoody = ali_woody inp > 0.5
+
+      -- Allometric fractions
+      !f_leaf = 1.0
+      !f_froot = ali_froot_leaf inp
+      !f_stem = if isWoody then ali_stem_leaf inp else 0.0
+      !f_croot = if isWoody then ali_croot_stem inp * f_stem else 0.0
+      !total_allom = f_leaf + f_froot + f_stem + f_croot
+
+      -- Fraction of available C going to each pool (after growth resp)
+      !c_for_growth = availc / (1.0 + grperc)
+
+      !aleaf = if total_allom > 0.0 then c_for_growth * f_leaf / total_allom else 0.0
+      !afroot = if total_allom > 0.0 then c_for_growth * f_froot / total_allom else 0.0
+      !astem = if total_allom > 0.0 then c_for_growth * f_stem / total_allom else 0.0
+      !acroot = if total_allom > 0.0 then c_for_growth * f_croot / total_allom else 0.0
+
+      -- Live/dead wood partitioning
+      !flive = ali_flivewd inp
+      !livestem = astem * flive
+      !deadstem = astem * (1.0 - flive)
+      !livecroot = acroot * flive
+      !deadcroot = acroot * (1.0 - flive)
+
+      -- Growth respiration per pool
+      !gr_leaf = aleaf * grperc
+      !gr_froot = afroot * grperc
+      !gr_livestem = livestem * grperc
+      !gr_deadstem = deadstem * grperc
+      !gr_livecroot = livecroot * grperc
+      !gr_deadcroot = deadcroot * grperc
+
+      -- N demand
+      !ndem = aleaf / ali_leafcn inp
+            + afroot / ali_frootcn inp
+            + (if isWoody
+               then livestem / ali_livewdcn inp + deadstem / ali_deadwdcn inp
+                  + livecroot / ali_livewdcn inp + deadcroot / ali_deadwdcn inp
+               else 0.0)
+
+  in AllocOutput
+     { alo_cpool_to_leafc = aleaf
+     , alo_cpool_to_frootc = afroot
+     , alo_cpool_to_livestemc = livestem
+     , alo_cpool_to_deadstemc = deadstem
+     , alo_cpool_to_livecrootc = livecroot
+     , alo_cpool_to_deadcrootc = deadcroot
+     , alo_cpool_leaf_gr = gr_leaf
+     , alo_cpool_froot_gr = gr_froot
+     , alo_cpool_livestem_gr = gr_livestem
+     , alo_cpool_deadstem_gr = gr_deadstem
+     , alo_cpool_livecroot_gr = gr_livecroot
+     , alo_cpool_deadcroot_gr = gr_deadcroot
+     , alo_plant_ndemand = ndem
+     }
+
+-- | Calculate plant N demand from allocation fluxes.
+calcNDemand :: AllocOutput -> Double -> Double
+calcNDemand !alloc !dt = alo_plant_ndemand alloc * dt

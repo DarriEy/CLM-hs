@@ -1,0 +1,25 @@
+{
+  "site": "Bow at Banff (single column)",
+  "description": "Bow at Banff 5-year forcing (2000-2004) from SYMFLUENCE domain",
+  "year": 2000,
+  "dimensions": {
+    "nc": 1,
+    "np": 1,
+    "ng": 1,
+    "nl": 1,
+    "nlevsoi": 20,
+    "nlevgrnd": 25,
+    "nlevsno": 12,
+    "nlevtot": 37,
+    "numpft": 79,
+    "lat": 51.36066559781302,
+    "lon": -116.01222610598441,
+    "dtime": 3600,
+    "ntimes": 43822
+  },
+  "forcing": {
+    "fields": ["tbot", "psrf", "wind", "flds", "fsds", "precip", "qbot"],
+    "units": ["K", "Pa", "m/s", "W/m2", "W/m2", "mm/s", "kg/kg"],
+    "ntimes": 43822
+  }
+}

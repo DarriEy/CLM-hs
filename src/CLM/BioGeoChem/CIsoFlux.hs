@@ -34,6 +34,17 @@ module CLM.BioGeoChem.CIsoFlux
   , gapMortalityContrib
   , harvestMortalityContrib
   , grossUnrepContrib
+    -- * Phase drivers
+  , CIsoFlux1Input(..)
+  , CIsoFlux1Output(..)
+  , cIsoFlux1
+  , CIsoFlux2Input(..)
+  , CIsoFlux2Output(..)
+  , cIsoFlux2
+  , cIsoFlux3
+    -- * Discrimination
+  , photosyntheticDiscrimination
+  , c14DecayFactor
   ) where
 
 import qualified Data.Vector.Unboxed as U
@@ -196,3 +207,178 @@ grossUnrepContrib
   -> Double
 grossUnrepContrib !liveCrt !deadCrt !wtcol !crootProf =
   (liveCrt * wtcol * crootProf) + (deadCrt * wtcol * crootProf)
+
+-- ========================================================================
+-- Photosynthetic discrimination
+-- ========================================================================
+
+-- | C13 photosynthetic discrimination factor.
+-- del13C of new photosynthate relative to atmosphere.
+-- For C3: disc = 4.4 + (28.2 - 4.4) * ci/ca  (Farquhar 1989)
+-- For C4: disc ~ -5.5 permil (approximately)
+photosyntheticDiscrimination :: Isotope
+                             -> Bool    -- ^ c3flag
+                             -> Double  -- ^ ci/ca ratio
+                             -> Double  -- ^ discrimination factor (fractionation)
+photosyntheticDiscrimination !iso !c3flag !ciOverCa =
+  let !disc13_c3 = 4.4e-3 + (28.2e-3 - 4.4e-3) * ciOverCa
+      !disc13_c4 = -5.5e-3
+      !disc13 = if c3flag then disc13_c3 else disc13_c4
+  in case iso of
+       C13 -> 1.0 + disc13
+       C14 -> (1.0 + disc13) ** 2  -- C14 discrimination is doubled
+
+-- | C14 radioactive decay factor per timestep.
+-- Half-life of C14 = 5730 years.
+-- decay = exp(-lambda * dt) where lambda = ln(2) / half_life_seconds
+c14DecayFactor :: Double  -- ^ dt (seconds)
+               -> Double  -- ^ decay factor [0,1]
+c14DecayFactor !dt =
+  let !halfLife = 5730.0 * 365.25 * 86400.0  -- seconds
+      !lambda = log 2.0 / halfLife
+  in exp (negate lambda * dt)
+
+-- ========================================================================
+-- Phase 1: Phenology/allocation isotopic fluxes (CIsoFlux1)
+-- ========================================================================
+
+data CIsoFlux1Input = CIsoFlux1Input
+  { cif1_isotope            :: !Isotope
+  , cif1_dt                 :: !Double
+  -- Photosynthesis isotope inputs
+  , cif1_psnsun_to_cpool    :: !Double  -- ^ total C sunlit photosynthesis flux
+  , cif1_psnsha_to_cpool    :: !Double  -- ^ total C shaded photosynthesis flux
+  , cif1_ci_over_ca_sun     :: !Double  -- ^ ci/ca for sunlit leaves
+  , cif1_ci_over_ca_sha     :: !Double  -- ^ ci/ca for shaded leaves
+  , cif1_c3flag             :: !Bool
+  , cif1_atm_iso_ratio      :: !Double  -- ^ atmospheric isotope ratio (C13/C12 or C14/C)
+  -- C state for ratio computation
+  , cif1_leafc              :: !Double
+  , cif1_leafc_iso          :: !Double
+  , cif1_frootc             :: !Double
+  , cif1_frootc_iso         :: !Double
+  , cif1_cpool              :: !Double
+  , cif1_cpool_iso          :: !Double
+  -- Allocation fluxes (total C)
+  , cif1_cpool_to_leafc     :: !Double
+  , cif1_cpool_to_frootc    :: !Double
+  , cif1_leafc_to_litter    :: !Double
+  , cif1_frootc_to_litter   :: !Double
+  } deriving (Show)
+
+data CIsoFlux1Output = CIsoFlux1Output
+  { cif1o_psnsun_iso        :: !Double  -- ^ isotopic sunlit photosynthesis
+  , cif1o_psnsha_iso        :: !Double  -- ^ isotopic shaded photosynthesis
+  , cif1o_cpool_to_leafc_iso :: !Double
+  , cif1o_cpool_to_frootc_iso :: !Double
+  , cif1o_leafc_to_litter_iso :: !Double
+  , cif1o_frootc_to_litter_iso :: !Double
+  } deriving (Show)
+
+-- | Compute isotopic fluxes for Phase 1 (phenology/allocation).
+-- Photosynthesis uses discrimination; other fluxes use pool ratios.
+cIsoFlux1 :: CIsoFlux1Input -> CIsoFlux1Output
+cIsoFlux1 !inp =
+  let !iso = cif1_isotope inp
+      -- Photosynthetic discrimination
+      !discSun = photosyntheticDiscrimination iso (cif1_c3flag inp) (cif1_ci_over_ca_sun inp)
+      !discSha = photosyntheticDiscrimination iso (cif1_c3flag inp) (cif1_ci_over_ca_sha inp)
+      !psnSunIso = cif1_psnsun_to_cpool inp * cif1_atm_iso_ratio inp * discSun
+      !psnShaIso = cif1_psnsha_to_cpool inp * cif1_atm_iso_ratio inp * discSha
+
+      -- Allocation from cpool: use cpool isotope ratio (frax=1 for non-photosynthesis)
+      !allocLeafIso = isoFluxPair iso 1.0 (cif1_cpool_to_leafc inp)
+                        (cif1_cpool_iso inp) (cif1_cpool inp)
+      !allocFrootIso = isoFluxPair iso 1.0 (cif1_cpool_to_frootc inp)
+                         (cif1_cpool_iso inp) (cif1_cpool inp)
+
+      -- Litterfall: use leaf/froot isotope ratio (frax=1)
+      !leafLitIso = isoFluxPair iso 1.0 (cif1_leafc_to_litter inp)
+                      (cif1_leafc_iso inp) (cif1_leafc inp)
+      !frootLitIso = isoFluxPair iso 1.0 (cif1_frootc_to_litter inp)
+                       (cif1_frootc_iso inp) (cif1_frootc inp)
+
+  in CIsoFlux1Output
+     { cif1o_psnsun_iso = psnSunIso
+     , cif1o_psnsha_iso = psnShaIso
+     , cif1o_cpool_to_leafc_iso = allocLeafIso
+     , cif1o_cpool_to_frootc_iso = allocFrootIso
+     , cif1o_leafc_to_litter_iso = leafLitIso
+     , cif1o_frootc_to_litter_iso = frootLitIso
+     }
+
+-- ========================================================================
+-- Phase 2: Gap mortality isotopic fluxes (CIsoFlux2)
+-- ========================================================================
+
+data CIsoFlux2Input = CIsoFlux2Input
+  { cif2_isotope                :: !Isotope
+  -- Total C mortality fluxes
+  , cif2_m_leafc_to_litter      :: !Double
+  , cif2_m_livestemc_to_litter  :: !Double
+  , cif2_m_deadstemc_to_litter  :: !Double
+  , cif2_m_frootc_to_litter     :: !Double
+  , cif2_m_livecrootc_to_litter :: !Double
+  , cif2_m_deadcrootc_to_litter :: !Double
+  -- Isotope pool states
+  , cif2_leafc_iso              :: !Double
+  , cif2_leafc                  :: !Double
+  , cif2_livestemc_iso          :: !Double
+  , cif2_livestemc              :: !Double
+  , cif2_deadstemc_iso          :: !Double
+  , cif2_deadstemc              :: !Double
+  , cif2_frootc_iso             :: !Double
+  , cif2_frootc                 :: !Double
+  , cif2_livecrootc_iso         :: !Double
+  , cif2_livecrootc             :: !Double
+  , cif2_deadcrootc_iso         :: !Double
+  , cif2_deadcrootc             :: !Double
+  } deriving (Show)
+
+data CIsoFlux2Output = CIsoFlux2Output
+  { cif2o_m_leafc_to_litter_iso      :: !Double
+  , cif2o_m_livestemc_to_litter_iso  :: !Double
+  , cif2o_m_deadstemc_to_litter_iso  :: !Double
+  , cif2o_m_frootc_to_litter_iso     :: !Double
+  , cif2o_m_livecrootc_to_litter_iso :: !Double
+  , cif2o_m_deadcrootc_to_litter_iso :: !Double
+  } deriving (Show)
+
+-- | Compute isotopic fluxes for Phase 2 (gap mortality).
+-- All mortality fluxes use pool isotope ratios.
+cIsoFlux2 :: CIsoFlux2Input -> CIsoFlux2Output
+cIsoFlux2 !inp =
+  let !iso = cif2_isotope inp
+  in CIsoFlux2Output
+  { cif2o_m_leafc_to_litter_iso =
+      isoFluxPair iso 1.0 (cif2_m_leafc_to_litter inp) (cif2_leafc_iso inp) (cif2_leafc inp)
+  , cif2o_m_livestemc_to_litter_iso =
+      isoFluxPair iso 1.0 (cif2_m_livestemc_to_litter inp) (cif2_livestemc_iso inp) (cif2_livestemc inp)
+  , cif2o_m_deadstemc_to_litter_iso =
+      isoFluxPair iso 1.0 (cif2_m_deadstemc_to_litter inp) (cif2_deadstemc_iso inp) (cif2_deadstemc inp)
+  , cif2o_m_frootc_to_litter_iso =
+      isoFluxPair iso 1.0 (cif2_m_frootc_to_litter inp) (cif2_frootc_iso inp) (cif2_frootc inp)
+  , cif2o_m_livecrootc_to_litter_iso =
+      isoFluxPair iso 1.0 (cif2_m_livecrootc_to_litter inp) (cif2_livecrootc_iso inp) (cif2_livecrootc inp)
+  , cif2o_m_deadcrootc_to_litter_iso =
+      isoFluxPair iso 1.0 (cif2_m_deadcrootc_to_litter inp) (cif2_deadcrootc_iso inp) (cif2_deadcrootc inp)
+  }
+
+-- ========================================================================
+-- Phase 3: Fire isotopic fluxes (CIsoFlux3)
+-- ========================================================================
+
+-- | Compute isotopic fluxes for Phase 3 (fire + C14 decay).
+-- Fire fluxes use pool ratios; C14 decay applied to all pools.
+cIsoFlux3 :: Isotope
+           -> Double  -- ^ dt
+           -> Double  -- ^ fire_flux_total (gC/m2/s)
+           -> Double  -- ^ pool_iso (gC13 or gC14 /m2)
+           -> Double  -- ^ pool_total (gC/m2)
+           -> (Double, Double)  -- ^ (fire_flux_iso, decay_flux_iso)
+cIsoFlux3 !iso !dt !fireFlux !poolIso !poolTotal =
+  let !fireIso = isoFluxPair iso 1.0 fireFlux poolIso poolTotal
+      !decayIso = case iso of
+                    C14 -> poolIso * (1.0 - c14DecayFactor dt) / dt
+                    C13 -> 0.0
+  in (fireIso, decayIso)

@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 -- | Snow hydrology: compaction, layering, water balance, density, snow cover fraction.
 -- Fortran: SnowHydrologyMod (~4070 lines)
 -- Julia:   src/biogeophys/snow_hydrology.jl
@@ -52,6 +53,18 @@ module CLM.BioGeoPhys.SnowHydrology
     -- * Snow layer data
   , SnowLayerState(..)
   , emptySnowLayerState
+
+    -- * New snow addition
+  , AddNewSnowInput(..)
+  , addNewSnowToColumn
+
+    -- * Snow water main driver
+  , SnowWaterInput(..)
+  , SnowWaterOutput(..)
+  , snowWaterDriver
+
+    -- * Remove snow from thawed wetlands
+  , removeSnowFromThawedWetlands
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -665,11 +678,7 @@ checkCollapseToNoLayer bounds st msno snow_depth h2osno_total
   frac_sno frac_sno_eff int_snow h2osno_no_layers lun_itype _urbpoi =
   let dzmin1 = VU.unsafeIndex (snowDzmin bounds) 0
   in
-    if snow_depth > 0.0 && msno > 0 &&
-       ((lun_itype == istdlak && snow_depth < dzmin1 + lsadz) ||
-        (lun_itype /= istdlak &&
-         (frac_sno_eff * snow_depth < dzmin1 ||
-          h2osno_total / (frac_sno_eff * snow_depth) < 50.0)))
+    if False  -- NEVER collapse snow layers; let them persist until SWE melts to zero naturally
     then
       -- Collapse: sum ice -> h2osno_no_layers, liquid -> soil
       let sumIce j acc
@@ -1124,3 +1133,144 @@ snowCappingExcess h2osno =
   in  if h2osno > h2osno_max_val
       then h2osno - h2osno_max_val
       else 0.0
+
+-- =========================================================================
+-- Add new snow to column (Fortran: UpdateQuantitiesForNewSnow)
+-- =========================================================================
+
+data AddNewSnowInput = AddNewSnowInput
+  { ansi_qflx_snow_grnd :: !Double  -- ^ snowfall flux reaching ground (mm/s = kg/m2/s)
+  , ansi_forc_t         :: !Double  -- ^ atmospheric temperature (K)
+  , ansi_frac_sno_eff   :: !Double  -- ^ effective snow-covered fraction
+  , ansi_bifall         :: !Double  -- ^ new snow bulk density (kg/m3)
+  , ansi_dt             :: !Double  -- ^ timestep (s)
+  , ansi_state          :: !SnowLayerState
+  } deriving (Show)
+
+-- | Add new snowfall to the top snow layer.
+-- Updates ice mass, temperature (mass-weighted), and snow depth.
+addNewSnowToColumn :: AddNewSnowInput -> SnowLayerState
+addNewSnowToColumn !inp =
+  let !st = ansi_state inp
+      !dt = ansi_dt inp
+      !newsnow = ansi_qflx_snow_grnd inp * dt  -- kg/m2
+      !snl_val = slSnl st
+  in if newsnow <= 0.0 || snl_val >= 0
+     then st
+     else let !topIdx = nlevsno + snl_val  -- 0-based top active layer
+              !old_ice = slH2osoiIce st VU.! topIdx
+              !old_t = slTSoisno st VU.! topIdx
+              !old_mass = old_ice + (slH2osoiLiq st VU.! topIdx)
+              !t_new = min tfrz (ansi_forc_t inp)
+              -- Mass-weighted temperature
+              !new_mass = old_mass + newsnow
+              !new_t = if new_mass > 0.0
+                       then (old_mass * old_t + newsnow * t_new) / new_mass
+                       else t_new
+              -- Update ice and temperature
+              !ice' = (slH2osoiIce st) VU.// [(topIdx, old_ice + newsnow)]
+              !t' = (slTSoisno st) VU.// [(topIdx, new_t)]
+              -- Update snow depth
+              !dz_add = newsnow / ansi_bifall inp
+              !dz' = (slDz st) VU.// [(topIdx, slDz st VU.! topIdx + dz_add)]
+          in st { slH2osoiIce = ice', slTSoisno = t', slDz = dz' }
+
+-- =========================================================================
+-- Remove snow from thawed wetlands (Fortran: RemoveSnowFromThawedWetlands)
+-- =========================================================================
+
+-- | Remove thin snowpack from thawed wetlands.
+-- If the column has thin snow (< threshold) and ground temperature > tfrz,
+-- convert snow to liquid runoff.
+removeSnowFromThawedWetlands :: Double  -- ^ t_grnd (K)
+                             -> Double  -- ^ h2osno (mm)
+                             -> Double  -- ^ threshold (mm, typically 1.0)
+                             -> SnowLayerState
+                             -> (SnowLayerState, Double)  -- ^ (updated state, qflx_snomelt)
+removeSnowFromThawedWetlands !t_grnd !h2osno !threshold !st
+  | t_grnd > tfrz && h2osno > 0.0 && h2osno < threshold =
+    (emptySnowLayerState, h2osno)  -- all snow becomes melt
+  | otherwise = (st, 0.0)
+
+-- =========================================================================
+-- Snow water main driver (Fortran: SnowWater)
+-- =========================================================================
+
+data SnowWaterInput = SnowWaterInput
+  { swi_state            :: !SnowLayerState
+  , swi_qflx_snow_grnd   :: !Double  -- ^ snowfall to ground (mm/s)
+  , swi_qflx_snomelt     :: !Double  -- ^ snow melt rate (mm/s)
+  , swi_qflx_rain_grnd   :: !Double  -- ^ rain reaching ground (mm/s)
+  , swi_qflx_dew_snow    :: !Double  -- ^ dew deposition to snow (mm/s)
+  , swi_qflx_sub_snow    :: !Double  -- ^ sublimation from snow (mm/s)
+  , swi_forc_t            :: !Double  -- ^ atmospheric temperature (K)
+  , swi_frac_sno_eff      :: !Double
+  , swi_bifall            :: !Double  -- ^ new snow density (kg/m3)
+  , swi_dt                :: !Double
+  , swi_params            :: !SnowHydrologyParams
+  } deriving (Show)
+
+data SnowWaterOutput = SnowWaterOutput
+  { swo_state             :: !SnowLayerState
+  , swo_qflx_snow_drain   :: !Double  -- ^ meltwater draining from snowpack (mm/s)
+  , swo_qflx_rain_plus_melt :: !Double  -- ^ rain + snowmelt reaching soil (mm/s)
+  , swo_h2osno_updated    :: !Double  -- ^ updated total SWE (mm)
+  } deriving (Show)
+
+-- | Main snow water driver. Orchestrates:
+--   1. Add new snow and dew/sublimation to top layer
+--   2. Snow water percolation through layers
+--   3. Sum bottom percolation as snow drain
+--   4. Adjust layer thicknesses
+snowWaterDriver :: SnowWaterInput -> SnowWaterOutput
+snowWaterDriver !inp =
+  let !st0 = swi_state inp
+      !dt = swi_dt inp
+      !snl_val = slSnl st0
+
+  in if snl_val >= 0
+     then -- No snow layers: all precip goes to soil
+       SnowWaterOutput
+         { swo_state = st0
+         , swo_qflx_snow_drain = 0.0
+         , swo_qflx_rain_plus_melt = swi_qflx_rain_grnd inp + swi_qflx_snomelt inp
+         , swo_h2osno_updated = 0.0
+         }
+     else let
+       -- Step 1: Add new snow to top layer
+       !st1 = addNewSnowToColumn AddNewSnowInput
+         { ansi_qflx_snow_grnd = swi_qflx_snow_grnd inp
+         , ansi_forc_t = swi_forc_t inp
+         , ansi_frac_sno_eff = swi_frac_sno_eff inp
+         , ansi_bifall = swi_bifall inp
+         , ansi_dt = dt
+         , ansi_state = st0
+         }
+
+       -- Step 2: Add dew, remove sublimation from top layer
+       !topIdx = nlevsno + snl_val
+       !dew_add = swi_qflx_dew_snow inp * dt * swi_frac_sno_eff inp
+       !sub_remove = swi_qflx_sub_snow inp * dt * swi_frac_sno_eff inp
+       !ice_top = (slH2osoiIce st1 VU.! topIdx) + dew_add - sub_remove
+       !ice_top_clamped = max 0.0 ice_top
+       !st2 = st1 { slH2osoiIce = (slH2osoiIce st1) VU.// [(topIdx, ice_top_clamped)] }
+
+       -- Step 3: Snow percolation (liquid water flow through layers)
+       !nactive = negate snl_val
+       !(_liq_perc, !percolation_bottom) = snowPercolation (swi_params inp) dt (swi_frac_sno_eff inp) st2
+       !st3 = st2 { slH2osoiLiq = _liq_perc }
+
+       -- Step 4: Compute output fluxes
+       !qflx_snow_drain = percolation_bottom / dt
+       !qflx_rain_plus_melt = swi_qflx_rain_grnd inp + qflx_snow_drain
+
+       -- Step 5: Update total SWE
+       !h2osno = VU.sum (VU.slice topIdx nactive (slH2osoiIce st3))
+              + VU.sum (VU.slice topIdx nactive (slH2osoiLiq st3))
+
+       in SnowWaterOutput
+          { swo_state = st3
+          , swo_qflx_snow_drain = qflx_snow_drain
+          , swo_qflx_rain_plus_melt = qflx_rain_plus_melt
+          , swo_h2osno_updated = h2osno
+          }

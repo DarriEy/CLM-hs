@@ -13,7 +13,7 @@ module CLM.Driver.CLMRun
   , isSimComplete
   , StepFlags(..)
   , computeStepFlags
-    -- * IO entry point (placeholder)
+    -- * IO entry point
   , clmRun
   ) where
 
@@ -24,6 +24,9 @@ import CLM.Infrastructure.Instances (CLMInstances(..), defaultCLMInstances)
 import CLM.Infrastructure.Decomp (BoundsType(..))
 import CLM.Infrastructure.Filters (FilterSet(..))
 import CLM.Driver.CLMInitialize (InitConfig(..), defaultInitConfig, clmInitialize, InitResult(..))
+import CLM.Driver.PipelineRunner
+  ( runPipeline, PipelineConfig(..), defaultPipelineConfig, writeDailyCSV )
+import System.FilePath ((</>))
 
 -- ---------------------------------------------------------------------------
 -- Configuration
@@ -139,42 +142,68 @@ computeStepFlags tm = StepFlags
   }
 
 -- ---------------------------------------------------------------------------
--- Main simulation loop (IO placeholder)
+-- Main simulation loop
 -- ---------------------------------------------------------------------------
 
 -- | Run a complete CLM simulation from initialization through time integration.
 -- This is the top-level entry point for offline CLM simulations.
--- Currently a placeholder that initializes and returns the initial state.
 clmRun :: RunConfig -> IO CLMInstances
 clmRun rc = do
-  -- Phase 1: Initialize
   let initCfg = defaultInitConfig
-        { ic_fsurdat      = rc_fsurdat rc
-        , ic_paramfile    = rc_paramfile rc
-        , ic_startYear    = rc_startYear rc
-        , ic_startMonth   = rc_startMonth rc
-        , ic_startDay     = rc_startDay rc
-        , ic_dtime        = rc_dtime rc
-        , ic_use_cn       = rc_use_cn rc
-        , ic_use_bedrock  = rc_use_bedrock rc
+        { ic_fsurdat           = rc_fsurdat rc
+        , ic_paramfile         = rc_paramfile rc
+        , ic_startYear         = rc_startYear rc
+        , ic_startMonth        = rc_startMonth rc
+        , ic_startDay          = rc_startDay rc
+        , ic_dtime             = rc_dtime rc
+        , ic_use_cn            = rc_use_cn rc
+        , ic_use_bedrock       = rc_use_bedrock rc
         , ic_use_aquifer_layer = rc_use_aquifer_layer rc
-        , ic_int_snow_max = rc_int_snow_max rc
-        , ic_use_hydrstress = rc_use_hydrstress rc
-        , ic_use_luna     = rc_use_luna rc
-        , ic_use_cndv     = rc_use_cndv rc
+        , ic_h2osfcflag        = rc_h2osfcflag rc
+        , ic_int_snow_max      = rc_int_snow_max rc
+        , ic_use_hydrstress    = rc_use_hydrstress rc
+        , ic_use_luna          = rc_use_luna rc
+        , ic_use_cndv          = rc_use_cndv rc
         }
-
   initRes <- clmInitialize initCfg
 
-  let inst0 = ir_inst initRes
-      tm0   = ir_tm initRes
-      endDt = DateTime (rc_endYear rc) (rc_endMonth rc) (rc_endDay rc) 0 0 0
+  let pipeCfg = defaultPipelineConfig
+        { pcDtime     = fromIntegral (rc_dtime rc)
+        , pcNdays     = runLengthDays rc
+        , pcDataDir   = if null (rc_fforcing rc) then pcDataDir defaultPipelineConfig else rc_fforcing rc
+        , pcVerbose   = rc_verbose rc
+        , pcUseCN     = rc_use_cn rc
+        , pcOutputCSV = rc_fhistory rc
+        }
 
-  -- Phase 2: Time loop (placeholder - just return initial state)
-  -- In a full implementation, this would:
-  -- 1. Open forcing file
-  -- 2. Open history writer
-  -- 3. Loop: advance time, read forcing, run driver, write output
-  -- 4. Write restart and cleanup
+  dailies <- runPipeline pipeCfg
+  if null (rc_fhistory rc)
+    then return ()
+    else writeDailyCSV (rc_fhistory rc) dailies
 
-  return inst0
+  return $ ir_inst initRes
+
+runLengthDays :: RunConfig -> Int
+runLengthDays rc =
+  max 1 $
+    dateOrdinal (DateTime (rc_endYear rc) (rc_endMonth rc) (rc_endDay rc) 0 0 0)
+    - dateOrdinal (DateTime (rc_startYear rc) (rc_startMonth rc) (rc_startDay rc) 0 0 0)
+
+dateOrdinal :: DateTime -> Int
+dateOrdinal dt =
+  (dtYear dt * 365) + monthOffset (dtMonth dt) + dtDay dt
+  where
+    monthOffset m = sum (map monthDays [1 .. m - 1])
+    monthDays  1 = 31
+    monthDays  2 = 28
+    monthDays  3 = 31
+    monthDays  4 = 30
+    monthDays  5 = 31
+    monthDays  6 = 30
+    monthDays  7 = 31
+    monthDays  8 = 31
+    monthDays  9 = 30
+    monthDays 10 = 31
+    monthDays 11 = 30
+    monthDays 12 = 31
+    monthDays _  = 30

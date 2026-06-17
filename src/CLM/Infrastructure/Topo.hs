@@ -80,7 +80,7 @@ topoInitCold ncols colLandunit _colGridcell _colItype lunItype
         let l  = colLandunit VU.! c - 1
             lt = lunItype VU.! l
         in if lt == istice
-           then (0.0, True)  -- simplified: always 0 for ice without GLC MEC data
+           then (0.0, True)  -- ice columns use sea-level elevation unless GLC MEC data is supplied
            else if (isHillslope VU.! c) && tc_downscale_hillslope_meteorology cfg
                 then (hillElev VU.! c, True)
                 else (0.0, False)

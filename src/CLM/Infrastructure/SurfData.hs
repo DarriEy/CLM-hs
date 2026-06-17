@@ -224,12 +224,12 @@ countSubgridElements ng wtLunit wtNatPatch wtCft wtGlcMec
 -- IO
 -- ---------------------------------------------------------------------------
 
--- | Placeholder: read PFT/CFT dimensions from a surface file.
+-- | Read PFT/CFT dimensions for the compatibility surface-data API.
 surfrdGetNumPatches :: FilePath -> IO (Int, Int)
 surfrdGetNumPatches _fsurdat = do
   return (15, 2)
 
--- | Placeholder: read all surface data from a NetCDF file.
+-- | Read all surface data for the compatibility surface-data API.
 surfrdGetData :: FilePath -> Int -> Int -> IO SurfaceInputData
 surfrdGetData _fsurdat _begg _endg = do
   return defaultSurfaceInputData

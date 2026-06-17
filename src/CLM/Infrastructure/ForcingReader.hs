@@ -33,10 +33,13 @@ module CLM.Infrastructure.ForcingReader
   ) where
 
 import qualified Data.Vector.Unboxed as VU
+import System.Directory (doesDirectoryExist)
 import System.FilePath ((</>))
 
 import CLM.Constants.PhysicalConstants (tfrz, rair, cpair)
 import CLM.Infrastructure.BinaryIO (readFloat64Vector)
+import CLM.Infrastructure.NetCDF
+  ( NcFile, ncOpen, ncClose, ncHasVar, ncReadDouble1D )
 
 -- ---------------------------------------------------------------------------
 -- Constants
@@ -177,9 +180,15 @@ applyForcingDefaults hgt pco2 po2 =
 -- Binary I/O
 -- ---------------------------------------------------------------------------
 
--- | Legacy placeholder: initialize forcing reader (no-op for compatibility).
+-- | Initialize forcing reader from either an exported binary directory or NetCDF file.
 forcingReaderInit :: FilePath -> IO ForcingReaderState
-forcingReaderInit fp = return $ defaultForcingReaderState { frs_filepath = fp }
+forcingReaderInit fp
+  | null fp = return defaultForcingReaderState
+  | otherwise = do
+      isDir <- doesDirectoryExist fp
+      if isDir
+        then forcingReaderInitBinary fp
+        else forcingReaderInitNetCDF fp
 
 -- | Initialize forcing reader from a directory of binary files.
 -- Reads all forcing data into memory for fast access.
@@ -236,6 +245,52 @@ readForcingStepPure frs targetIdx =
       frs' = frs { frs_timeIndex = idx + 1 }
   in (ft, frs')
 
--- | Close forcing reader (no-op for binary reader).
+-- | Close forcing reader. Data-backed readers keep arrays in memory, so there is
+-- no open handle after initialization.
 forcingReaderClose :: ForcingReaderState -> IO ()
 forcingReaderClose _ = return ()
+
+forcingReaderInitNetCDF :: FilePath -> IO ForcingReaderState
+forcingReaderInitNetCDF fp = do
+  opened <- ncOpen fp
+  case opened of
+    Left err -> ioError (userError err)
+    Right nc -> do
+      tbot <- readRequired nc ["TBOT", "tbot"]
+      psrf <- readRequired nc ["PSRF", "psrf", "PBOT", "pbot"]
+      wind <- readRequired nc ["WIND", "wind"]
+      flds <- readRequired nc ["FLDS", "flds"]
+      fsds <- readRequired nc ["FSDS", "fsds"]
+      precip <- readRequired nc ["PRECTmms", "PRECIP", "precip"]
+      qbot <- readRequired nc ["QBOT", "qbot"]
+      ncClose nc
+      let n = minimum (map VU.length [tbot, psrf, wind, flds, fsds, precip, qbot])
+          trim = VU.take n
+      return $! ForcingReaderState
+        { frs_timeIndex = 0
+        , frs_ntimes    = n
+        , frs_filepath  = fp
+        , frs_tbot      = trim tbot
+        , frs_psrf      = trim psrf
+        , frs_wind      = trim wind
+        , frs_flds      = trim flds
+        , frs_fsds      = trim fsds
+        , frs_precip    = trim precip
+        , frs_qbot      = trim qbot
+        }
+
+readRequired :: NcFile -> [String] -> IO (VU.Vector Double)
+readRequired nc names = do
+  found <- firstExisting names
+  case found of
+    Nothing -> ioError (userError ("missing NetCDF variable; tried " ++ show names))
+    Just name -> do
+      vals <- ncReadDouble1D nc name
+      case vals of
+        Left err -> ioError (userError err)
+        Right v  -> return v
+  where
+    firstExisting [] = return Nothing
+    firstExisting (name:rest) = do
+      exists <- ncHasVar nc name
+      if exists then return (Just name) else firstExisting rest

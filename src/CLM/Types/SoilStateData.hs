@@ -57,6 +57,8 @@ data SoilStateData = SoilStateData
   , sstate_rootfr_col               :: !(VU.Vector Double) -- ^ col root fraction
   , sstate_rootfr_patch             :: !(VU.Vector Double) -- ^ patch root fraction for water
   , sstate_crootfr_patch            :: !(VU.Vector Double) -- ^ patch root fraction for carbon
+  , sstate_smpso_patch              :: !(VU.Vector Double) -- ^ patch soil potential at full stomatal opening [mm]
+  , sstate_smpsc_patch              :: !(VU.Vector Double) -- ^ patch soil potential at stomatal closure [mm]
   , sstate_root_depth_patch         :: !(VU.Vector Double) -- ^ patch root depth
   , sstate_rootr_road_perv_col      :: !(VU.Vector Double) -- ^ col effective root fraction in urban pervious road
   , sstate_rootfr_road_perv_col     :: !(VU.Vector Double) -- ^ col root fraction in urban pervious road
@@ -109,6 +111,8 @@ defaultSoilStateData = SoilStateData
   , sstate_rootfr_col               = VU.empty
   , sstate_rootfr_patch             = VU.empty
   , sstate_crootfr_patch            = VU.empty
+  , sstate_smpso_patch              = VU.empty
+  , sstate_smpsc_patch              = VU.empty
   , sstate_root_depth_patch         = VU.empty
   , sstate_rootr_road_perv_col      = VU.empty
   , sstate_rootfr_road_perv_col     = VU.empty

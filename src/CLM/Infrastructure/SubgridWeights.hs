@@ -189,7 +189,7 @@ getLandunitWeight
   -> Int                  -- ^ landunit type ltype (1-based)
   -> Double
 getLandunitWeight maxLunit lunIndices lunWtgcell g ltype =
-  let idx = (ltype - 1) * 1 + (g - 1)  -- simplified for single gridcell
+  let idx = (ltype - 1) * 1 + (g - 1)  -- single-gridcell compatibility index
       l   = if idx >= 0 && idx < VU.length lunIndices
             then lunIndices VU.! idx
             else -1

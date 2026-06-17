@@ -61,7 +61,7 @@ defaultColdStartConfig = ColdStartConfig
   }
 
 -- ============================================================================
--- Surface input data (simplified from NetCDF reader)
+-- Surface input data used by cold-start initialization
 -- ============================================================================
 
 -- | Surface data read from surfdata_clm.nc.
@@ -227,10 +227,14 @@ colDz_ _cfg _surf =
 initTemperatures :: Int -> TemperatureData
 initTemperatures nlevtot = TemperatureData
   { t_soisno_col  = VU.replicate nlevtot tSoil
+  , t_soisno_bef_col = VU.replicate nlevtot tSoil
   , t_grnd_col    = tSoil
   , t_h2osfc_col  = tH2osfc
+  , t_h2osfc_bef_col = tH2osfc
   , t_ref2m_patch = tVeg
   , t_veg_patch   = tVeg
+  , t_ref2m_patch_vec = VU.empty
+  , t_veg_patch_vec   = VU.empty
   }
 
 -- ============================================================================
@@ -252,6 +256,11 @@ initSoilMoisture cfg sp colDz = WaterStateData
   , h2osno_col     = 0.0
   , h2osfc_col     = 0.0
   , h2ocan_patch   = 0.0
+  , liqcan_patch   = 0.0
+  , snocan_patch   = 0.0
+  , h2ocan_patch_vec = VU.empty
+  , liqcan_patch_vec = VU.empty
+  , snocan_patch_vec = VU.empty
   }
   where
     _ncols  = cscNcols cfg
@@ -498,7 +507,7 @@ computeWatfc surf j =
       b  = computeBsw surf j
   in  ws * (0.01 / hk) ** (1.0 / (2.0 * b + 3.0))
 
--- | Get sand/clay/omFrac (simplified accessor avoiding seq issues).
+-- | Get sand, clay, and organic-matter fraction with bounded indexing.
 getSandClayOm' :: SurfaceInputData -> Int -> (Double, Double, Double)
 getSandClayOm' surf j =
   let jSurf = min j (VU.length (surfPctSand surf) - 1)
@@ -570,4 +579,24 @@ initEnergyFluxes = EnergyFluxData
   , sabv_patch           = 0.0
   , sabg_patch           = 0.0
   , fsa_patch            = 0.0
+  , cgrnds_patch         = 0.0
+  , cgrndl_patch         = 0.0
+  , cgrnd_patch          = 0.0
+  , dlrad_patch          = 0.0
+  , ulrad_patch          = 0.0
+  , eflx_lwrad_out_patch = 0.0
+  , eflx_lwrad_net_patch = 0.0
+  , eflx_sh_tot_patch_vec  = VU.empty
+  , eflx_lh_tot_patch_vec  = VU.empty
+  , eflx_sh_grnd_patch_vec = VU.empty
+  , sabv_patch_vec         = VU.empty
+  , sabg_patch_vec         = VU.empty
+  , fsa_patch_vec          = VU.empty
+  , cgrnds_patch_vec       = VU.empty
+  , cgrndl_patch_vec       = VU.empty
+  , cgrnd_patch_vec        = VU.empty
+  , dlrad_patch_vec        = VU.empty
+  , ulrad_patch_vec        = VU.empty
+  , eflx_lwrad_out_patch_vec = VU.empty
+  , eflx_lwrad_net_patch_vec = VU.empty
   }

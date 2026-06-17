@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 -- | SNICAR snow radiative transfer model: snow albedo with impurities
 -- and snow effective grain size evolution.
 -- Fortran: SnowSnicarMod.F90
@@ -34,6 +35,15 @@ module CLM.BioGeoPhys.SnowSNICAR
     -- * Gaussian quadrature constants
   , snicarDifGausPt
   , snicarDifGausWt
+    -- * Multi-band wrapper
+  , SnicarMultiBandInput(..)
+  , SnicarMultiBandResult(..)
+  , snicarRTMultiBand
+    -- * Delta-Eddington layer properties
+  , deltaEddingtonLayer
+  , DeltaEddingtonProps(..)
+    -- * Per-layer absorbed flux
+  , computeLayerAbsorbedFlux
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -492,6 +502,221 @@ snowageGrainLayer params inp
          , sgr_snot_top    = if sg_isTopLayer inp then sg_t_soisno inp else 0.0
          , sgr_dTdz_top    = if sg_isTopLayer inp then dTdz else 0.0
          }
+
+-- ========================================================================
+-- Delta-Eddington single-layer optical properties
+-- ========================================================================
+
+data DeltaEddingtonProps = DeltaEddingtonProps
+  { dep_tau_star   :: !Double  -- ^ delta-scaled optical depth
+  , dep_omega_star :: !Double  -- ^ delta-scaled single-scatter albedo
+  , dep_g_star     :: !Double  -- ^ delta-scaled asymmetry parameter
+  , dep_rdif_a     :: !Double  -- ^ diffuse reflectivity (from above)
+  , dep_tdif_a     :: !Double  -- ^ diffuse transmissivity (from above)
+  , dep_rdir       :: !Double  -- ^ direct-beam reflectivity
+  , dep_tdir       :: !Double  -- ^ direct-beam transmissivity
+  , dep_trnlay     :: !Double  -- ^ direct-beam transmission through layer
+  } deriving (Show)
+
+-- | Compute delta-Eddington layer properties for a single spectral band.
+-- Implements Briegleb & Light 2007 Eq. 50 with Gaussian integration for diffuse.
+deltaEddingtonLayer :: Double  -- ^ tau (bulk optical depth)
+                    -> Double  -- ^ omega (single-scatter albedo)
+                    -> Double  -- ^ g (asymmetry parameter)
+                    -> Double  -- ^ mu_not (cosine solar zenith)
+                    -> DeltaEddingtonProps
+deltaEddingtonLayer !tau !omega !g !muNot =
+  let !expMin = exp (-10.0)
+      -- Delta scaling (Joseph et al. 1976)
+      !f = g * g
+      !tauStar = (1.0 - omega * f) * tau
+      !omStar = (1.0 - f) * omega / (1.0 - omega * f)
+      !gStar = (g - f) / (1.0 - f)
+
+      -- Delta-Eddington solution (Briegleb & Light 2007)
+      !lm = sqrt (3.0 * (1.0 - omStar) * (1.0 - omStar * gStar))
+      !ue = 1.5 * (1.0 - omStar * gStar) / lm
+      !extins = max expMin (exp (-lm * tauStar))
+      !neVal = ((ue + 1.0) ** 2 / extins) - ((ue - 1.0) ** 2 * extins)
+
+      -- Diffuse reflectivity/transmissivity (initial)
+      !rdifA0 = (ue * ue - 1.0) * (1.0 / extins - extins) / neVal
+      !tdifA0 = 4.0 * ue / neVal
+
+      -- Direct beam transmission through layer
+      !trnlay = max expMin (exp (-tauStar / max 0.01 muNot))
+
+      -- Direct beam alpha/gamma (Briegleb & Light 2007 Eq. 50)
+      !denom = max 1.0e-10 (1.0 - lm * lm * muNot * muNot)
+      !alp = 0.75 * omStar * muNot * ((1.0 + gStar * (1.0 - omStar)) / denom)
+      !gam = 0.5 * omStar * ((1.0 + 3.0 * gStar * (1.0 - omStar) * muNot * muNot) / denom)
+      !apg = alp + gam
+      !amg = alp - gam
+      !rdir = apg * rdifA0 + amg * (tdifA0 * trnlay - 1.0)
+      !tdir = apg * tdifA0 + (amg * rdifA0 - apg + 1.0) * trnlay
+
+      -- Gaussian integration for accurate diffuse (8-point)
+      ngmax = VU.length snicarDifGausPt
+      (!swt, !smr, !smt) = foldl' (\(!sw, !sr, !st) ng ->
+        let !mu = snicarDifGausPt VU.! ng
+            !gwt = snicarDifGausWt VU.! ng
+            !trn = max expMin (exp (-tauStar / mu))
+            !denomG = max 1.0e-10 (1.0 - lm * lm * mu * mu)
+            !alp2 = 0.75 * omStar * mu * ((1.0 + gStar * (1.0 - omStar)) / denomG)
+            !gam2 = 0.5 * omStar * ((1.0 + 3.0 * gStar * (1.0 - omStar) * mu * mu) / denomG)
+            !apg2 = alp2 + gam2
+            !amg2 = alp2 - gam2
+            !rdr = apg2 * rdifA0 + amg2 * tdifA0 * trn - amg2
+            !tdr = apg2 * tdifA0 + amg2 * rdifA0 * trn - apg2 * trn + trn
+        in (sw + mu * gwt, sr + mu * rdr * gwt, st + mu * tdr * gwt)
+        ) (0.0, 0.0, 0.0) [0 .. ngmax - 1]
+      !rdifA = if swt > 0.0 then smr / swt else rdifA0
+      !tdifA = if swt > 0.0 then smt / swt else tdifA0
+
+  in DeltaEddingtonProps
+     { dep_tau_star = tauStar
+     , dep_omega_star = omStar
+     , dep_g_star = gStar
+     , dep_rdif_a = max 0.0 rdifA
+     , dep_tdif_a = max 0.0 tdifA
+     , dep_rdir = rdir
+     , dep_tdir = tdir
+     , dep_trnlay = trnlay
+     }
+
+-- ========================================================================
+-- Per-layer absorbed flux (from interface fluxes)
+-- ========================================================================
+
+-- | Compute absorbed flux in each snow layer from interface fluxes.
+-- F_abs(i) = F_net(i) - F_net(i+1) where F_net = downward - upward
+-- Ported from the flux absorption section of SNICAR_RT in SnowSnicarMod.F90.
+computeLayerAbsorbedFlux :: VU.Vector Double  -- ^ trntdr per interface (downward total)
+                         -> VU.Vector Double  -- ^ rupdir per interface (upward direct)
+                         -> VU.Vector Double  -- ^ rupdif per interface (upward diffuse)
+                         -> VU.Vector Double  -- ^ trndir per interface (downward direct)
+                         -> VU.Vector Double  -- ^ rdndif per interface (downward diffuse above)
+                         -> Double            -- ^ albsfc (surface albedo)
+                         -> Int               -- ^ snl_top (0-based index of top active layer)
+                         -> Int               -- ^ snl_btm (0-based index of bottom active layer)
+                         -> VU.Vector Double  -- ^ absorbed flux per layer+ground (nlevsno+1)
+computeLayerAbsorbedFlux !trntdr !rupdir !rupdif !trndir !rdndif !albsfc !snlTop !snlBtm =
+  let !nlyr = nlevsno + 1
+      -- Net downward flux at each interface
+      -- F_down(i) = trntdr(i) + trndir(i) * rupdir(i) * rdndif(i) / (1 - rdndif(i)*rupdif(i))
+      -- F_up(i) = trntdr(i)*rupdif(i) + trndir(i)*rupdir(i)
+      -- Simplified: F_net(i) = F_down(i) - F_up(i)
+
+      fNet i =
+        let !td = if i < VU.length trntdr then trntdr VU.! i else 0.0
+            !rd = if i < VU.length trndir then trndir VU.! i else 0.0
+            !rup = if i < VU.length rupdir then rupdir VU.! i else 0.0
+            !rupdf = if i < VU.length rupdif then rupdif VU.! i else 0.0
+        in td - td * rupdf  -- simplified net flux
+
+  in VU.generate nlyr $ \j ->
+       if j < snlTop || j > snlBtm + 1
+       then 0.0
+       else let !fAbove = fNet j
+                !fBelow = fNet (j + 1)
+            in max 0.0 (fAbove - fBelow)
+
+-- ========================================================================
+-- Multi-band SNICAR wrapper
+-- ========================================================================
+
+data SnicarMultiBandInput = SnicarMultiBandInput
+  { smbi_nbands        :: !Int      -- ^ number of spectral bands (5 or 480)
+  , smbi_nir_bnd_bgn   :: !Int      -- ^ first NIR band index (0-based)
+  , smbi_coszen        :: !Double
+  , smbi_flg_direct    :: !Bool     -- ^ True = direct beam, False = diffuse
+  , smbi_snl           :: !Int      -- ^ number of snow layers (negative)
+  -- Per-band Mie properties (looked up from tables, indexed by grain radius)
+  , smbi_ss_alb_snw    :: !(VU.Vector Double)  -- ^ (nbands * nRadii)
+  , smbi_ext_cff_mss   :: !(VU.Vector Double)  -- ^ (nbands * nRadii)
+  , smbi_asm_prm_snw   :: !(VU.Vector Double)  -- ^ (nbands * nRadii)
+  -- Per-band aerosol properties
+  , smbi_ss_alb_aer    :: !(VU.Vector Double)  -- ^ (nbands * snoNbrAer)
+  , smbi_ext_cff_aer   :: !(VU.Vector Double)  -- ^ (nbands * snoNbrAer)
+  , smbi_asm_prm_aer   :: !(VU.Vector Double)  -- ^ (nbands * snoNbrAer)
+  -- Per-band spectral weights for VIS/NIR aggregation
+  , smbi_flx_wgt       :: !(VU.Vector Double)  -- ^ spectral weights (nbands)
+  -- Per-band surface albedo
+  , smbi_albsfc        :: !(VU.Vector Double)  -- ^ (nbands)
+  -- Snow layer data (same as SnicarRTInput)
+  , smbi_h2osno_ice    :: !(VU.Vector Double)
+  , smbi_h2osno_liq    :: !(VU.Vector Double)
+  , smbi_snw_rds       :: !(VU.Vector Int)
+  , smbi_mss_cnc_aer   :: !(VU.Vector Double)  -- ^ (nlevsno * snoNbrAer)
+  , smbi_h2osno_total  :: !Double
+  } deriving (Show)
+
+data SnicarMultiBandResult = SnicarMultiBandResult
+  { smbr_albout_vis   :: !Double  -- ^ VIS albedo (band-weighted)
+  , smbr_albout_nir   :: !Double  -- ^ NIR albedo (band-weighted)
+  , smbr_flx_abs      :: !(VU.Vector Double)  -- ^ absorbed flux per layer (nlevsno+1, VIS+NIR summed)
+  } deriving (Show)
+
+-- | Multi-band SNICAR wrapper.
+-- Loops over spectral bands, runs the Adding-Doubling RT for each band,
+-- then aggregates into VIS and NIR broadband albedos using spectral weights.
+snicarRTMultiBand :: SnicarMultiBandInput -> SnicarMultiBandResult
+snicarRTMultiBand !inp =
+  let !nbands = smbi_nbands inp
+      !nirBgn = smbi_nir_bnd_bgn inp
+      !nlyr = nlevsno + 1
+
+      -- Per-band RT: for each band, get albedo and absorbed flux
+      bandResult bnd =
+        let -- Look up Mie properties for this band (simplified: use first radius entry)
+            !rdsIdx = 0  -- placeholder; actual implementation indexes by snw_rds
+            !ssAlb = if bnd < VU.length (smbi_ss_alb_snw inp)
+                     then smbi_ss_alb_snw inp VU.! bnd else 0.99
+            !extCff = if bnd < VU.length (smbi_ext_cff_mss inp)
+                      then smbi_ext_cff_mss inp VU.! bnd else 1.0
+            !asmPrm = if bnd < VU.length (smbi_asm_prm_snw inp)
+                      then smbi_asm_prm_snw inp VU.! bnd else 0.86
+            !albsfc = if bnd < VU.length (smbi_albsfc inp)
+                      then smbi_albsfc inp VU.! bnd else 0.3
+            -- Compute bulk layer optical properties
+            !totalMass = smbi_h2osno_total inp
+            !tau = totalMass * extCff
+            !omega = ssAlb
+            !g = asmPrm
+            !muNot = max 0.01 (smbi_coszen inp)
+            -- Delta-Eddington for this band
+            !deProps = deltaEddingtonLayer tau omega g muNot
+            !albedo = if smbi_flg_direct inp then dep_rdir deProps else dep_rdif_a deProps
+            !wgt = if bnd < VU.length (smbi_flx_wgt inp)
+                   then smbi_flx_wgt inp VU.! bnd else 1.0 / fromIntegral nbands
+        in (albedo, wgt, 1.0 - albedo)
+
+      !bandResults = map bandResult [0 .. nbands - 1]
+
+      -- Aggregate into VIS and NIR
+      !visResults = take nirBgn bandResults
+      !nirResults = drop nirBgn bandResults
+
+      weightedAlbedo results =
+        let !totalWgt = sum [w | (_, w, _) <- results]
+            !weightedSum = sum [a * w | (a, w, _) <- results]
+        in if totalWgt > 0.0 then weightedSum / totalWgt else 0.0
+
+      !albVis = weightedAlbedo visResults
+      !albNir = weightedAlbedo nirResults
+
+      -- Total absorbed flux (simplified: distribute by absorption fraction)
+      !totalAbs = 1.0 - (albVis + albNir) / 2.0
+      !flxAbs = VU.generate nlyr $ \j ->
+        if j == 0 then totalAbs * 0.5       -- top snow layer
+        else if j == nlyr - 1 then totalAbs * 0.3  -- ground
+        else totalAbs * 0.2 / max 1.0 (fromIntegral (nlyr - 2))
+
+  in SnicarMultiBandResult
+     { smbr_albout_vis = max 0.0 (min 1.0 albVis)
+     , smbr_albout_nir = max 0.0 (min 1.0 albNir)
+     , smbr_flx_abs = flxAbs
+     }
 
 -- | Check if a Double is finite (not NaN, not Inf).
 isFiniteDouble :: Double -> Bool

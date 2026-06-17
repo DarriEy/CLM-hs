@@ -15,6 +15,9 @@ module CLM.BioGeoChem.LitterVertTransp
   , VertTranspInput(..)
   , VertTranspOutput(..)
   , litterVertTransp
+    -- * Single-pool tridiagonal transport
+  , TridiagTranspInput(..)
+  , tridiagVertTransp
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -226,3 +229,115 @@ litterVertTransp inp =
     , vto_som_adv_coef = som_adv_coef
     , vto_som_diffus_coef = som_diffus_coef
     }
+
+-- =========================================================================
+-- Single-pool tridiagonal vertical transport (Patankar 1980)
+-- =========================================================================
+
+data TridiagTranspInput = TridiagTranspInput
+  { tti_nlev           :: !Int
+  , tti_conc_vr        :: !(VU.Vector Double)  -- ^ concentration per level (gC/m3 or gN/m3)
+  , tti_source_vr      :: !(VU.Vector Double)  -- ^ source/sink per level (gC/m3/s or gN/m3/s)
+  , tti_diffus         :: !(VU.Vector Double)  -- ^ diffusivity at interfaces (nlev+1) [m2/s]
+  , tti_adv_flux       :: !(VU.Vector Double)  -- ^ advective flux at interfaces (nlev+1) [m/s]
+  , tti_dzsoi          :: !(VU.Vector Double)  -- ^ layer thickness (nlev) [m]
+  , tti_zisoi          :: !(VU.Vector Double)  -- ^ interface depths (nlev+1) [m]
+  , tti_dt             :: !Double              -- ^ timestep [s]
+  , tti_nbedrock       :: !Int                 -- ^ bedrock layer index
+  } deriving (Show)
+
+-- | Full Patankar tridiagonal advection-diffusion solver for a single
+-- decomposition pool in a single column. Returns updated concentration profile.
+--
+-- The equation solved is:
+--   d(conc)/dt = d/dz[D * d(conc)/dz] - d/dz[v * conc] + S
+--
+-- Using the power-law scheme (Patankar 1980, Table 5.2):
+--   a_j * conc'_j = a_{j-1/2} * conc'_{j-1} + a_{j+1/2} * conc'_{j+1} + S_j * dz_j
+tridiagVertTransp :: TridiagTranspInput -> VU.Vector Double
+tridiagVertTransp !inp =
+  let !nl = tti_nlev inp
+      !dt = tti_dt inp
+      !nbr = tti_nbedrock inp
+      !conc = tti_conc_vr inp
+      !src = tti_source_vr inp
+      !diffus = tti_diffus inp
+      !adv = tti_adv_flux inp
+      !dz = tti_dzsoi inp
+      !zi = tti_zisoi inp
+
+      -- Interface distances
+      dz_iface j = if j > 0 && j < nl
+                   then (zi VU.! (j+1) - zi VU.! j)
+                   else dz VU.! (min (nl-1) (max 0 j))
+
+      -- Peclet number at interface j+1/2
+      peclet j = let !d = max 1.0e-20 (diffus VU.! (j+1))
+                     !f = adv VU.! (j+1) * dz_iface j
+                 in f / d
+
+      -- Patankar coefficient at interface j+1/2
+      aCoef j = let !d = diffus VU.! (j+1) / max 1.0e-10 (dz_iface j)
+                    !f = adv VU.! (j+1)
+                    !pe = peclet j
+                    !pa = patankarA pe
+                in d * pa + max 0.0 (negate f)
+
+      -- Build tridiagonal system: a_sub, a_diag, a_sup, rhs
+      buildRow j =
+        let !aP_below = if j > 0 && j <= nbr then aCoef (j-1) else 0.0
+            !aP_above = if j < nl-1 && j < nbr then aCoef j else 0.0
+            !source = src VU.! j * (dz VU.! j)
+            !a_sub = negate aP_below
+            !a_sup = negate aP_above
+            !a_diag = aP_below + aP_above + (dz VU.! j) / dt
+            !rhs = (conc VU.! j) * (dz VU.! j) / dt + source
+        in (a_sub, a_diag, a_sup, rhs)
+
+      rows = map buildRow [0..nl-1]
+
+      -- Thomas algorithm (tridiagonal solve)
+      solve [] = []
+      solve rs =
+        let -- Forward sweep
+            fwd [] _ = []
+            fwd ((_, b, c, d):rest) prevW =
+              let (_, prevB, _, prevD) = prevW
+                  !w = if prevB /= 0.0 then fst4 (head rest') / prevB else 0.0
+                  !newB = b - w * c
+                  !newD = d - w * prevD
+                  rest' = (0.0, newB, c, newD) : fwd rest (0.0, newB, c, newD)
+              in rest'
+            fwd _ _ = []
+
+            fst4 (a, _, _, _) = a
+
+            -- Simple forward elimination + back substitution
+            thomasSolve = go1 (map (\(a,b,c,d) -> (a,b,c,d)) rs) [] []
+            go1 [] cs ds = backSub (reverse cs) (reverse ds) []
+            go1 ((asub, bdiag, csup, rhs):rest) cs ds =
+              case ds of
+                [] -> go1 rest (csup / bdiag : cs) (rhs / bdiag : ds)
+                (prevD:_) ->
+                  let !prevC = head cs
+                      !m = if bdiag - asub * prevC /= 0.0
+                           then 1.0 / (bdiag - asub * prevC)
+                           else 0.0
+                      !c' = csup * m
+                      !d' = (rhs - asub * prevD) * m
+                  in go1 rest (c' : cs) (d' : ds)
+
+            backSub [] _ acc = acc
+            backSub (_:_) [] _ = []  -- shouldn't happen
+            backSub (c:cs) (d:ds) [] = backSub cs ds [d]
+            backSub (c:cs) (d:ds) (x:xs) =
+              backSub cs ds (d - c * x : x : xs)
+
+        in thomasSolve
+
+      !solution = solve rows
+      !result = VU.fromList $ map (max 0.0) $
+                if length solution == nl then solution
+                else VU.toList conc  -- fallback if solver fails
+
+  in result

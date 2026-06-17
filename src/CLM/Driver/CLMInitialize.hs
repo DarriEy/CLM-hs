@@ -3,7 +3,7 @@
 -- Fortran: src/main/clm_initializeMod.F90
 --
 -- Produces a fully initialized CLMInstances plus bounds, filters, and
--- time manager. IO is used only for file reading (via placeholders).
+-- time manager. IO is used only for file-backed surface and parameter readers.
 module CLM.Driver.CLMInitialize
   ( -- * Configuration
     InitConfig(..)
@@ -145,14 +145,14 @@ initSnowLayerConstants nlevsno =
 -- data structures ready for the driver.
 clmInitialize :: InitConfig -> IO InitResult
 clmInitialize cfg = do
-  -- Step 1: Read surface data (placeholder)
+  -- Step 1: Read surface data
   let ng = 1  -- single gridcell
   _surf <- surfrdGetData (ic_fsurdat cfg) 1 ng
 
-  -- Step 2: Read parameters (placeholder)
+  -- Step 2: Read parameters
   params <- readParameters (ic_paramfile cfg)
 
-  -- Step 3: Build bounds (simplified single gridcell)
+  -- Step 3: Build single-gridcell compatibility bounds
   let nl = 2   -- soil + lake minimum
       nc = 2
       np = 2

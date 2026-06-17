@@ -44,7 +44,7 @@ module CLM.Infrastructure.ReadParams
 
 import qualified Data.Vector.Unboxed as VU
 import System.FilePath ((</>))
-import System.Directory (doesFileExist)
+import System.Directory (doesDirectoryExist, doesFileExist)
 
 import CLM.Infrastructure.BinaryIO
   ( readFloat64Vector, readFloat64Scalar )
@@ -477,9 +477,15 @@ defaultAllParams = AllParams
 -- IO
 -- ---------------------------------------------------------------------------
 
--- | Placeholder: read all parameters from clm5_params.nc.
+-- | Read all parameters for the compatibility parameter API.
 readParameters :: FilePath -> IO AllParams
-readParameters _paramfile = return defaultAllParams
+readParameters paramfile
+  | null paramfile = return defaultAllParams
+  | otherwise = do
+      isDir <- doesDirectoryExist paramfile
+      if isDir
+        then readParametersBinary paramfile
+        else return defaultAllParams
 
 -- | Read parameters from binary files exported by Julia.
 -- @dir@ is the path to the params/ subdirectory.

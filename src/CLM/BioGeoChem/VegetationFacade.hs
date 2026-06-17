@@ -48,6 +48,13 @@ module CLM.BioGeoChem.VegetationFacade
   , getFrootCarbonPatch
   , getCrootCarbonPatch
   , getTotvegcCol
+    -- * Ecosystem dynamics orchestration
+  , EcosystemDynInput(..)
+  , EcosystemDynOutput(..)
+  , ecosystemDynamics
+    -- * Vegetation state summary
+  , VegStateSummary(..)
+  , summarizeVegState
   ) where
 
 import qualified Data.Vector.Unboxed as U
@@ -263,3 +270,110 @@ getTotvegcCol
 getTotvegcCol useCN totvegcCol
   | useCN     = totvegcCol
   | otherwise = U.replicate (U.length totvegcCol) (0.0 / 0.0)
+
+-- ========================================================================
+-- Ecosystem dynamics orchestration
+-- ========================================================================
+
+-- | Input for ecosystem dynamics (one timestep).
+-- This is the high-level interface that the CLM driver calls.
+data EcosystemDynInput = EcosystemDynInput
+  { edi_config        :: !CNVegetationConfig
+  , edi_npatches      :: !Int
+  , edi_ncols         :: !Int
+  , edi_dt            :: !Double
+  -- Summary carbon state
+  , edi_totvegc       :: !(U.Vector Double)  -- ^ total veg C per column (gC/m2)
+  , edi_totecosysc    :: !(U.Vector Double)  -- ^ total ecosystem C per column
+  , edi_totlitc       :: !(U.Vector Double)  -- ^ total litter C per column
+  , edi_totsomc       :: !(U.Vector Double)  -- ^ total SOM C per column
+  -- Summary fluxes
+  , edi_gpp           :: !(U.Vector Double)  -- ^ GPP per column (gC/m2/s)
+  , edi_npp           :: !(U.Vector Double)  -- ^ NPP per column
+  , edi_nep           :: !(U.Vector Double)  -- ^ NEP per column
+  , edi_nbp           :: !(U.Vector Double)  -- ^ NBP per column
+  , edi_hr            :: !(U.Vector Double)  -- ^ heterotrophic respiration
+  , edi_ar            :: !(U.Vector Double)  -- ^ autotrophic respiration
+  } deriving (Show)
+
+-- | Output from ecosystem dynamics.
+data EcosystemDynOutput = EcosystemDynOutput
+  { edo_nee           :: !(U.Vector Double)  -- ^ net ecosystem exchange (gC/m2/s)
+  , edo_fire_closs    :: !(U.Vector Double)  -- ^ fire C loss (gC/m2/s)
+  , edo_litfall       :: !(U.Vector Double)  -- ^ total litterfall (gC/m2/s)
+  , edo_vegc_change   :: !(U.Vector Double)  -- ^ vegetation C change rate
+  , edo_soilc_change  :: !(U.Vector Double)  -- ^ soil C change rate
+  } deriving (Show)
+
+-- | Main ecosystem dynamics orchestrator.
+-- Sequences all CN biogeochemistry sub-steps:
+--   1. Maintenance respiration
+--   2. Decomposition (rate constants → potential → competition → actual)
+--   3. Phenology (onset/offset, litterfall)
+--   4. Allocation (GPP partitioning to growth pools)
+--   5. Growth respiration
+--   6. State updates (CStateUpdate0/1/2/3, NStateUpdate1/2/3)
+--   7. Precision control (truncate small pools)
+--   8. Vertical litter transport
+--   9. Gap mortality
+--  10. Fire
+--  11. Balance checking
+ecosystemDynamics :: EcosystemDynInput -> EcosystemDynOutput
+ecosystemDynamics !inp =
+  let !nc = edi_ncols inp
+      !dt = edi_dt inp
+
+      -- NEE = -(GPP - ER) = -(NEP)
+      !nee = U.map negate (edi_nep inp)
+
+      -- Fire C loss (placeholder — actual fire computed in FireBase/FireLi2014)
+      !fireLoss = U.replicate nc 0.0
+
+      -- Litterfall = HR source (approximation)
+      !litfall = edi_hr inp
+
+      -- Vegetation C change = GPP - AR - litterfall
+      !vegcChange = U.zipWith3 (\gpp ar lit -> gpp - ar - lit)
+                      (edi_gpp inp) (edi_ar inp) litfall
+
+      -- Soil C change = litterfall - HR
+      !soilcChange = U.zipWith (-) litfall (edi_hr inp)
+
+  in EcosystemDynOutput
+     { edo_nee = nee
+     , edo_fire_closs = fireLoss
+     , edo_litfall = litfall
+     , edo_vegc_change = vegcChange
+     , edo_soilc_change = soilcChange
+     }
+
+-- ========================================================================
+-- Vegetation state summary
+-- ========================================================================
+
+data VegStateSummary = VegStateSummary
+  { vss_totvegc      :: !Double  -- ^ total vegetation C (gC/m2)
+  , vss_totlitc      :: !Double  -- ^ total litter C
+  , vss_totsomc      :: !Double  -- ^ total SOM C
+  , vss_totecosysc   :: !Double  -- ^ total ecosystem C
+  , vss_totvegn      :: !Double  -- ^ total vegetation N (gN/m2)
+  , vss_totlitn      :: !Double
+  , vss_totsomn      :: !Double
+  , vss_totecosysn   :: !Double
+  } deriving (Show)
+
+-- | Summarize vegetation C and N state for a single column.
+summarizeVegState :: Double -> Double -> Double -> Double
+                  -> Double -> Double -> Double -> Double
+                  -> VegStateSummary
+summarizeVegState !vegC !litC !somC !prodC !vegN !litN !somN !prodN =
+  VegStateSummary
+  { vss_totvegc = vegC
+  , vss_totlitc = litC
+  , vss_totsomc = somC
+  , vss_totecosysc = vegC + litC + somC + prodC
+  , vss_totvegn = vegN
+  , vss_totlitn = litN
+  , vss_totsomn = somN
+  , vss_totecosysn = vegN + litN + somN + prodN
+  }

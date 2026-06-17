@@ -19,6 +19,16 @@ module CLM.BioGeoChem.VOCEmission
   , getGammaSM
   , getGammaA
   , getGammaC
+    -- * Canopy environment
+  , CanopyEnvInput(..)
+  , CanopyEnvOutput(..)
+  , calcCanopyEnvironment
+    -- * Main VOC driver
+  , VOCDriverInput(..)
+  , VOCDriverOutput(..)
+  , vocEmissionDriver
+    -- * Single compound emission
+  , calcCompoundEmission
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -130,3 +140,144 @@ getGammaC co2 =
       !h    = 1.4614
       !cstar = 585.0
   in imax - ((imax * co2 ** h) / (cstar ** h + co2 ** h))
+
+-- =========================================================================
+-- Canopy environment model
+-- =========================================================================
+
+data CanopyEnvInput = CanopyEnvInput
+  { cei_t_veg        :: !Double  -- ^ vegetation temperature (K)
+  , cei_par_top      :: !Double  -- ^ above-canopy PAR (W/m2)
+  , cei_lai          :: !Double  -- ^ leaf area index
+  , cei_sai          :: !Double  -- ^ stem area index
+  , cei_kb           :: !Double  -- ^ beam extinction coefficient
+  , cei_ncan_layers  :: !Int     -- ^ number of canopy layers
+  } deriving (Show)
+
+data CanopyEnvOutput = CanopyEnvOutput
+  { ceo_par_sun_layers :: ![Double]  -- ^ sunlit PAR per layer (umol/m2/s)
+  , ceo_par_sha_layers :: ![Double]  -- ^ shaded PAR per layer
+  , ceo_t_layers       :: ![Double]  -- ^ leaf temperature per layer (K)
+  , ceo_fsun_layers    :: ![Double]  -- ^ sunlit fraction per layer
+  } deriving (Show)
+
+-- | Compute within-canopy light and temperature for VOC emissions.
+-- Uses exponential light extinction and assumes small T gradient.
+calcCanopyEnvironment :: CanopyEnvInput -> CanopyEnvOutput
+calcCanopyEnvironment !inp =
+  let !nlayers = cei_ncan_layers inp
+      !lai = cei_lai inp
+      !kb = cei_kb inp
+      !par_top = cei_par_top inp * 4.6  -- W/m2 to umol/m2/s
+      !dlai = if nlayers > 0 then lai / fromIntegral nlayers else 0.0
+
+      layerData i =
+        let !cum_lai = fromIntegral i * dlai + dlai * 0.5
+            !beam_frac = exp (-kb * cum_lai)
+            !par_beam = par_top * beam_frac
+            !par_diff = par_top * 0.2 * exp (-0.5 * cum_lai)
+            !fsun = exp (-kb * cum_lai)
+            !par_sun = par_beam + par_diff
+            !par_sha = par_diff
+            !t_leaf = cei_t_veg inp - 0.5 * fromIntegral i
+        in (par_sun, par_sha, t_leaf, fsun)
+
+      !layers = map layerData [0..nlayers-1]
+  in CanopyEnvOutput
+     { ceo_par_sun_layers = map (\(p,_,_,_) -> p) layers
+     , ceo_par_sha_layers = map (\(_,p,_,_) -> p) layers
+     , ceo_t_layers = map (\(_,_,t,_) -> t) layers
+     , ceo_fsun_layers = map (\(_,_,_,f) -> f) layers
+     }
+
+-- =========================================================================
+-- Single compound emission
+-- =========================================================================
+
+-- | Calculate emission for a single MEGAN compound at a single patch.
+-- E = epsilon * gamma_P * gamma_T * gamma_L * gamma_SM * gamma_A * gamma_C * rho
+calcCompoundEmission :: Double  -- ^ epsilon (emission factor, ug/m2/hr)
+                     -> Double  -- ^ gammaP (light activity factor)
+                     -> Double  -- ^ gammaT (temperature activity factor)
+                     -> Double  -- ^ gammaL (LAI activity factor)
+                     -> Double  -- ^ gammaSM (soil moisture factor)
+                     -> Double  -- ^ gammaA (leaf age factor)
+                     -> Double  -- ^ gammaC (CO2 inhibition factor, isoprene only)
+                     -> Double  -- ^ rho (canopy loss/production factor, ~0.96)
+                     -> Double  -- ^ emission (ug/m2/hr)
+calcCompoundEmission !eps !gP !gT !gL !gSM !gA !gC !rho =
+  eps * gP * gT * gL * gSM * gA * gC * rho
+
+-- =========================================================================
+-- Main VOC emission driver
+-- =========================================================================
+
+data VOCDriverInput = VOCDriverInput
+  { vdi_t_veg          :: !Double   -- ^ vegetation temperature (K)
+  , vdi_t_veg24        :: !Double   -- ^ 24hr average T (K)
+  , vdi_t_veg240       :: !Double   -- ^ 240hr average T (K)
+  , vdi_par            :: !Double   -- ^ current PAR (umol/m2/s)
+  , vdi_par24          :: !Double   -- ^ 24hr average PAR
+  , vdi_par240         :: !Double   -- ^ 240hr average PAR
+  , vdi_lai            :: !Double   -- ^ LAI
+  , vdi_co2_ppm        :: !Double   -- ^ atmospheric CO2 (ppm)
+  , vdi_soil_wetness   :: !Double   -- ^ soil wetness (theta/theta_sat)
+  , vdi_fnew           :: !Double   -- ^ fraction of new leaves
+  , vdi_fgro           :: !Double   -- ^ fraction of growing leaves
+  , vdi_fmat           :: !Double   -- ^ fraction of mature leaves
+  , vdi_fold           :: !Double   -- ^ fraction of old leaves
+  -- Compound-specific parameters
+  , vdi_epsilon        :: !Double   -- ^ emission factor (ug/m2/hr)
+  , vdi_LDF            :: !Double   -- ^ light-dependent fraction
+  , vdi_betaT          :: !Double   -- ^ beta for T-dependent emission
+  , vdi_ct1            :: !Double   -- ^ ct1 coefficient
+  , vdi_ct2            :: !Double   -- ^ ct2 coefficient
+  , vdi_Ceo            :: !Double   -- ^ Ceo (Eopt scaling)
+  , vdi_Anew           :: !Double
+  , vdi_Agro           :: !Double
+  , vdi_Amat           :: !Double
+  , vdi_Aold           :: !Double
+  , vdi_is_isoprene    :: !Bool     -- ^ apply CO2 inhibition?
+  } deriving (Show)
+
+data VOCDriverOutput = VOCDriverOutput
+  { vdo_emission       :: !Double   -- ^ emission rate (ug/m2/hr)
+  , vdo_gammaP         :: !Double
+  , vdo_gammaT         :: !Double
+  , vdo_gammaL         :: !Double
+  , vdo_gammaSM        :: !Double
+  , vdo_gammaA         :: !Double
+  , vdo_gammaC         :: !Double
+  } deriving (Show)
+
+-- | Main VOC emission driver for a single compound at a single patch.
+-- Combines all activity factors and computes total emission.
+vocEmissionDriver :: VOCDriverInput -> VOCDriverOutput
+vocEmissionDriver !inp =
+  let -- Light activity factor
+      !gP = getGammaP (vdi_par inp) (vdi_par24 inp) (vdi_par240 inp) (vdi_LDF inp)
+      -- Temperature activity factor
+      !gT = getGammaT (vdi_t_veg inp) (vdi_t_veg24 inp) (vdi_t_veg240 inp)
+               (vdi_Ceo inp) (vdi_ct1 inp) (vdi_ct2 inp) (vdi_betaT inp) (vdi_LDF inp)
+      -- LAI activity factor
+      !gL = getGammaL (vdi_lai inp)
+      -- Soil moisture
+      !gSM = getGammaSM (vdi_soil_wetness inp)
+      -- Leaf age
+      !gA = getGammaA (vdi_fnew inp) (vdi_fgro inp) (vdi_fmat inp) (vdi_fold inp)
+               (vdi_Anew inp) (vdi_Agro inp) (vdi_Amat inp) (vdi_Aold inp)
+      -- CO2 inhibition (isoprene only)
+      !gC = if vdi_is_isoprene inp then getGammaC (vdi_co2_ppm inp) else 1.0
+      -- Canopy loss factor
+      !rho = 0.96
+      -- Total emission
+      !emission = calcCompoundEmission (vdi_epsilon inp) gP gT gL gSM gA gC rho
+  in VOCDriverOutput
+     { vdo_emission = emission
+     , vdo_gammaP = gP
+     , vdo_gammaT = gT
+     , vdo_gammaL = gL
+     , vdo_gammaSM = gSM
+     , vdo_gammaA = gA
+     , vdo_gammaC = gC
+     }

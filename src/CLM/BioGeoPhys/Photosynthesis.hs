@@ -42,6 +42,10 @@ module CLM.BioGeoPhys.Photosynthesis
   , CanopyPhotoInput(..)
   , CanopyPhotoResult(..)
   , canopyIntegrate
+    -- * Patch-level photosynthesis
+  , PatchPhotoInput(..)
+  , PatchPhotoResult(..)
+  , patchPhotosynthesis
   ) where
 
 import CLM.Constants.PhysicalConstants (tfrz, rgas)
@@ -801,3 +805,197 @@ canopyIntegrate inp =
        , cpr_rs     = laican / gscan - rb
        }
      else CanopyPhotoResult 0.0 0.0 0.0 0.0 0.0 0.0
+
+-- ---------------------------------------------------------------------------
+-- Nitrogen scaling of Vcmax across canopy layers
+-- ---------------------------------------------------------------------------
+
+-- | Compute Vcmax25 profile from leaf N distribution (exponential decay).
+-- Follows the Bonan et al. canopy integration with N scaling.
+vcmax25Profile :: Double  -- ^ vcmax25_top (top-of-canopy Vcmax at 25C)
+               -> Double  -- ^ slatop (specific leaf area at top, m2/gC)
+               -> Double  -- ^ nscaler_kn (nitrogen extinction coefficient)
+               -> Int     -- ^ nrad (number of active layers)
+               -> [Double] -- ^ cumulative LAI at each layer interface
+               -> [Double] -- ^ vcmax25 per layer
+vcmax25Profile !vcmax25_top !_slatop !kn !nrad !cumLAI =
+  [ vcmax25_top * exp (-kn * lai_cum) | (i, lai_cum) <- zip [0..] cumLAI, i < nrad ]
+
+-- | Compute Jmax25 from Vcmax25 (Wullschleger 1993 relationship).
+jmax25FromVcmax25 :: Double -> Double
+jmax25FromVcmax25 vcmax25 = 1.67 * vcmax25
+
+-- ---------------------------------------------------------------------------
+-- Sunlit/Shaded canopy partitioning
+-- ---------------------------------------------------------------------------
+
+data SunShadeFractions = SunShadeFractions
+  { ssf_fsun   :: !Double  -- ^ sunlit LAI fraction
+  , ssf_fsha   :: !Double  -- ^ shaded LAI fraction
+  , ssf_laisun :: !Double  -- ^ sunlit LAI (m2/m2)
+  , ssf_laisha :: !Double  -- ^ shaded LAI (m2/m2)
+  } deriving (Show)
+
+-- | Compute sunlit/shaded fractions from LAI and beam extinction.
+sunShadeFractions :: Double  -- ^ total LAI
+                  -> Double  -- ^ kb (beam extinction coefficient)
+                  -> SunShadeFractions
+sunShadeFractions !lai !kb =
+  let !laisun = if kb > 0.0 then (1.0 - exp (-kb * lai)) / kb else lai * 0.5
+      !laisha = max 0.0 (lai - laisun)
+      !fsun = if lai > 0.0 then laisun / lai else 0.5
+      !fsha = 1.0 - fsun
+  in SunShadeFractions { ssf_fsun = fsun, ssf_fsha = fsha
+                       , ssf_laisun = laisun, ssf_laisha = laisha }
+
+-- ---------------------------------------------------------------------------
+-- Patch-level photosynthesis driver
+-- ---------------------------------------------------------------------------
+
+data PatchPhotoInput = PatchPhotoInput
+  { ppi_vcmax25_top    :: !Double   -- ^ Vcmax25 at top of canopy (umol/m2/s)
+  , ppi_jmax25_top     :: !Double   -- ^ Jmax25 at top (or 0 to derive from Vcmax)
+  , ppi_nrad           :: !Int      -- ^ number of active canopy layers
+  , ppi_lai            :: !Double   -- ^ total LAI (m2/m2)
+  , ppi_sai            :: !Double   -- ^ stem area index
+  , ppi_kb             :: !Double   -- ^ direct beam extinction coefficient
+  , ppi_kn             :: !Double   -- ^ nitrogen extinction coefficient
+  , ppi_par_sun        :: ![Double] -- ^ PAR absorbed per layer (sunlit, W/m2)
+  , ppi_par_sha        :: ![Double] -- ^ PAR absorbed per layer (shaded, W/m2)
+  , ppi_cum_lai        :: ![Double] -- ^ cumulative LAI at layer midpoints
+  -- Environment
+  , ppi_forc_pbot      :: !Double   -- ^ atmospheric pressure (Pa)
+  , ppi_co2_ppm        :: !Double   -- ^ CO2 mixing ratio (ppm)
+  , ppi_o2_ppm         :: !Double   -- ^ O2 mixing ratio (ppm)
+  , ppi_t_veg          :: !Double   -- ^ vegetation temperature (K)
+  , ppi_rb             :: !Double   -- ^ leaf boundary layer resistance (s/m)
+  , ppi_rh_can         :: !Double   -- ^ canopy air relative humidity
+  , ppi_esat_tv        :: !Double   -- ^ saturation vapor pressure at T_veg (Pa)
+  , ppi_ceair          :: !Double   -- ^ vapor pressure of canopy air (Pa)
+  , ppi_gb_mol         :: !Double   -- ^ boundary layer conductance (mol/m2/s)
+  -- Flags
+  , ppi_c3flag         :: !Bool     -- ^ True for C3, False for C4
+  , ppi_o3coefv        :: !Double   -- ^ ozone Vcmax scaling
+  , ppi_o3coefg        :: !Double   -- ^ ozone conductance scaling
+  } deriving (Show)
+
+data PatchPhotoResult = PatchPhotoResult
+  { ppr_psn_sun       :: !Double  -- ^ sunlit photosynthesis (umol CO2/m2/s)
+  , ppr_psn_sha       :: !Double  -- ^ shaded photosynthesis
+  , ppr_lmr_sun       :: !Double  -- ^ sunlit leaf maintenance resp
+  , ppr_lmr_sha       :: !Double  -- ^ shaded leaf maintenance resp
+  , ppr_gs_sun        :: !Double  -- ^ sunlit stomatal conductance (mol/m2/s)
+  , ppr_gs_sha        :: !Double  -- ^ shaded stomatal conductance
+  , ppr_an_sun        :: !Double  -- ^ sunlit net assimilation
+  , ppr_an_sha        :: !Double  -- ^ shaded net assimilation
+  , ppr_vcmax_sun_top :: !Double  -- ^ top-of-canopy sunlit Vcmax
+  , ppr_rs_sun        :: !Double  -- ^ canopy sunlit stomatal resistance
+  , ppr_rs_sha        :: !Double  -- ^ canopy shaded stomatal resistance
+  } deriving (Show)
+
+-- | Full patch-level photosynthesis with nitrogen scaling and sun/shade.
+-- Calls leafPhotosynthesis for each layer, then integrates.
+patchPhotosynthesis :: PhotoParams -> PatchPhotoInput -> PatchPhotoResult
+patchPhotosynthesis !params !inp =
+  let !nrad = ppi_nrad inp
+      !lai = ppi_lai inp
+      !kb = ppi_kb inp
+      !kn = ppi_kn inp
+      !vcmax25_top = ppi_vcmax25_top inp
+      !rb = ppi_rb inp
+
+      -- Sunlit/shaded fractions
+      !ssf = sunShadeFractions lai kb
+
+      -- Vcmax25 profile
+      !vcmax25_layers = vcmax25Profile vcmax25_top 0.0 kn nrad (ppi_cum_lai inp)
+
+      -- Layer weights (equal for now, could be dlai per layer)
+      !dlai = if nrad > 0 then lai / fromIntegral nrad else 0.0
+
+      -- Process sunlit layers
+      sunResults = zipWith3 (\vcmax25 par_sun cum_lai ->
+        let !jmax25 = jmax25FromVcmax25 vcmax25
+            !lpi = buildLeafInput params inp vcmax25 jmax25 par_sun
+        in leafPhotosynthesis lpi
+        ) vcmax25_layers (ppi_par_sun inp) (ppi_cum_lai inp)
+
+      -- Process shaded layers
+      shaResults = zipWith3 (\vcmax25 par_sha cum_lai ->
+        let !jmax25 = jmax25FromVcmax25 vcmax25
+            !lpi = buildLeafInput params inp vcmax25 jmax25 par_sha
+        in leafPhotosynthesis lpi
+        ) vcmax25_layers (ppi_par_sha inp) (ppi_cum_lai inp)
+
+      -- Integrate sunlit
+      (!psnSun, !lmrSun, !gsSun, !anSun) = integrateResults sunResults dlai
+      -- Integrate shaded
+      (!psnSha, !lmrSha, !gsSha, !anSha) = integrateResults shaResults dlai
+
+      -- Convert to canopy resistance
+      !rsSun = if gsSun > 0.0 then 1.0 / gsSun else 1.0e6
+      !rsSha = if gsSha > 0.0 then 1.0 / gsSha else 1.0e6
+
+  in PatchPhotoResult
+     { ppr_psn_sun = psnSun * ssf_laisun ssf / max 0.01 lai
+     , ppr_psn_sha = psnSha * ssf_laisha ssf / max 0.01 lai
+     , ppr_lmr_sun = lmrSun
+     , ppr_lmr_sha = lmrSha
+     , ppr_gs_sun = gsSun
+     , ppr_gs_sha = gsSha
+     , ppr_an_sun = anSun
+     , ppr_an_sha = anSha
+     , ppr_vcmax_sun_top = vcmax25_top
+     , ppr_rs_sun = rsSun
+     , ppr_rs_sha = rsSha
+     }
+
+-- | Integrate leaf results over layers.
+integrateResults :: [LeafPhotoResult] -> Double -> (Double, Double, Double, Double)
+integrateResults results dlai =
+  foldl' (\(!p, !l, !g, !a) r ->
+    ( p + lpr_psn_z r * dlai
+    , l + lpr_lmr_z r * dlai
+    , g + lpr_gs_mol r * dlai
+    , a + lpr_an r * dlai
+    )) (0.0, 0.0, 0.0, 0.0) results
+
+-- | Build leaf-level input from patch-level data and per-layer values.
+buildLeafInput :: PhotoParams -> PatchPhotoInput
+               -> Double -> Double -> Double -> LeafPhotoInput
+buildLeafInput params inp vcmax25 _jmax25 par =
+  LeafPhotoInput
+    { lpi_c3flag = ppi_c3flag inp
+    , lpi_forc_pbot = ppi_forc_pbot inp
+    , lpi_t_veg = ppi_t_veg inp
+    , lpi_t10 = ppi_t_veg inp
+    , lpi_tgcm = ppi_t_veg inp
+    , lpi_rb = ppi_rb inp
+    , lpi_btran = 1.0
+    , lpi_dayl_factor = 1.0
+    , lpi_oair = ppi_o2_ppm inp * ppi_forc_pbot inp * 1.0e-6
+    , lpi_cair = ppi_co2_ppm inp * ppi_forc_pbot inp * 1.0e-6
+    , lpi_esat_tv = ppi_esat_tv inp
+    , lpi_eair = ppi_ceair inp
+    , lpi_par_z = par
+    , lpi_tlai_z = 1.0
+    , lpi_lai_z = 1.0
+    , lpi_vcmaxcint = vcmax25
+    , lpi_laican = 0.0
+    , lpi_o3coefv = ppi_o3coefv inp
+    , lpi_o3coefg = ppi_o3coefg inp
+    , lpi_leafcn = 25.0
+    , lpi_flnr = 0.0
+    , lpi_fnitr = 1.0
+    , lpi_slatop = 0.01
+    , lpi_mbbopt = if ppi_c3flag inp then 9.0 else 4.0
+    , lpi_medlynintercept = 100.0
+    , lpi_medlynslope = 6.0
+    , lpi_stomatalcond_mtd = Medlyn2011
+    , lpi_params = params
+    , lpi_use_cn = False
+    , lpi_leaf_mr_vcm = 0.015
+    , lpi_light_inhibit = False
+    , lpi_nlevcan = 1
+    , lpi_nscaler = 1.0
+    }

@@ -172,10 +172,15 @@ instance Show HistoryWriterState where
 defaultHistoryWriterState :: HistoryWriterState
 defaultHistoryWriterState = HistoryWriterState "" [] defaultHistAccumulator Nothing
 
--- | Legacy placeholder: create history output file (no-op).
+-- | Create a history output writer for daily gridcell fields.
 historyWriterInit :: FilePath -> [HistFieldDef] -> Int -> IO HistoryWriterState
-historyWriterInit fp fields _ng =
-  return $ HistoryWriterState fp fields defaultHistAccumulator Nothing
+historyWriterInit fp fields _ng
+  | null fp = return $ HistoryWriterState fp fields defaultHistAccumulator Nothing
+  | otherwise = do
+      h <- openFile fp WriteMode
+      hPutStrLn h $ "day," ++ intercalate "," (map hfd_name fields)
+      hFlush h
+      return $ HistoryWriterState fp fields defaultHistAccumulator (Just h)
 
 -- | Initialize a CSV history writer.
 -- Writes a header row with field names.
@@ -187,9 +192,24 @@ historyWriterInitCSV fp fieldNames = do
   let fields = map (\n -> HistFieldDef n n "" GridcellLevel) fieldNames
   return $ HistoryWriterState fp fields defaultHistAccumulator (Just h)
 
--- | Legacy placeholder: write one timestep.
+-- | Write one timestep if it completes a daily accumulation window.
 historyWriteStep :: HistoryWriterState -> Bool -> IO HistoryWriterState
-historyWriteStep hws _isEndDay = return hws
+historyWriteStep hws isEndDay =
+  case hws_handle hws of
+    Nothing -> return hws
+    Just h
+      | not isEndDay -> return hws
+      | otherwise -> do
+          let averaged = computeDailyAverage (hws_accum hws)
+              fieldNames = map hfd_name (hws_fields hws)
+              fieldValue name =
+                case Map.lookup name averaged of
+                  Just vals | not (VU.null vals) -> showDouble (vals VU.! 0)
+                  _ -> showDouble fillValue
+              dayIdx = ha_timeIndex (hws_accum hws) + 1
+          hPutStrLn h $ show dayIdx ++ "," ++ intercalate "," (map fieldValue fieldNames)
+          hFlush h
+          return hws { hws_accum = resetAccumulator (hws_accum hws) }
 
 -- | Write one row to the CSV file.
 -- @dayIndex@ is the 1-based day number.

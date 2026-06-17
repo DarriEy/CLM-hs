@@ -33,6 +33,15 @@ module CLM.BioGeoPhys.TotalWaterHeat
   , adjustDeltaHeatForDeltaLiq
   , deltaLiqMinTemp
   , deltaLiqMaxTemp
+    -- * Begin/end timestep balance
+  , WaterHeatSnapshot(..)
+  , WaterHeatBalance(..)
+  , computeWaterHeatBalance
+    -- * Flux accumulation
+  , WaterFluxAccum(..)
+  , HeatFluxAccum(..)
+  , accumulateWaterFluxes
+  , accumulateHeatFluxes
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -401,3 +410,113 @@ adjustDeltaHeatForDeltaLiq delta_liq lwt1 lwt2 delta_heat
           !wt_c = max deltaLiqMinTemp (min deltaLiqMaxTemp wt)
           !total_liq_heat = liquidWaterHeat wt_c delta_liq
       in delta_heat - total_liq_heat
+
+-- =========================================================================
+-- Begin/end timestep water and heat balance
+-- =========================================================================
+
+-- | Snapshot of column water and heat state at a given time.
+data WaterHeatSnapshot = WaterHeatSnapshot
+  { whs_total_water_liq :: !Double  -- ^ total liquid water (kg/m2)
+  , whs_total_water_ice :: !Double  -- ^ total ice water (kg/m2)
+  , whs_total_heat      :: !Double  -- ^ total heat content (J/m2)
+  , whs_heat_liquid     :: !Double  -- ^ liquid-water heat component (J/m2)
+  , whs_cv_liquid       :: !Double  -- ^ liquid-water heat capacity (J/m2/K)
+  } deriving (Show, Eq)
+
+-- | Water and heat balance between two snapshots.
+data WaterHeatBalance = WaterHeatBalance
+  { whb_delta_water_liq :: !Double  -- ^ change in liquid water (kg/m2)
+  , whb_delta_water_ice :: !Double  -- ^ change in ice water (kg/m2)
+  , whb_delta_water_tot :: !Double  -- ^ total water change (kg/m2)
+  , whb_delta_heat      :: !Double  -- ^ total heat change (J/m2)
+  , whb_delta_heat_adj  :: !Double  -- ^ heat change adjusted for delta-liq (J/m2)
+  , whb_errh2o          :: !Double  -- ^ water balance error (kg/m2)
+  , whb_errseb          :: !Double  -- ^ energy balance error (W/m2)
+  } deriving (Show, Eq)
+
+-- | Compute water and heat balance between begin and end timestep snapshots.
+-- errh2o = delta_water - (precip - evap - runoff) * dt
+-- errseb = delta_heat/dt - net_radiation + sensible + latent + ground
+computeWaterHeatBalance :: WaterHeatSnapshot  -- ^ begin of timestep
+                        -> WaterHeatSnapshot  -- ^ end of timestep
+                        -> Double  -- ^ net water flux into column (kg/m2/s)
+                        -> Double  -- ^ net heat flux into column (W/m2)
+                        -> Double  -- ^ dt (s)
+                        -> WaterHeatBalance
+computeWaterHeatBalance !beg !end_ !net_water_flux !net_heat_flux !dt =
+  let !dw_liq = whs_total_water_liq end_ - whs_total_water_liq beg
+      !dw_ice = whs_total_water_ice end_ - whs_total_water_ice beg
+      !dw_tot = dw_liq + dw_ice
+      !dh = whs_total_heat end_ - whs_total_heat beg
+
+      -- Adjust heat for implicit delta-liq contribution
+      !lwt1 = if whs_cv_liquid beg > 0.0
+              then whs_heat_liquid beg / whs_cv_liquid beg + heatBaseTemp
+              else heatBaseTemp
+      !lwt2 = if whs_cv_liquid end_ > 0.0
+              then whs_heat_liquid end_ / whs_cv_liquid end_ + heatBaseTemp
+              else heatBaseTemp
+      !dh_adj = adjustDeltaHeatForDeltaLiq dw_liq lwt1 lwt2 dh
+
+      -- Water balance error
+      !errh2o = dw_tot - net_water_flux * dt
+
+      -- Energy balance error
+      !errseb = if dt > 0.0 then dh_adj / dt - net_heat_flux else 0.0
+
+  in WaterHeatBalance
+     { whb_delta_water_liq = dw_liq
+     , whb_delta_water_ice = dw_ice
+     , whb_delta_water_tot = dw_tot
+     , whb_delta_heat = dh
+     , whb_delta_heat_adj = dh_adj
+     , whb_errh2o = errh2o
+     , whb_errseb = errseb
+     }
+
+-- =========================================================================
+-- Flux accumulation
+-- =========================================================================
+
+-- | Accumulated water fluxes for a column over a timestep (all in kg/m2/s).
+data WaterFluxAccum = WaterFluxAccum
+  { wfa_qflx_prec_grnd    :: !Double  -- ^ precipitation reaching ground
+  , wfa_qflx_evap_tot     :: !Double  -- ^ total evapotranspiration
+  , wfa_qflx_surf         :: !Double  -- ^ surface runoff
+  , wfa_qflx_drain        :: !Double  -- ^ subsurface drainage
+  , wfa_qflx_irrig        :: !Double  -- ^ irrigation applied
+  , wfa_qflx_snwcp_ice    :: !Double  -- ^ snow capping (excess snow to ice)
+  , wfa_qflx_lateral      :: !Double  -- ^ lateral flow
+  } deriving (Show)
+
+-- | Accumulated heat fluxes for a column over a timestep (all in W/m2).
+data HeatFluxAccum = HeatFluxAccum
+  { hfa_eflx_sabg         :: !Double  -- ^ absorbed ground solar
+  , hfa_eflx_sabv         :: !Double  -- ^ absorbed vegetation solar
+  , hfa_eflx_lwrad_net    :: !Double  -- ^ net longwave
+  , hfa_eflx_sh_tot       :: !Double  -- ^ total sensible heat
+  , hfa_eflx_lh_tot       :: !Double  -- ^ total latent heat
+  , hfa_eflx_soil_grnd    :: !Double  -- ^ ground heat flux
+  } deriving (Show)
+
+-- | Compute net water flux into column from accumulated fluxes.
+accumulateWaterFluxes :: WaterFluxAccum -> Double
+accumulateWaterFluxes !wfa =
+  wfa_qflx_prec_grnd wfa
+  + wfa_qflx_irrig wfa
+  - wfa_qflx_evap_tot wfa
+  - wfa_qflx_surf wfa
+  - wfa_qflx_drain wfa
+  - wfa_qflx_snwcp_ice wfa
+  - wfa_qflx_lateral wfa
+
+-- | Compute net heat flux into column from accumulated fluxes.
+accumulateHeatFluxes :: HeatFluxAccum -> Double
+accumulateHeatFluxes !hfa =
+  hfa_eflx_sabg hfa
+  + hfa_eflx_sabv hfa
+  - hfa_eflx_lwrad_net hfa
+  - hfa_eflx_sh_tot hfa
+  - hfa_eflx_lh_tot hfa
+  - hfa_eflx_soil_grnd hfa

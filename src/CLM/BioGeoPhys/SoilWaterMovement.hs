@@ -41,6 +41,12 @@ module CLM.BioGeoPhys.SoilWaterMovement
   , computeQcharge
     -- * Baseflow sink
   , baseflowSink
+    -- * Zeng-Decker 2009 equilibrium method
+  , ZengDeckerInput(..)
+  , ZengDeckerResult(..)
+  , equilibriumWaterContent
+  , equilibriumMatricPotential
+  , soilwaterZengDecker2009
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -500,3 +506,181 @@ findJwtSoil zwt_val zi_v nl = go 0
       | j >= nl   = nl
       | zwt_val <= vix zi_v j = j
       | otherwise = go (j + 1)
+
+-- =========================================================================
+-- Zeng-Decker 2009 Equilibrium Method
+-- =========================================================================
+
+-- | Input for the Zeng-Decker 2009 equilibrium solver.
+data ZengDeckerInput = ZengDeckerInput
+  { zdi_nlayers   :: !Int
+  , zdi_dtime     :: !Double          -- ^ timestep [s]
+  , zdi_qflx_infl :: !Double          -- ^ infiltration [mm/s]
+  , zdi_zwt       :: !Double          -- ^ water table depth [m]
+  , zdi_watsat    :: !(VU.Vector Double) -- ^ porosity per layer
+  , zdi_bsw       :: !(VU.Vector Double) -- ^ Clapp-Hornberger b
+  , zdi_hksat     :: !(VU.Vector Double) -- ^ saturated hydraulic conductivity [mm/s]
+  , zdi_sucsat    :: !(VU.Vector Double) -- ^ saturated matric suction [mm]
+  , zdi_icefrac   :: !(VU.Vector Double) -- ^ ice fraction per layer
+  , zdi_rootsoi   :: !(VU.Vector Double) -- ^ root water sink [mm/s]
+  , zdi_z_soil    :: !(VU.Vector Double) -- ^ layer midpoint depth [m]
+  , zdi_zi_soil   :: !(VU.Vector Double) -- ^ layer interface depth [m] (nlayers+1)
+  , zdi_dz_soil   :: !(VU.Vector Double) -- ^ layer thickness [m]
+  , zdi_h2osoi_liq :: !(VU.Vector Double) -- ^ liquid water (full snow+soil array)
+  , zdi_h2osoi_vol :: !(VU.Vector Double) -- ^ volumetric water content per soil layer
+  , zdi_t_soisno  :: !(VU.Vector Double)  -- ^ soil temperature (full array)
+  , zdi_e_ice     :: !Double            -- ^ ice impedance parameter
+  , zdi_smpmin_val :: !Double           -- ^ minimum matric potential [mm]
+  } deriving (Show)
+
+-- | Result from the Zeng-Decker solver.
+data ZengDeckerResult = ZengDeckerResult
+  { zdr_h2osoi_liq :: !(VU.Vector Double) -- ^ updated liquid water (full array)
+  , zdr_qcharge    :: !Double             -- ^ aquifer recharge [mm/s]
+  , zdr_smp        :: !(VU.Vector Double) -- ^ matric potential per layer [mm]
+  , zdr_hk         :: !(VU.Vector Double) -- ^ hydraulic conductivity per layer [mm/s]
+  , zdr_vol_eq     :: !(VU.Vector Double) -- ^ equilibrium water content per layer
+  } deriving (Show)
+
+-- | Compute equilibrium volumetric water content for a soil layer
+-- based on its position relative to the water table.
+-- Uses Clapp-Hornberger integral from the water table to the layer boundaries.
+equilibriumWaterContent :: Double -- ^ zwt_mm (water table depth in mm)
+                        -> Double -- ^ zi_top (layer top interface depth in mm)
+                        -> Double -- ^ zi_bot (layer bottom interface depth in mm)
+                        -> Double -- ^ watsat (porosity)
+                        -> Double -- ^ bsw (Clapp-Hornberger b)
+                        -> Double -- ^ sucsat (saturated suction in mm)
+                        -> Double -- ^ equilibrium vol water content
+equilibriumWaterContent !zwtmm !ziTop !ziBot !watsat_j !bsw_j !sucsat_j
+  -- Fully below water table: saturated
+  | zwtmm <= ziTop = watsat_j
+  -- Partially saturated: integrate Clapp-Hornberger from WT to layer boundaries
+  | zwtmm < ziBot && zwtmm > ziTop =
+    let !expo = 1.0 - 1.0 / bsw_j
+        !tempi = 1.0
+        !temp0 = ((sucsat_j + zwtmm - ziTop) / sucsat_j) ** expo
+        !voleq1 = negate sucsat_j * watsat_j / expo / (zwtmm - ziTop) * (tempi - temp0)
+        !dz_layer = ziBot - ziTop
+        !vol_eq = (voleq1 * (zwtmm - ziTop) + watsat_j * (ziBot - zwtmm)) / dz_layer
+    in clamp 0.0 watsat_j vol_eq
+  -- Fully above water table: equilibrium from Clapp-Hornberger
+  | otherwise =
+    let !expo = 1.0 - 1.0 / bsw_j
+        !tempi = ((sucsat_j + zwtmm - ziBot) / sucsat_j) ** expo
+        !temp0 = ((sucsat_j + zwtmm - ziTop) / sucsat_j) ** expo
+        !dz_layer = ziBot - ziTop
+        !vol_eq = negate sucsat_j * watsat_j / expo / dz_layer * (tempi - temp0)
+    in clamp 0.0 watsat_j vol_eq
+
+-- | Compute equilibrium matric potential from equilibrium water content.
+equilibriumMatricPotential :: Double -> Double -> Double -> Double -> Double
+equilibriumMatricPotential !vol_eq !watsat_j !sucsat_j !bsw_j =
+  let !s = max 0.01 (vol_eq / watsat_j)
+  in max smpmin (negate sucsat_j * s ** (negate bsw_j))
+
+-- | Zeng-Decker 2009 equilibrium solver.
+-- Computes fluxes relative to an equilibrium water content profile
+-- determined by the water table depth. The deviation from equilibrium
+-- drives the flow, replacing the raw matric potential gradient.
+soilwaterZengDecker2009
+  :: SoilWaterMovementConfig
+  -> ZengDeckerInput
+  -> ZengDeckerResult
+soilwaterZengDecker2009 !cfg !inp =
+  let !nl = zdi_nlayers inp
+      !dt = zdi_dtime inp
+      !zwtmm = zdi_zwt inp * mToMM
+      !joff = nlevsno
+      !eIce = zdi_e_ice inp
+
+      -- Layer interface depths in mm
+      !zimm = VU.generate (nl + 1) $ \j ->
+        if j == 0 then 0.0
+        else zdi_zi_soil inp VU.! (j - 1) * mToMM
+
+      -- Compute equilibrium water content and matric potential per layer
+      !vol_eq = VU.generate nl $ \j ->
+        let !ziTop = zimm VU.! j
+            !ziBot = zimm VU.! (j + 1)
+        in equilibriumWaterContent zwtmm ziTop ziBot
+             (vix (zdi_watsat inp) j)
+             (vix (zdi_bsw inp) j)
+             (vix (zdi_sucsat inp) j)
+
+      !zq = VU.generate nl $ \j ->
+        equilibriumMatricPotential (vol_eq VU.! j)
+          (vix (zdi_watsat inp) j)
+          (vix (zdi_sucsat inp) j)
+          (vix (zdi_bsw inp) j)
+
+      -- Volumetric liquid water content per layer
+      !vwc_liq = VU.generate nl $ \j ->
+        let !liq_j = vix (zdi_h2osoi_liq inp) (j + joff)
+            !dz_j = vix (zdi_dz_soil inp) j
+        in max 1.0e-6 (liq_j / (dz_j * denh2o))
+
+      -- Matric potential per layer
+      !smp_v = VU.generate nl $ \j ->
+        let !s = clamp 0.01 1.0 (vwc_liq VU.! j / vix (zdi_watsat inp) j)
+        in max (zdi_smpmin_val inp) (negate (vix (zdi_sucsat inp) j) * s ** (negate (vix (zdi_bsw inp) j)))
+
+      -- Hydraulic conductivity per layer
+      !hk_v = VU.generate nl $ \j ->
+        let !s = clamp 0.01 1.0 (vwc_liq VU.! j / vix (zdi_watsat inp) j)
+            !imp = iceImpedance (vix (zdi_icefrac inp) j) eIce
+            !(hk_val, _) = clappHornbergerHk s imp (vix (zdi_hksat inp) j) (vix (zdi_bsw inp) j)
+        in hk_val
+
+      -- Equilibrium-adjusted flux at each interface
+      -- The Zeng-Decker method replaces (smp_j - smp_{j+1}) with
+      -- (smp_j - zq_j) - (smp_{j+1} - zq_{j+1}) = (smp_j - smp_{j+1}) - (zq_j - zq_{j+1})
+      -- effectively subtracting the equilibrium gradient
+      !qflux = VU.generate (nl + 1) $ \j ->
+        if j == 0
+        then zdi_qflx_infl inp  -- top boundary: infiltration
+        else if j == nl
+        then 0.0  -- bottom boundary: zero flux (aquifer handled separately)
+        else let !hk_avg = 0.5 * (hk_v VU.! (j-1) + hk_v VU.! j)
+                 !smp_grad = (smp_v VU.! (j-1) - smp_v VU.! j)
+                 !zq_grad = (zq VU.! (j-1) - zq VU.! j)
+                 !zmm_j  = vix (zdi_z_soil inp) (j-1) * mToMM
+                 !zmm_j1 = vix (zdi_z_soil inp) j * mToMM
+                 !den = zmm_j1 - zmm_j
+                 -- Gravity-adjusted flux using equilibrium deviation
+                 !num = (smp_grad - zq_grad)
+             in if den > 0.0
+                then negate hk_avg * num / den - hk_avg
+                else 0.0
+
+      -- Update liquid water: dW/dt = (q_in - q_out - sink) * dt
+      !liq_updated = VU.generate (VU.length (zdi_h2osoi_liq inp)) $ \jj ->
+        if jj < joff || jj >= joff + nl
+        then vix (zdi_h2osoi_liq inp) jj
+        else let !j = jj - joff
+                 !q_in = qflux VU.! j
+                 !q_out = qflux VU.! (j + 1)
+                 !sink = vix (zdi_rootsoi inp) j
+                 !liq_old = vix (zdi_h2osoi_liq inp) jj
+                 !dz_mm = vix (zdi_dz_soil inp) j * mToMM
+                 !liq_new = liq_old + (q_in - q_out - sink) * dt
+                 -- Enforce bounds: 0 <= liq <= watsat * dz * denh2o
+                 !liq_max = vix (zdi_watsat inp) j * vix (zdi_dz_soil inp) j * denh2o
+             in clamp 0.0 liq_max liq_new
+
+      -- Aquifer recharge
+      !qcharge = computeQcharge
+                   (zdi_zwt inp) dt
+                   (zdi_watsat inp) (zdi_bsw inp) (zdi_hksat inp)
+                   (zdi_sucsat inp) (zdi_icefrac inp)
+                   vwc_liq smp_v
+                   (zdi_z_soil inp) (zdi_zi_soil inp)
+                   eIce
+
+  in ZengDeckerResult
+     { zdr_h2osoi_liq = liq_updated
+     , zdr_qcharge = qcharge
+     , zdr_smp = smp_v
+     , zdr_hk = hk_v
+     , zdr_vol_eq = vol_eq
+     }

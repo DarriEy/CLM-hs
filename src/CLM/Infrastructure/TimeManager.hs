@@ -17,7 +17,7 @@ module CLM.Infrastructure.TimeManager
   , dayOfYear
   ) where
 
--- | Simplified date-time (NO_LEAP calendar: 365 days/year, no leap years).
+-- | Date-time in the NO_LEAP calendar: 365 days/year, no leap years.
 data DateTime = DateTime
   { dtYear   :: !Int
   , dtMonth  :: !Int

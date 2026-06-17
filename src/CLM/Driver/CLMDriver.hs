@@ -5,9 +5,8 @@
 -- Orchestrates the physics calling sequence:
 --   phenology -> albedo -> canopy fluxes -> soil temp -> hydrology -> snow -> history
 --
--- Since most physics modules are stubs, this module defines the driver as a
--- pipeline of typed function slots. The type signatures specify the interface
--- contract even when implementations are not yet wired.
+-- The driver is represented as a pipeline of typed function slots. The type
+-- signatures specify the interface contract for both default and wired runs.
 module CLM.Driver.CLMDriver
   ( -- * Driver state
     CLMDriverState(..)
@@ -21,6 +20,8 @@ module CLM.Driver.CLMDriver
   , defaultPhysicsPipeline
     -- * Main driver
   , clmDrv
+  , clmDrvBoundaries
+  , BoundarySnapshots(..)
     -- * Driver sub-phases
   , clmDrvInit
   , clmDrvPatch2Col
@@ -202,6 +203,32 @@ data CLMState = CLMState
     -- Filters and snow layer count
   , clmFilters     :: !FilterSet
   , clmSnl         :: !Int              -- ^ Number of snow layers (0 to -nlevsno)
+    -- CN Biogeochemistry state
+  , clmCNActive    :: !Bool             -- ^ Whether CN biogeochemistry is active
+  , clmLeafC       :: !Double           -- ^ Leaf carbon pool (gC/m2)
+  , clmFrootC      :: !Double           -- ^ Fine root carbon pool (gC/m2)
+  , clmLiveStemC   :: !Double           -- ^ Live stem carbon pool (gC/m2)
+  , clmDeadStemC   :: !Double           -- ^ Dead stem carbon pool (gC/m2)
+  , clmCPool       :: !Double           -- ^ Transient carbon pool (gC/m2)
+  , clmGPP         :: !Double           -- ^ Gross primary production (gC/m2/s)
+  , clmNPP         :: !Double           -- ^ Net primary production (gC/m2/s)
+  , clmHR          :: !Double           -- ^ Heterotrophic respiration (gC/m2/s)
+  , clmNEE         :: !Double           -- ^ Net ecosystem exchange (gC/m2/s)
+  , clmSoilOrgC    :: !Double           -- ^ Soil organic carbon (gC/m2)
+  , clmLitterC     :: !Double           -- ^ Litter carbon (gC/m2)
+  , clmSMINN       :: !Double           -- ^ Soil mineral nitrogen (gN/m2)
+  , clmLeafN       :: !Double           -- ^ Leaf nitrogen pool (gN/m2)
+  , clmFPG         :: !Double           -- ^ Fraction of potential growth [0,1]
+    -- Calibration parameters (injected by SiteCalibration, read by hydrology)
+  , clmP_baseflow_scalar :: !Double
+  , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
+  , clmP_fmax       :: !Double      -- ^ Max fractional saturated area
+  , clmP_e_ice      :: !Double      -- ^ Ice impedance factor
+  , clmP_n_baseflow :: !Double      -- ^ Baseflow exponent
+  , clmP_n_melt_coef :: !Double     -- ^ Snowmelt coefficient
+  , clmP_interception_frac :: !Double
+  , clmP_sno_z0mv   :: !Double      -- ^ Snow roughness length
+  , clmP_route_k    :: !Double      -- ^ Routing residence time
   } deriving (Show)
 
 defaultCLMState :: CLMState
@@ -229,6 +256,30 @@ defaultCLMState = CLMState
   , clmUrbanParams  = defaultUrbanParamsData
   , clmFilters      = defaultFilterSet
   , clmSnl          = 0
+  , clmCNActive     = False
+  , clmLeafC        = 0.0
+  , clmFrootC       = 0.0
+  , clmLiveStemC    = 0.0
+  , clmDeadStemC    = 0.0
+  , clmCPool        = 0.0
+  , clmGPP          = 0.0
+  , clmNPP          = 0.0
+  , clmHR           = 0.0
+  , clmNEE          = 0.0
+  , clmSoilOrgC     = 0.0
+  , clmLitterC      = 0.0
+  , clmSMINN        = 0.0
+  , clmLeafN        = 0.0
+  , clmFPG          = 1.0
+  , clmP_baseflow_scalar = 0.01
+  , clmP_fff        = 0.5
+  , clmP_fmax       = 0.5
+  , clmP_e_ice      = 6.0
+  , clmP_n_baseflow = 1.0
+  , clmP_n_melt_coef = 200.0
+  , clmP_interception_frac = 0.5
+  , clmP_sno_z0mv   = 0.002
+  , clmP_route_k    = 20.0
   }
 
 -- ============================================================================
@@ -241,8 +292,8 @@ type PhysicsStep = CLMDriverConfig -> TimestepContext -> CLMState -> CLMState
 
 -- | The full physics pipeline: an ordered collection of named steps.
 -- Each field holds a function with the 'PhysicsStep' signature.
--- Stub implementations are identity (no-op); real implementations
--- are plugged in as they are ported.
+-- Default implementations preserve state. Wired implementations are supplied
+-- by the physics adapter layer.
 data PhysicsPipeline = PhysicsPipeline
   { -- Phase 0: Pre-physics
     ppDayLength            :: !PhysicsStep
@@ -291,11 +342,11 @@ data PhysicsPipeline = PhysicsPipeline
   , ppSurfaceAlbedo        :: !PhysicsStep
   }
 
--- | Identity physics step (no-op stub).
+-- | Identity physics step for an unwired pipeline slot.
 idStep :: PhysicsStep
 idStep _cfg _ctx st = st
 
--- | Default pipeline: all steps are no-ops.
+-- | Default pipeline: all steps preserve state until a caller supplies adapters.
 defaultPhysicsPipeline :: PhysicsPipeline
 defaultPhysicsPipeline = PhysicsPipeline
   { ppDayLength          = idStep
@@ -365,9 +416,84 @@ clmDrvPatch2Col :: CLMState -> CLMState
 clmDrvPatch2Col st =
   let ef = clmEnergyFlux st
       wf = clmWaterFlux st
-      ef' = ef { eflx_soil_grnd_col = eflx_sh_grnd_patch ef }
-      wf' = wf { qflx_evap_grnd_col = qflx_evap_tot_patch wf }
-  in st { clmEnergyFlux = ef', clmWaterFlux = wf' }
+      temp = clmTemp st
+      cs = clmCanopyState st
+      patchCount =
+        maximum
+          [ 1
+          , VU.length (cstate_patch_wtgcell cs)
+          , VU.length (eflx_sh_tot_patch_vec ef)
+          , VU.length (eflx_lh_tot_patch_vec ef)
+          , VU.length (eflx_sh_grnd_patch_vec ef)
+          , VU.length (cgrnds_patch_vec ef)
+          , VU.length (cgrndl_patch_vec ef)
+          , VU.length (cgrnd_patch_vec ef)
+          , VU.length (dlrad_patch_vec ef)
+          , VU.length (ulrad_patch_vec ef)
+          , VU.length (eflx_lwrad_out_patch_vec ef)
+          , VU.length (eflx_lwrad_net_patch_vec ef)
+          , VU.length (qflx_evap_tot_patch_vec wf)
+          , VU.length (qflx_evap_grnd_patch_vec wf)
+          , VU.length (qflx_tran_veg_patch_vec wf)
+          , VU.length (t_ref2m_patch_vec temp)
+          , VU.length (t_veg_patch_vec temp)
+          ]
+      safeVec vec fallback p =
+        if p >= 0 && p < VU.length vec then vec VU.! p else fallback
+      patchWeight p =
+        if VU.null (cstate_patch_wtgcell cs)
+        then if p == 0 then 1.0 else 0.0
+        else safeVec (cstate_patch_wtgcell cs) 0.0 p
+      weightSum = max 1.0e-12 (sum [ patchWeight p | p <- [0 .. patchCount - 1] ])
+      weighted vec fallback =
+        sum
+          [ (patchWeight p / weightSum) * safeVec vec fallback p
+          | p <- [0 .. patchCount - 1]
+          ]
+      shTot = weighted (eflx_sh_tot_patch_vec ef) (eflx_sh_tot_patch ef)
+      lhTot = weighted (eflx_lh_tot_patch_vec ef) (eflx_lh_tot_patch ef)
+      shGrnd = weighted (eflx_sh_grnd_patch_vec ef) (eflx_sh_grnd_patch ef)
+      sabv = weighted (sabv_patch_vec ef) (sabv_patch ef)
+      sabg = weighted (sabg_patch_vec ef) (sabg_patch ef)
+      fsa = weighted (fsa_patch_vec ef) (fsa_patch ef)
+      cgrnds = weighted (cgrnds_patch_vec ef) (cgrnds_patch ef)
+      cgrndl = weighted (cgrndl_patch_vec ef) (cgrndl_patch ef)
+      cgrnd = weighted (cgrnd_patch_vec ef) (cgrnd_patch ef)
+      dlrad = weighted (dlrad_patch_vec ef) (dlrad_patch ef)
+      ulrad = weighted (ulrad_patch_vec ef) (ulrad_patch ef)
+      lwradOut = weighted (eflx_lwrad_out_patch_vec ef) (eflx_lwrad_out_patch ef)
+      lwradNet = weighted (eflx_lwrad_net_patch_vec ef) (eflx_lwrad_net_patch ef)
+      evapTot = weighted (qflx_evap_tot_patch_vec wf) (qflx_evap_tot_patch wf)
+      evapGrnd = weighted (qflx_evap_grnd_patch_vec wf) (qflx_evap_grnd_col wf)
+      tranVeg = weighted (qflx_tran_veg_patch_vec wf) (qflx_tran_veg_patch wf)
+      tRef = weighted (t_ref2m_patch_vec temp) (t_ref2m_patch temp)
+      tVeg = weighted (t_veg_patch_vec temp) (t_veg_patch temp)
+      ef' = ef
+        { eflx_sh_tot_patch = shTot
+        , eflx_lh_tot_patch = lhTot
+        , eflx_sh_grnd_patch = shGrnd
+        , eflx_soil_grnd_col = shGrnd
+        , sabv_patch = sabv
+        , sabg_patch = sabg
+        , fsa_patch = fsa
+        , cgrnds_patch = cgrnds
+        , cgrndl_patch = cgrndl
+        , cgrnd_patch = cgrnd
+        , dlrad_patch = dlrad
+        , ulrad_patch = ulrad
+        , eflx_lwrad_out_patch = lwradOut
+        , eflx_lwrad_net_patch = lwradNet
+        }
+      wf' = wf
+        { qflx_evap_tot_patch = evapTot
+        , qflx_evap_grnd_col = evapGrnd
+        , qflx_tran_veg_patch = tranVeg
+        }
+      temp' = temp
+        { t_ref2m_patch = tRef
+        , t_veg_patch = tVeg
+        }
+  in st { clmEnergyFlux = ef', clmWaterFlux = wf', clmTemp = temp' }
 
 -- ============================================================================
 -- Main driver: clm_drv
@@ -401,9 +527,8 @@ clmDrvPatch2Col st =
 -- 22. Energy balance check
 -- 23. Surface albedo for next step (if doAlb)
 --
--- Each step is a slot in the 'PhysicsPipeline'. Stub implementations
--- pass state through unchanged; real implementations are plugged in
--- as modules are ported.
+-- Each step is a slot in the 'PhysicsPipeline'. The default pipeline preserves
+-- state, and production runs install the wired adapter set.
 --
 -- Returns updated (CLMDriverState, CLMState).
 clmDrv
@@ -414,6 +539,29 @@ clmDrv
   -> CLMState
   -> (CLMDriverState, CLMState)
 clmDrv cfg pipeline ctx drvState st0 =
+  let (drvState', snaps) = clmDrvBoundaries cfg pipeline ctx drvState st0
+  in (drvState', bsFinal snaps)
+
+-- | Intermediate CLMState snapshots captured at the Fortran instrumentation
+-- boundaries, for per-module parity diffing. Purely a diagnostic projection of
+-- the same physics call sequence 'clmDrv' runs — call order is unchanged.
+data BoundarySnapshots = BoundarySnapshots
+  { bsAfterCanopyFluxes      :: !CLMState  -- ^ after flux phase (st9b)
+  , bsAfterSoilTemperature   :: !CLMState  -- ^ after soil temperature (st10)
+  , bsAfterSoilFluxes        :: !CLMState  -- ^ after soil/surface fluxes (st12)
+  , bsAfterHydrologyNoDrain  :: !CLMState  -- ^ after water table (st16)
+  , bsFinal                  :: !CLMState  -- ^ end of step (st24)
+  }
+
+-- | Like 'clmDrv' but also returns the intermediate boundary snapshots.
+clmDrvBoundaries
+  :: CLMDriverConfig
+  -> PhysicsPipeline
+  -> TimestepContext
+  -> CLMDriverState
+  -> CLMState
+  -> (CLMDriverState, BoundarySnapshots)
+clmDrvBoundaries cfg pipeline ctx drvState st0 =
   let
     -- Apply each phase in sequence
     apply step = step cfg ctx
@@ -486,20 +634,51 @@ clmDrv cfg pipeline ctx drvState st0 =
     -- Advance driver state
     drvState' = advanceDriverState drvState (tcDtime ctx)
   in
-    (drvState', st24)
+    (drvState', BoundarySnapshots
+      { bsAfterCanopyFluxes     = st9b
+      , bsAfterSoilTemperature  = st10
+      , bsAfterSoilFluxes       = st12
+      , bsAfterHydrologyNoDrain = st16
+      , bsFinal                 = st24
+      })
 
 -- | Advance the driver state by one timestep.
 advanceDriverState :: CLMDriverState -> Double -> CLMDriverState
 advanceDriverState ds dtime =
   let newSec = dsSec ds + round dtime
       (extraDays, remainSec) = newSec `divMod` (86400 :: Int)
-      -- Simplified date advance (does not handle month/year rollover properly;
-      -- a real implementation would use a calendar module)
-      newDay = dsDay ds + extraDays
+      (newYear, newMonth, newDay) =
+        advanceYmd (dsYear ds) (dsMonth ds) (dsDay ds) extraDays
   in  ds { dsNstep = dsNstep ds + 1
          , dsSec   = remainSec
+         , dsYear  = newYear
+         , dsMonth = newMonth
          , dsDay   = newDay
          }
+
+advanceYmd :: Int -> Int -> Int -> Int -> (Int, Int, Int)
+advanceYmd y m d n
+  | n <= 0 = (y, m, d)
+  | d + n <= daysInMonth m = (y, m, d + n)
+  | otherwise =
+      let n' = n - (daysInMonth m - d + 1)
+          (y', m') = if m == 12 then (y + 1, 1) else (y, m + 1)
+      in advanceYmd y' m' 1 n'
+
+daysInMonth :: Int -> Int
+daysInMonth  1 = 31
+daysInMonth  2 = 28
+daysInMonth  3 = 31
+daysInMonth  4 = 30
+daysInMonth  5 = 31
+daysInMonth  6 = 30
+daysInMonth  7 = 31
+daysInMonth  8 = 31
+daysInMonth  9 = 30
+daysInMonth 10 = 31
+daysInMonth 11 = 30
+daysInMonth 12 = 31
+daysInMonth _  = 30
 
 -- ============================================================================
 -- Specific humidity computation (utility)

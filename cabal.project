@@ -1,0 +1,10 @@
+packages: .
+
+-- Keep Cabal solver results anchored to the same compiler generation as
+-- stack.yaml's lts-22.43 snapshot. Stack remains the canonical build path
+-- because stack.yaml.lock pins the full Stackage snapshot.
+with-compiler: ghc-9.6.6
+index-state: 2024-12-01T00:00:00Z
+
+tests: True
+optimization: False

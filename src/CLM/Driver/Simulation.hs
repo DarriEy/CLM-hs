@@ -369,7 +369,7 @@ stepSimulation !st nstep dtime =
       -- For frozen soil: very low evaporation (liquid fraction near zero)
       soilbeta = if t_grnd < tfrz
                  then 0.01  -- frozen: minimal evaporation
-                 else 1.0   -- simplified: saturated when unfrozen
+                 else 1.0   -- saturated unfrozen soil-column fallback
       qg = soilbeta * qsr_qs qr_grnd
       qr_snow = qsat (min t_grnd tfrz) forc_pbot
       qg_snow = qsr_qs qr_snow
@@ -583,7 +583,7 @@ stepSimulation !st nstep dtime =
                       , cfi_fdry           = 1.0
                       , cfi_liqcan         = 0.0
                       , cfi_snocan         = 0.0
-                      , cfi_rssun          = 200.0  -- simplified stomatal resistance
+                      , cfi_rssun          = 200.0  -- prescribed stomatal resistance
                       , cfi_rssha          = 200.0
                       , cfi_laisun         = laisun_p
                       , cfi_laisha         = laisha_p
@@ -717,7 +717,7 @@ stepSimulation !st nstep dtime =
                        ++ "\n" ++ concatMap (\i -> showPatch i ++ "\n") [0..np-1]) ()
         else ()
 
-      -- sabg_lyr: all absorbed at top layer (simplified)
+      -- sabg_lyr: current single-layer soil absorption path
       -- Use weighted average sabg across soil column patches
       sabg_agg = sum [ let vai_p = ss_elai st VU.! i + ss_esai st VU.! i
                            fveg_i = ss_frac_veg_nosno st VU.! i

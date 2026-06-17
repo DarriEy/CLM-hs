@@ -31,6 +31,14 @@ module CLM.BioGeoPhys.UrbanFluxes
   , canyonResistance
   , urbanFluxesSinglePatch
   , calcSimpleInternalBuildingTemp
+    -- * Canyon energy balance solver
+  , CanyonEnergyInput(..)
+  , CanyonEnergyOutput(..)
+  , solveCanyonEnergyBalance
+    -- * Stability iteration
+  , MoninObukhovInput(..)
+  , calcMoninObukhovLength
+  , stabilityFunction
   ) where
 
 import CLM.Constants.PhysicalConstants (tfrz, grav, sb)
@@ -256,3 +264,140 @@ calcSimpleInternalBuildingTemp !ht_roof !canyon_hwr !wtlunit_roof
   let !lngth_roof = (ht_roof / canyon_hwr) * wtlunit_roof / (1.0 - wtlunit_roof)
   in (ht_roof * (t_sh_inner + t_sw_inner) + lngth_roof * t_roof_inner)
      / (2.0 * ht_roof + lngth_roof)
+
+-- =========================================================================
+-- Monin-Obukhov stability
+-- =========================================================================
+
+data MoninObukhovInput = MoninObukhovInput
+  { moi_ustar     :: !Double  -- ^ friction velocity (m/s)
+  , moi_tstar     :: !Double  -- ^ temperature scale (K)
+  , moi_qstar     :: !Double  -- ^ humidity scale (kg/kg)
+  , moi_t_ref     :: !Double  -- ^ reference temperature (K)
+  , moi_q_ref     :: !Double  -- ^ reference humidity (kg/kg)
+  , moi_z_ref     :: !Double  -- ^ reference height (m)
+  , moi_displa    :: !Double  -- ^ displacement height (m)
+  } deriving (Show)
+
+-- | Monin-Obukhov length.
+-- L = -ustar^3 * theta_v / (k * g * (w'theta_v'))
+calcMoninObukhovLength :: MoninObukhovInput -> Double
+calcMoninObukhovLength !inp =
+  let !vkc = 0.4
+      !thv = moi_t_ref inp * (1.0 + 0.61 * moi_q_ref inp)
+      !ustar = max 0.001 (moi_ustar inp)
+      !wthv = moi_tstar inp + 0.61 * moi_t_ref inp * moi_qstar inp
+  in if abs wthv > 1.0e-10
+     then negate (ustar ** 3 * thv) / (vkc * grav * wthv)
+     else 1.0e6
+
+-- | Stability correction function (Businger-Dyer).
+-- Returns (psi_m, psi_h) for momentum and heat.
+stabilityFunction :: Double  -- ^ zeta = z/L
+                  -> (Double, Double)
+stabilityFunction !zeta
+  | zeta < 0.0 =  -- unstable
+    let !x = (1.0 - 16.0 * zeta) ** 0.25
+        !psi_m = 2.0 * log ((1.0 + x) / 2.0) + log ((1.0 + x*x) / 2.0) - 2.0 * atan x + pi / 2.0
+        !psi_h = 2.0 * log ((1.0 + x*x) / 2.0)
+    in (psi_m, psi_h)
+  | otherwise =  -- stable
+    let !psi_m = negate 5.0 * zeta
+        !psi_h = negate 5.0 * zeta
+    in (psi_m, psi_h)
+
+-- =========================================================================
+-- Canyon energy balance solver
+-- =========================================================================
+
+data CanyonEnergyInput = CanyonEnergyInput
+  { cei_forc_t       :: !Double  -- ^ atmospheric temperature (K)
+  , cei_forc_q       :: !Double  -- ^ atmospheric humidity (kg/kg)
+  , cei_forc_rho     :: !Double  -- ^ air density (kg/m3)
+  , cei_forc_u       :: !Double  -- ^ wind speed (m/s)
+  , cei_forc_lwrad   :: !Double  -- ^ downwelling longwave (W/m2)
+  , cei_t_roof       :: !Double  -- ^ roof surface temperature (K)
+  , cei_t_sunwall    :: !Double  -- ^ sunlit wall temperature (K)
+  , cei_t_shadewall  :: !Double  -- ^ shaded wall temperature (K)
+  , cei_t_road       :: !Double  -- ^ road surface temperature (K)
+  , cei_canyon_hwr   :: !Double  -- ^ height-to-width ratio
+  , cei_wtroad       :: !Double  -- ^ weight of road in canyon
+  , cei_em_roof      :: !Double  -- ^ roof emissivity
+  , cei_em_wall      :: !Double  -- ^ wall emissivity
+  , cei_em_road      :: !Double  -- ^ road emissivity
+  , cei_hac_method   :: !Int     -- ^ HVAC method
+  , cei_t_building   :: !Double  -- ^ building interior temperature (K)
+  } deriving (Show)
+
+data CanyonEnergyOutput = CanyonEnergyOutput
+  { ceo_taf           :: !Double  -- ^ canyon air temperature (K)
+  , ceo_qaf           :: !Double  -- ^ canyon air humidity (kg/kg)
+  , ceo_eflx_sh_roof  :: !Double  -- ^ roof sensible heat (W/m2)
+  , ceo_eflx_sh_road  :: !Double  -- ^ road sensible heat (W/m2)
+  , ceo_eflx_sh_sunwall :: !Double
+  , ceo_eflx_sh_shadewall :: !Double
+  , ceo_eflx_lwrad_canyon :: !Double  -- ^ net longwave in canyon (W/m2)
+  , ceo_eflx_wasteheat :: !Double  -- ^ waste heat from HVAC (W/m2)
+  } deriving (Show)
+
+-- | Solve canyon energy balance for canyon air temperature.
+-- The canyon air temperature is the weighted average of surface temperatures
+-- mediated by their respective conductances.
+-- Taf = (sum_i(h_i * T_i) + h_atm * T_atm) / (sum_i(h_i) + h_atm)
+solveCanyonEnergyBalance :: CanyonEnergyInput -> CanyonEnergyOutput
+solveCanyonEnergyBalance !inp =
+  let !hwr = cei_canyon_hwr inp
+      !rho = cei_forc_rho inp
+
+      -- Aerodynamic conductances (simplified)
+      !u_canyon = max 0.1 (cei_forc_u inp * exp (-0.2 * hwr))
+      !h_atm = rho * cpair * u_canyon / 50.0  -- conductance to atmosphere
+      !h_roof = rho * cpair * u_canyon / 20.0
+      !h_road = rho * cpair * u_canyon / 30.0
+      !h_sunwall = rho * cpair * u_canyon / 40.0 * hwr
+      !h_shadewall = h_sunwall
+
+      -- Canyon air temperature (energy balance)
+      !num = h_atm * cei_forc_t inp
+           + h_road * cei_t_road inp
+           + h_sunwall * cei_t_sunwall inp
+           + h_shadewall * cei_t_shadewall inp
+      !den = h_atm + h_road + h_sunwall + h_shadewall
+      !taf = if den > 0.0 then num / den else cei_forc_t inp
+
+      -- Canyon air humidity (similar approach)
+      !qaf = cei_forc_q inp
+
+      -- Sensible heat fluxes from each surface
+      !sh_roof = h_roof * (cei_t_roof inp - cei_forc_t inp)
+      !sh_road = h_road * (cei_t_road inp - taf)
+      !sh_sunwall = h_sunwall * (cei_t_sunwall inp - taf)
+      !sh_shadewall = h_shadewall * (cei_t_shadewall inp - taf)
+
+      -- Longwave radiation in canyon (view factor approach)
+      -- Net LW = emitted - absorbed
+      !vf_road_sky = 1.0 / (1.0 + hwr)  -- view factor road→sky
+      !vf_wall_sky = 0.5 * (1.0 - vf_road_sky)
+      !lw_down = cei_forc_lwrad inp
+      !lw_road_emit = cei_em_road inp * sb * cei_t_road inp ** 4
+      !lw_wall_emit = cei_em_wall inp * sb * ((cei_t_sunwall inp ** 4 + cei_t_shadewall inp ** 4) / 2.0)
+      !lw_canyon_net = (lw_road_emit * vf_road_sky + lw_wall_emit * 2.0 * vf_wall_sky)
+                     - (lw_down * vf_road_sky + lw_down * 2.0 * vf_wall_sky)
+
+      -- Waste heat from HVAC
+      !wasteheat = case cei_hac_method inp of
+                     1 -> let !cooling = max 0.0 (cei_t_building inp - taf) * h_road * 0.5
+                              !heating = max 0.0 (taf - cei_t_building inp) * h_road * 0.5
+                          in (cooling * acWasteheatFactor + heating * htWasteheatFactor)
+                     _ -> 0.0
+
+  in CanyonEnergyOutput
+     { ceo_taf = taf
+     , ceo_qaf = qaf
+     , ceo_eflx_sh_roof = sh_roof
+     , ceo_eflx_sh_road = sh_road
+     , ceo_eflx_sh_sunwall = sh_sunwall
+     , ceo_eflx_sh_shadewall = sh_shadewall
+     , ceo_eflx_lwrad_canyon = lw_canyon_net
+     , ceo_eflx_wasteheat = wasteheat
+     }

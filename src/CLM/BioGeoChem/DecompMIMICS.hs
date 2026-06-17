@@ -246,19 +246,188 @@ data MIMICSRateOutput = MIMICSRateOutput
   , mro_cn_col    :: !(VU.Vector Double)
   } deriving (Show)
 
--- | Calculate MIMICS decomposition rates (stub for full implementation).
+-- | 3D index: (col, level, pool/transition)
+idx3 :: Int -> Int -> Int -> Int -> Int -> Int
+idx3 nc nlev c j k = c + nc * (j + nlev * k)
+{-# INLINE idx3 #-}
+
+-- | Compute Vmax for a given substrate-microbe pair using Arrhenius regression.
+mimicsVmax :: VU.Vector Double -> VU.Vector Double -> VU.Vector Double
+           -> Int -> Double -> Double
+mimicsVmax vmod vint vslope idx temp =
+  let !vm = if idx < VU.length vmod then vmod VU.! idx else 1.0
+      !vi = if idx < VU.length vint then vint VU.! idx else 0.0
+      !vs = if idx < VU.length vslope then vslope VU.! idx else 0.0
+  in vm * exp (vs * temp + vi)
+
+-- | Compute Km for a given substrate-microbe pair.
+mimicsKm :: VU.Vector Double -> VU.Vector Double -> VU.Vector Double
+         -> Int -> Double -> Double
+mimicsKm kmod kint kslope idx temp =
+  let !km = if idx < VU.length kmod then kmod VU.! idx else 1.0
+      !ki = if idx < VU.length kint then kint VU.! idx else 0.0
+      !ks = if idx < VU.length kslope then kslope VU.! idx else 0.0
+  in km * exp (ks * temp + ki)
+
+-- | Moisture scalar (log-linear soil water potential response).
+mimicsWScalar :: Double -> Double
+mimicsWScalar soilpsi =
+  let !log_psi = log (max 1.0 (abs soilpsi))
+  in max 0.0 $ min 1.0 $ 1.0 - 0.1 * (log_psi - log 10.0)
+
+-- | O2 scalar (oxygen stress in saturated conditions).
+mimicsOScalar :: Double -> Double -> Double
+mimicsOScalar h2osoi_vol watsat =
+  let !sat_frac = if watsat > 0.0 then h2osoi_vol / watsat else 0.0
+  in if sat_frac > 0.9
+     then max 0.0 (1.0 - (sat_frac - 0.9) / 0.1)
+     else 1.0
+
+-- | Calculate MIMICS decomposition rates.
+-- Implements Michaelis-Menten kinetics with Arrhenius temperature response.
 decompRatesMIMICS :: MIMICSRateInput -> MIMICSRateOutput
 decompRatesMIMICS inp =
   let !nc   = mri_nc inp
       !nlev = mri_nlevdecomp inp
+      !mask = mri_mask inp
+      !t_soisno = mri_t_soisno inp
+      !soilpsi = mri_soilpsi inp
+      !cpools = mri_decomp_cpools inp
+      !dt = mri_dt inp
+      !st = mri_state inp
+      !params = mri_params inp
       size2 = nc * nlev
       npools = 8
       ntrans = 15
+      tfrz_loc = 273.15
+
+      -- Temperature in Celsius for Arrhenius
+      tempC c j = let !idx = idx2 nc c j
+                      !t = if idx < VU.length t_soisno then t_soisno VU.! idx else tfrz_loc
+                  in t - tfrz_loc
+
+      -- Pool concentrations (mg C / cm3 soil)
+      poolConc c j k = let !idx = idx3 nc nlev c j k
+                       in if idx < VU.length cpools then cpools VU.! idx else 0.0
+
+      -- Michaelis-Menten term: Vmax * [Substrate] / (Km + [Substrate])
+      mmTerm vIdx sConc mConc tc =
+        let !vmax = mimicsVmax (dms_vmod st) (dms_vint st) (dms_vslope st) vIdx tc
+            !km = mimicsKm (dms_kmod st) (dms_kint st) (dms_kslope st) vIdx tc
+        in if sConc + km > 0.0
+           then vmax * mConc * sConc / (km + sConc)
+           else 0.0
+
+      -- Decomposition rate constants (per pool)
+      decomp_k = VU.generate (nc * nlev * npools) $ \idx ->
+        let !c = idx `mod` nc
+            !rem1 = idx `div` nc
+            !j = rem1 `mod` nlev
+            !k = rem1 `div` nlev
+            !active = c < VU.length mask && mask VU.! c
+        in if not active then 0.0
+           else let !tc = tempC c j
+                    !psi_idx = idx2 nc c j
+                    !psi = if psi_idx < VU.length soilpsi then soilpsi VU.! psi_idx else -100.0
+                    !w_sc = mimicsWScalar psi
+                    !cpool_val = poolConc c j k
+                    -- For microbial pools: density-dependent turnover
+                    !iCop = dms_i_cop_mic st
+                    !iOli = dms_i_oli_mic st
+                in if k == iCop - 1 || k == iOli - 1
+                   then -- Microbial turnover (density-dependent)
+                     let !tau_base = if k == iCop - 1
+                                     then if VU.null (dmp_tau_r params) then 0.01
+                                          else dmp_tau_r params VU.! 0
+                                     else if VU.null (dmp_tau_k params) then 0.01
+                                          else dmp_tau_k params VU.! 0
+                         !densdep = dmp_densdep params
+                     in tau_base * (cpool_val ** densdep) * w_sc / (dt * 3600.0)
+                   else -- Substrate pools: rate determined by microbe activity
+                     if cpool_val > 0.0 then w_sc * 1.0 / (dt * 365.0 * 86400.0)
+                     else 0.0
+
+      -- Moisture scalars
+      w_scalar = VU.generate size2 $ \idx ->
+        let !c = idx `mod` nc
+            !j = idx `div` nc
+            !active = c < VU.length mask && mask VU.! c
+            !psi_idx = idx2 nc c j
+            !psi = if psi_idx < VU.length soilpsi then soilpsi VU.! psi_idx else -100.0
+        in if active then mimicsWScalar psi else 1.0
+
+      -- O2 scalars (all 1.0 for MIMICS - handled internally)
+      o_scalar = VU.replicate size2 1.0
+
+      -- Pathfrac: fraction of C flowing through each transition
+      -- For MIMICS, pathfrac encodes the partitioning between microbial pools
+      -- and between physical/chemical/available SOM
+      pathfrac = VU.generate (nc * nlev * ntrans) $ \idx ->
+        let !c = idx `mod` nc
+            !rem1 = idx `div` nc
+            !j = rem1 `mod` nlev
+            !k = rem1 `div` nlev
+            !active = c < VU.length mask && mask VU.! c
+            !fphys1_idx = idx2 nc c j
+        in if not active then 0.0
+           else case k + 1 of
+             -- Litter to microbes: all go to microbes (pathfrac = 1.0)
+             t | t == dms_i_l1m1 st -> 1.0
+               | t == dms_i_l1m2 st -> 1.0
+               | t == dms_i_l2m1 st -> 1.0
+               | t == dms_i_l2m2 st -> 1.0
+               | t == dms_i_s1m1 st -> 1.0
+               | t == dms_i_s1m2 st -> 1.0
+             -- Microbe turnover to SOM pools
+               | t == dms_i_m1s1 st ->
+                   let !fp = if fphys1_idx < VU.length (dms_fphys_m1 st)
+                             then dms_fphys_m1 st VU.! fphys1_idx else 0.5
+                   in fp  -- fraction to physically-protected
+               | t == dms_i_m1s2 st ->
+                   let !fp = if fphys1_idx < VU.length (dms_fphys_m1 st)
+                             then dms_fphys_m1 st VU.! fphys1_idx else 0.5
+                   in 1.0 - fp  -- fraction to chemically-recalcitrant
+               | t == dms_i_m1s3 st -> 0.0
+               | t == dms_i_m2s1 st ->
+                   let !fp = if fphys1_idx < VU.length (dms_fphys_m2 st)
+                             then dms_fphys_m2 st VU.! fphys1_idx else 0.5
+                   in fp
+               | t == dms_i_m2s2 st ->
+                   let !fp = if fphys1_idx < VU.length (dms_fphys_m2 st)
+                             then dms_fphys_m2 st VU.! fphys1_idx else 0.5
+                   in 1.0 - fp
+               | t == dms_i_m2s3 st -> 0.0
+             -- SOM desorption/oxidation to available pool
+               | t == dms_i_s2s1 st -> 1.0
+               | t == dms_i_s3s1 st -> 1.0
+               | otherwise -> 0.0
+
+      -- Respiration fractions per transition
+      rf_decomp = VU.generate (nc * nlev * ntrans) $ \idx ->
+        let !k = (idx `div` nc `div` nlev)
+        in case k + 1 of
+             t | t == dms_i_l1m1 st -> dms_rf_l1m1 st
+               | t == dms_i_l1m2 st -> dms_rf_l1m2 st
+               | t == dms_i_l2m1 st -> dms_rf_l2m1 st
+               | t == dms_i_l2m2 st -> dms_rf_l2m2 st
+               | t == dms_i_s1m1 st -> dms_rf_s1m1 st
+               | t == dms_i_s1m2 st -> dms_rf_s1m2 st
+               | otherwise -> 0.0  -- microbe turnover and desorption: no respiration
+
+      -- CN ratios per pool (for N mineralization)
+      cn_col = VU.generate (nc * npools) $ \idx ->
+        let !k = idx `div` nc
+            !iCop = dms_i_cop_mic st
+            !iOli = dms_i_oli_mic st
+        in if k == iCop - 1 then dmp_cn_r params
+           else if k == iOli - 1 then dmp_cn_k params
+           else dmp_cn_mod_num params
+
   in MIMICSRateOutput
-    { mro_decomp_k  = VU.replicate (nc * nlev * npools) 0.0
-    , mro_w_scalar  = VU.replicate size2 1.0
-    , mro_o_scalar  = VU.replicate size2 1.0
-    , mro_pathfrac  = VU.replicate (nc * nlev * ntrans) 0.0
-    , mro_rf_decomp = VU.replicate (nc * nlev * ntrans) 0.0
-    , mro_cn_col    = VU.replicate (nc * npools) 0.0
+    { mro_decomp_k  = decomp_k
+    , mro_w_scalar  = w_scalar
+    , mro_o_scalar  = o_scalar
+    , mro_pathfrac  = pathfrac
+    , mro_rf_decomp = rf_decomp
+    , mro_cn_col    = cn_col
     }

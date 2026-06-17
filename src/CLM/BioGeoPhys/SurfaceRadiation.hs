@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 -- | Surface radiative flux calculations.
 -- Computes solar fluxes absorbed by vegetation and ground surface,
 -- sun/shade fractions, and PAR absorption profiles.
@@ -22,6 +23,12 @@ module CLM.BioGeoPhys.SurfaceRadiation
   , isNearLocalNoon
   , canopySunShadeFracs
   , surfaceRadiationPatch
+    -- * Longwave radiation
+  , LongwaveInput(..)
+  , LongwaveResult(..)
+  , longwaveRadiation
+    -- * Net radiation
+  , netRadiation
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -278,3 +285,58 @@ surfaceRadiationPatch cfg colInp pInp =
        , srr_fsr_vis_i  = fsr_vis_i
        , srr_parveg     = parvegF
        }
+
+-- ========================================================================
+-- Longwave radiation (computed in CanopyFluxes/BaregroundFluxes, but
+-- diagnostics assembled here to match Fortran SurfaceRadiationMod)
+-- ========================================================================
+
+data LongwaveInput = LongwaveInput
+  { lwi_forc_lwrad    :: !Double  -- ^ downwelling atmospheric LW (W/m2)
+  , lwi_t_grnd        :: !Double  -- ^ ground temperature (K)
+  , lwi_t_veg         :: !Double  -- ^ vegetation temperature (K)
+  , lwi_emv           :: !Double  -- ^ vegetation emissivity
+  , lwi_emg           :: !Double  -- ^ ground emissivity
+  , lwi_frac_veg      :: !Double  -- ^ fraction of ground covered by vegetation
+  } deriving (Show)
+
+data LongwaveResult = LongwaveResult
+  { lwr_eflx_lwrad_out  :: !Double  -- ^ outgoing longwave (W/m2)
+  , lwr_eflx_lwrad_net  :: !Double  -- ^ net longwave (W/m2, positive = loss)
+  , lwr_lwrad_veg       :: !Double  -- ^ LW emitted by vegetation (W/m2)
+  , lwr_lwrad_grnd      :: !Double  -- ^ LW emitted by ground (W/m2)
+  } deriving (Show)
+
+-- | Stefan-Boltzmann constant (W/m2/K4)
+sbConst :: Double
+sbConst = 5.67e-8
+
+-- | Compute longwave radiation balance for a patch.
+-- Outgoing LW = emitted by vegetation + emitted by ground * (1 - frac_veg)
+-- Net LW = outgoing - incoming
+longwaveRadiation :: LongwaveInput -> LongwaveResult
+longwaveRadiation !inp =
+  let !fv = lwi_frac_veg inp
+      !lw_veg = lwi_emv inp * sbConst * lwi_t_veg inp ** 4
+      !lw_grnd = lwi_emg inp * sbConst * lwi_t_grnd inp ** 4
+      !lw_out = fv * lw_veg + (1.0 - fv) * lw_grnd
+                + (1.0 - lwi_emv inp) * fv * lwi_forc_lwrad inp
+                + (1.0 - lwi_emg inp) * (1.0 - fv) * lwi_forc_lwrad inp
+      !lw_net = lw_out - lwi_forc_lwrad inp
+  in LongwaveResult
+     { lwr_eflx_lwrad_out = lw_out
+     , lwr_eflx_lwrad_net = lw_net
+     , lwr_lwrad_veg = lw_veg
+     , lwr_lwrad_grnd = lw_grnd
+     }
+
+-- ========================================================================
+-- Net radiation
+-- ========================================================================
+
+-- | Compute net radiation from shortwave and longwave components.
+-- Rnet = FSA - LWnet = (sabv + sabg) - (LWout - LWdown)
+netRadiation :: Double  -- ^ fsa (absorbed shortwave, W/m2)
+             -> Double  -- ^ eflx_lwrad_net (net longwave, W/m2)
+             -> Double  -- ^ net radiation (W/m2)
+netRadiation !fsa !lwnet = fsa - lwnet

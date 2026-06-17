@@ -246,3 +246,141 @@ checkNamelistValidity !p !use_aquifer_layer
   | use_aquifer_layer && ip_use_groundwater_irrigation p =
       Just "use_groundwater_irrigation and use_aquifer_layer cannot both be true"
   | otherwise = Nothing
+
+--------------------------------------------------------------------------------
+-- Column-level irrigation state
+--------------------------------------------------------------------------------
+
+data IrrigColumnState = IrrigColumnState
+  { ics_n_irrig_steps_left :: !Int     -- ^ time steps remaining for irrigation today
+  , ics_irrig_rate         :: !Double  -- ^ current irrigation rate (mm/s)
+  , ics_irrig_rate_demand  :: !Double  -- ^ demand rate ignoring source limits (mm/s)
+  , ics_deficit            :: !Double  -- ^ current deficit (mm)
+  } deriving (Show, Eq)
+
+defaultIrrigColumnState :: IrrigColumnState
+defaultIrrigColumnState = IrrigColumnState 0 0.0 0.0 0.0
+
+--------------------------------------------------------------------------------
+-- Main driver: calc_irrigation_needed
+--------------------------------------------------------------------------------
+
+data IrrigNeededInput = IrrigNeededInput
+  { ini_params          :: !IrrigationParams
+  , ini_layers          :: !(V.Vector IrrigDeficitInput)
+  , ini_elai            :: !Double
+  , ini_irrigated       :: !Bool
+  , ini_local_time_sec  :: !Int
+  , ini_dtime           :: !Int
+  , ini_nsteps_per_day  :: !Int
+  , ini_volr            :: !Double   -- ^ river volume (m3)
+  , ini_grc_area        :: !Double   -- ^ gridcell area (km2)
+  , ini_limit_by_rof    :: !Bool     -- ^ whether to limit by river volume
+  } deriving (Show)
+
+data IrrigNeededResult = IrrigNeededResult
+  { inr_deficit          :: !Double   -- ^ raw deficit (mm)
+  , inr_deficit_limited  :: !Double   -- ^ deficit limited by river (mm)
+  , inr_irrig_rate       :: !Double   -- ^ irrigation rate to apply (mm/s)
+  , inr_n_steps_left     :: !Int      -- ^ number of irrigation steps
+  , inr_check_triggered  :: !Bool     -- ^ whether check was triggered this step
+  } deriving (Show, Eq)
+
+-- | Determine irrigation need for a single column/patch.
+-- Called once per timestep at the irrigation check time.
+calcIrrigationNeeded :: IrrigNeededInput -> IrrigColumnState -> IrrigNeededResult
+calcIrrigationNeeded !inp !state =
+  let !params = ini_params inp
+      !dtime = ini_dtime inp
+      !checkTriggered = pointNeedsCheckForIrrig params (ini_elai inp)
+                          (ini_irrigated inp) (ini_local_time_sec inp) dtime
+  in if checkTriggered
+     then let -- Compute deficit
+              !defResult = calcDeficit params (ini_layers inp)
+              !rawDeficit = idr_deficit defResult
+              -- Limit by river volume if needed
+              !limitedDeficit = if ini_limit_by_rof inp && rawDeficit > 0.0
+                                then let !ratio = calcDeficitVolrLimited params
+                                                    rawDeficit (ini_volr inp) (ini_grc_area inp)
+                                     in rawDeficit * ratio
+                                else rawDeficit
+              -- Convert deficit to rate
+              !nsteps = ini_nsteps_per_day inp
+              !rate = if nsteps > 0 && limitedDeficit > 0.0
+                      then limitedDeficit / (fromIntegral nsteps * fromIntegral dtime)
+                      else 0.0
+          in IrrigNeededResult
+             { inr_deficit = rawDeficit
+             , inr_deficit_limited = limitedDeficit
+             , inr_irrig_rate = rate
+             , inr_n_steps_left = if rate > 0.0 then nsteps else 0
+             , inr_check_triggered = True
+             }
+     else -- Not check time: continue irrigating if steps remain
+       let !stepsLeft = ics_n_irrig_steps_left state
+           !rate = if stepsLeft > 0 then ics_irrig_rate state else 0.0
+           !newSteps = max 0 (stepsLeft - 1)
+       in IrrigNeededResult
+          { inr_deficit = ics_deficit state
+          , inr_deficit_limited = ics_deficit state
+          , inr_irrig_rate = rate
+          , inr_n_steps_left = newSteps
+          , inr_check_triggered = False
+          }
+
+--------------------------------------------------------------------------------
+-- Main driver: calc_irrigation_fluxes
+--------------------------------------------------------------------------------
+
+data IrrigFluxInput = IrrigFluxInput
+  { ifi_irrig_rate      :: !Double  -- ^ rate from calcIrrigationNeeded (mm/s)
+  , ifi_irrig_method    :: !Int     -- ^ IRRIG_METHOD_DRIP or SPRINKLER
+  , ifi_use_gw          :: !Bool    -- ^ use groundwater as source
+  , ifi_gw_fraction     :: !Double  -- ^ fraction from groundwater [0,1]
+  } deriving (Show)
+
+data IrrigFluxResult = IrrigFluxResult
+  { ifr_qflx_irrig           :: !Double  -- ^ total irrigation flux (mm/s)
+  , ifr_qflx_irrig_drip      :: !Double  -- ^ drip component (mm/s)
+  , ifr_qflx_irrig_sprinkler :: !Double  -- ^ sprinkler component (mm/s)
+  , ifr_qflx_irrig_from_gw   :: !Double  -- ^ flux from groundwater (mm/s)
+  , ifr_qflx_irrig_from_sfc  :: !Double  -- ^ flux from surface water (mm/s)
+  } deriving (Show, Eq)
+
+-- | Apply irrigation fluxes, partitioning between drip/sprinkler
+-- and groundwater/surface water sources.
+calcIrrigationFluxes :: IrrigFluxInput -> IrrigFluxResult
+calcIrrigationFluxes !inp =
+  let !rate = ifi_irrig_rate inp
+      !method = ifi_irrig_method inp
+      -- Partition by application method
+      !appResult = calcApplicationFlux method rate
+      !dripFlux = iar_qflx_irrig_drip appResult
+      !sprinklerFlux = iar_qflx_irrig_sprinkler appResult
+      -- Partition by source
+      !gwFrac = if ifi_use_gw inp then ifi_gw_fraction inp else 0.0
+      !gwFlux = rate * gwFrac
+      !sfcFlux = rate * (1.0 - gwFrac)
+  in IrrigFluxResult
+     { ifr_qflx_irrig = rate
+     , ifr_qflx_irrig_drip = dripFlux
+     , ifr_qflx_irrig_sprinkler = sprinklerFlux
+     , ifr_qflx_irrig_from_gw = gwFlux
+     , ifr_qflx_irrig_from_sfc = sfcFlux
+     }
+
+--------------------------------------------------------------------------------
+-- Update column irrigation state
+--------------------------------------------------------------------------------
+
+-- | Update irrigation state after computing needed/fluxes.
+updateIrrigState :: IrrigNeededResult -> IrrigColumnState -> IrrigColumnState
+updateIrrigState !needed !old =
+  if inr_check_triggered needed
+  then IrrigColumnState
+       { ics_n_irrig_steps_left = inr_n_steps_left needed
+       , ics_irrig_rate = inr_irrig_rate needed
+       , ics_irrig_rate_demand = inr_irrig_rate needed
+       , ics_deficit = inr_deficit_limited needed
+       }
+  else old { ics_n_irrig_steps_left = inr_n_steps_left needed }

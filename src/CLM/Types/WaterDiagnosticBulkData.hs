@@ -37,6 +37,7 @@ data WaterDiagnosticBulkData = WaterDiagnosticBulkData
   , wdiag_exice_subs_tot_col          :: !(VU.Vector Double) -- ^ Total subsidence from excess ice melt [m]
   , wdiag_exice_vol_tot_col           :: !(VU.Vector Double) -- ^ Averaged volumetric excess ice [m^3/m^3]
   , wdiag_snw_rds_top_col             :: !(VU.Vector Double) -- ^ Snow grain radius (top layer) [microns]
+  , wdiag_snow_persist_col            :: !(VU.Vector Double) -- ^ Mass-weighted snow persistence for albedo [s]
   , wdiag_h2osno_top_col              :: !(VU.Vector Double) -- ^ Top-layer mass of snow [kg]
   , wdiag_sno_liq_top_col             :: !(VU.Vector Double) -- ^ Snow liquid water fraction (mass), top layer
   , wdiag_dqgdT_col                   :: !(VU.Vector Double) -- ^ d(qg)/dT
@@ -99,6 +100,7 @@ defaultWaterDiagnosticBulkData = WaterDiagnosticBulkData
   , wdiag_exice_subs_tot_col          = VU.empty
   , wdiag_exice_vol_tot_col           = VU.empty
   , wdiag_snw_rds_top_col             = VU.empty
+  , wdiag_snow_persist_col            = VU.empty
   , wdiag_h2osno_top_col              = VU.empty
   , wdiag_sno_liq_top_col             = VU.empty
   , wdiag_dqgdT_col                   = VU.empty

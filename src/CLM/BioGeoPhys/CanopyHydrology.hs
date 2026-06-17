@@ -64,7 +64,7 @@ data CanopyHydrologyParams = CanopyHydrologyParams
   { chp_liq_canopy_storage_scalar   :: !Double  -- ^ Canopy liquid storage [kg/m2]
   , chp_snow_canopy_storage_scalar  :: !Double  -- ^ Canopy snow storage [kg/m2]
   , chp_snowcan_unload_temp_fact    :: !Double  -- ^ Temperature unloading factor [K*s]
-  , chp_snowcan_unload_wind_fact    :: !Double  -- ^ Wind unloading factor [-]
+  , chp_snowcan_unload_wind_fact    :: !Double  -- ^ Wind unloading timescale [m]
   , chp_interception_fraction       :: !Double  -- ^ Fraction of intercepted precip [-]
   , chp_maximum_leaf_wetted_fraction :: !Double -- ^ Max fraction of leaf that may be wet [-]
   , chp_use_clm5_fpi                :: !Bool    -- ^ Use CLM5 interception formula
@@ -337,8 +337,8 @@ bulkFluxSnowUnloading inp
           dtime_val = sui_dtime inp
           qtempunload = max 0.0 (snocan_val * (forc_t_val - 270.15) /
                                   chp_snowcan_unload_temp_fact params)
-          qwindunload = chp_snowcan_unload_wind_fact params *
-                        snocan_val * forc_wind_val / 1.56e5
+          qwindunload = snocan_val * forc_wind_val /
+                        chp_snowcan_unload_wind_fact params
           qtotal = min (qtempunload + qwindunload) (snocan_val / dtime_val)
       in SnowUnloadingResult
            { sur_qflx_snotempunload = qtempunload

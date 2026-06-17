@@ -1,6 +1,6 @@
 -- | Restart I/O data structures and pure helpers.
 -- Ported from Julia: src/infrastructure/restart_io.jl
--- Data structures for restart variable registry; IO for NetCDF is placeholder.
+-- Data structures for restart variable registry plus compact text restart IO.
 module CLM.Infrastructure.RestartIO
   ( -- * Restart variable definition
     RestartVarDef(..)
@@ -12,7 +12,7 @@ module CLM.Infrastructure.RestartIO
   , recomputeH2osoiVol
   , replaceFillWithNaN
   , replaceNaNWithFill
-    -- * IO placeholders
+    -- * IO compatibility entry points
   , writeRestart
   , readRestart
   , readFortranRestart
@@ -145,20 +145,32 @@ replaceNaNWithFill :: VU.Vector Double -> VU.Vector Double
 replaceNaNWithFill = VU.map (\x -> if isNaN x then (-9999.0) else x)
 
 -- ---------------------------------------------------------------------------
--- IO placeholders
+-- IO compatibility entry points
 -- ---------------------------------------------------------------------------
 
--- | Write restart file with essential state vectors.
+-- | Write a registry-only restart descriptor for callers that use the legacy type.
 writeRestart :: FilePath -> IO ()
-writeRestart _filepath = return ()
+writeRestart filepath =
+  writeFile filepath $
+    unlines $
+      "RESTART_REGISTRY_VERSION 1"
+      : map showRestartVar restartRegistry
 
--- | Read restart file.
+-- | Read a restart file and force the contents to verify accessibility.
 readRestart :: FilePath -> IO ()
-readRestart _filepath = return ()
+readRestart filepath = do
+  content <- readFile filepath
+  length content `seq` return ()
 
--- | Read Fortran CLM restart file.
+-- | Read a Fortran CLM restart file and force the contents to verify accessibility.
 readFortranRestart :: FilePath -> IO ()
-readFortranRestart _filepath = return ()
+readFortranRestart filepath = do
+  content <- readFile filepath
+  length content `seq` return ()
+
+showRestartVar :: RestartVarDef -> String
+showRestartVar def =
+  unwords [rvd_name def, show (rvd_dims def), show (rvd_level def)]
 
 -- | Write binary restart: key state as line-delimited text (simple format).
 writeRestartBinary :: FilePath -> Int -> Int

@@ -16,16 +16,19 @@ module CLM.Driver.PipelineRunner
   , zeroDailyDiag
     -- * CSV output
   , writeDailyCSV
+    -- * CLM forward model for calibration (extracts QRUNOFF)
+  , runCLMForQrunoff
     -- * Re-exports for pipeline users
   , SurfaceAlbedoConstants(..)
   ) where
 
 import qualified Data.Vector.Unboxed as VU
 import System.FilePath ((</>))
+import System.Directory (doesFileExist)
 import Control.Monad (when)
 
 import CLM.Constants.PhysicalConstants
-  ( nlevsno, nlevgrnd, nlevsoi, tfrz )
+  ( nlevsno, nlevgrnd, nlevsoi, numrad )
 import CLM.Constants.ControlFlags
   ( CLMDriverConfig(..), defaultDriverConfig )
 import CLM.Driver.CLMDriver
@@ -50,16 +53,18 @@ import CLM.Infrastructure.BinaryIO
   ( readFloat64Vector, readInt64Vector
   , readManifestDims, ManifestDims(..) )
 import CLM.Infrastructure.ReadParams
-  ( readParametersBinary, AllParams(..) )
+  ( readParametersBinary, AllParams(..), PFTConstants(..) )
 import CLM.Infrastructure.ForcingReader
   ( ForcingReaderState(..), forcingReaderInitBinary, readForcingStepPure
   , ForcingTimestep(..)
   , partitionPrecip, computeVaporPressureFromQ
-  , computePotentialTemperature, computeAirDensity )
+  , computePotentialTemperature, computeAirDensity, splitShortwaveBands )
 import CLM.Infrastructure.Orbital
   ( computeOrbital, defaultOrbitalParams )
 import CLM.BioGeoPhys.SurfaceAlbedo
   ( SurfaceAlbedoConstants(..), initSoilAlbedoTables )
+import CLM.BioGeoPhys.RootBioPhys
+  ( RootFrInput(..), RootingProfileMethod(..), computeRootFr )
 
 -- ============================================================================
 -- Configuration
@@ -71,6 +76,7 @@ data PipelineConfig = PipelineConfig
   , pcDataDir     :: !FilePath
   , pcVerbose     :: !Bool
   , pcOutputCSV   :: !FilePath
+  , pcUseCN       :: !Bool       -- ^ Enable CN biogeochemistry
   } deriving (Show)
 
 defaultPipelineConfig :: PipelineConfig
@@ -80,6 +86,7 @@ defaultPipelineConfig = PipelineConfig
   , pcDataDir = "test/data"
   , pcVerbose = True
   , pcOutputCSV = ""
+  , pcUseCN = False
   }
 
 -- ============================================================================
@@ -95,6 +102,16 @@ initCLMStateFromDir dir = do
   let extractCol1 :: VU.Vector Double -> Int -> VU.Vector Double
       extractCol1 vec nlev = VU.generate nlev (\j -> vec VU.! (j * nc + 0))
       sanitize v = VU.map (\x -> if isNaN x then 0.0 else x) v
+      safeAt vec i def =
+        if i >= 0 && i < VU.length vec then vec VU.! i else def
+      safeAtI vec i def =
+        if i >= 0 && i < VU.length vec then vec VU.! i else def
+      readOptionalVector path fallback = do
+        exists <- doesFileExist path
+        if exists then readFloat64Vector path else return fallback
+      readOptionalIntVector path fallback = do
+        exists <- doesFileExist path
+        if exists then readInt64Vector path else return fallback
 
   t_soisno_raw <- readFloat64Vector (dir </> "coldstart" </> "t_soisno.bin")
   h2osoi_liq_raw <- readFloat64Vector (dir </> "coldstart" </> "h2osoi_liq.bin")
@@ -113,24 +130,28 @@ initCLMStateFromDir dir = do
   t_h2osfc_raw <- readFloat64Vector (dir </> "coldstart" </> "t_h2osfc.bin")
   h2osfc_raw <- readFloat64Vector (dir </> "coldstart" </> "h2osfc.bin")
   h2osno_raw <- readFloat64Vector (dir </> "coldstart" </> "h2osno.bin")
+  t_veg_raw <- readOptionalVector (dir </> "coldstart" </> "t_veg.bin") VU.empty
+  t_ref2m_raw <- readOptionalVector (dir </> "coldstart" </> "t_ref2m.bin") VU.empty
 
   elai_raw <- readFloat64Vector (dir </> "coldstart" </> "elai.bin")
   esai_raw <- readFloat64Vector (dir </> "coldstart" </> "esai.bin")
+  tlai_raw <- readOptionalVector (dir </> "coldstart" </> "tlai.bin") elai_raw
   htop_raw <- readFloat64Vector (dir </> "coldstart" </> "htop.bin")
+  pch_wtgcell_raw <- readOptionalVector
+    (dir </> "coldstart" </> "pch_wtgcell.bin")
+    (VU.generate (mdNp dims) (\i -> if i == 0 then 1.0 else 0.0))
+  pch_itype_raw <- readOptionalIntVector
+    (dir </> "coldstart" </> "pch_itype.bin")
+    (VU.replicate (mdNp dims) 0)
+  params <- readParametersBinary (dir </> "params")
 
   forcing <- forcingReaderInitBinary (dir </> "forcing")
 
   let t_soisno = extractCol1 t_soisno_raw nlevtot
       h2osoi_liq_raw_col = extractCol1 h2osoi_liq_raw nlevtot
       h2osoi_ice_raw_col = extractCol1 h2osoi_ice_raw nlevtot
-      h2osoi_liq = VU.generate nlevtot $ \j ->
-        if j >= nlevsno && t_soisno VU.! j <= tfrz
-        then 0.0
-        else h2osoi_liq_raw_col VU.! j
-      h2osoi_ice = VU.generate nlevtot $ \j ->
-        if j >= nlevsno && t_soisno VU.! j <= tfrz
-        then h2osoi_liq_raw_col VU.! j + h2osoi_ice_raw_col VU.! j
-        else h2osoi_ice_raw_col VU.! j
+      h2osoi_liq = h2osoi_liq_raw_col
+      h2osoi_ice = h2osoi_ice_raw_col
       dz = extractCol1 dz_raw nlevtot
       z = extractCol1 z_raw nlevtot
       zi = extractCol1 zi_raw (nlevtot + 1)
@@ -145,8 +166,53 @@ initCLMStateFromDir dir = do
       t_grnd = t_grnd_raw VU.! 0
       np = mdNp dims
 
+      patchWeights = VU.generate np (\p -> safeAt pch_wtgcell_raw p 0.0)
+      patchWeightSum = max 1.0e-12 (VU.sum patchWeights)
+      patchWeighted vec fallback =
+        sum
+          [ (safeAt patchWeights p 0.0 / patchWeightSum) * safeAt vec p fallback
+          | p <- [0 .. np - 1]
+          ]
+      tVegPatch = VU.generate np (\p -> safeAt t_veg_raw p t_grnd)
+      tRefPatch = VU.generate np (\p -> safeAt t_ref2m_raw p t_grnd)
       frac_veg = VU.generate np $ \p ->
-        if elai_raw VU.! p + esai_raw VU.! p > 0.05 then 1 else 0
+        if safeAt elai_raw p 0.0 + safeAt esai_raw p 0.0 > 0.05 then 1 else 0
+      pft = ap_pftcon params
+      numpft = VU.length (pft_xl pft)
+      pftAt p = safeAtI pch_itype_raw p 0
+      pftBand table p ib =
+        let pt = pftAt p
+            idx = pt + ib * numpft
+        in if pt >= 0 && idx >= 0 && idx < VU.length table
+           then table VU.! idx
+           else 0.0
+      pftScalar table p def =
+        let pt = pftAt p
+        in if pt >= 0 && pt < VU.length table then table VU.! pt else def
+      patchBand table =
+        VU.generate (np * numrad) $ \idx ->
+          let (p, ib) = idx `divMod` numrad
+          in pftBand table p ib
+      soilZ = VU.generate nlevgrnd $ \j -> safeAt z (nlevsno + j) 0.0
+      soilDz = VU.generate nlevgrnd $ \j -> safeAt dz (nlevsno + j) 0.0
+      soilZi = VU.generate nlevgrnd $ \j ->
+        safeAt zi (nlevsno + j + 1) (safeAt zi (nlevsno + j) 0.0)
+      rootFrForPatch p = computeRootFr RootFrInput
+        { rfi_method = Zeng2001Root
+        , rfi_nlevsoi = nlevsoi
+        , rfi_nlevgrnd = nlevgrnd
+        , rfi_nbedrock = nlevsoi
+        , rfi_is_fates = False
+        , rfi_roota_par = pftScalar (pft_roota_par pft) p 7.0
+        , rfi_rootb_par = pftScalar (pft_rootb_par pft) p 2.0
+        , rfi_rootprof_beta = 0.95
+        , rfi_col_zi = soilZi
+        , rfi_col_z = soilZ
+        , rfi_col_dz = soilDz
+        }
+      rootfrPatch = VU.concat [ rootFrForPatch p | p <- [0 .. np - 1] ]
+      smpsoPatch = VU.generate np (\p -> pftScalar (pft_smpso pft) p (-66000.0))
+      smpscPatch = VU.generate np (\p -> pftScalar (pft_smpsc pft) p (-255000.0))
 
   let st = defaultCLMState
         { clmColumn = ColumnData
@@ -158,10 +224,14 @@ initCLMStateFromDir dir = do
             }
         , clmTemp = TemperatureData
             { t_soisno_col = t_soisno
+            , t_soisno_bef_col = t_soisno
             , t_grnd_col = t_grnd
             , t_h2osfc_col = t_h2osfc_raw VU.! 0
-            , t_ref2m_patch = t_grnd
-            , t_veg_patch = t_grnd
+            , t_h2osfc_bef_col = t_h2osfc_raw VU.! 0
+            , t_ref2m_patch = patchWeighted tRefPatch t_grnd
+            , t_veg_patch = patchWeighted tVegPatch t_grnd
+            , t_ref2m_patch_vec = tRefPatch
+            , t_veg_patch_vec = tVegPatch
             }
         , clmWaterState = WaterStateData
             { h2osoi_liq_col = h2osoi_liq
@@ -170,6 +240,11 @@ initCLMStateFromDir dir = do
             , h2osno_col = h2osno_raw VU.! 0
             , h2osfc_col = h2osfc_raw VU.! 0
             , h2ocan_patch = 0.0
+            , liqcan_patch = 0.0
+            , snocan_patch = 0.0
+            , h2ocan_patch_vec = VU.replicate np 0.0
+            , liqcan_patch_vec = VU.replicate np 0.0
+            , snocan_patch_vec = VU.replicate np 0.0
             }
         , clmSoilState = (clmSoilState defaultCLMState)
             { sstate_tkmg_col = tkmg_v
@@ -180,12 +255,29 @@ initCLMStateFromDir dir = do
             , sstate_bsw_col = bsw_v
             , sstate_sucsat_col = sucsat_v
             , sstate_soilbeta_col = VU.singleton 1.0
+            , sstate_rootfr_patch = rootfrPatch
+            , sstate_crootfr_patch = rootfrPatch
+            , sstate_rootfr_col = if np > 0 then VU.slice 0 nlevgrnd rootfrPatch else VU.empty
+            , sstate_smpso_patch = smpsoPatch
+            , sstate_smpsc_patch = smpscPatch
             }
         , clmCanopyState = (clmCanopyState defaultCLMState)
             { cstate_elai_patch = elai_raw
             , cstate_esai_patch = esai_raw
+            , cstate_tlai_patch = tlai_raw
+            , cstate_tsai_patch = esai_raw
+            , cstate_tlai_hist_patch = tlai_raw
+            , cstate_tsai_hist_patch = esai_raw
             , cstate_htop_patch = htop_raw
+            , cstate_htop_hist_patch = htop_raw
+            , cstate_frac_veg_nosno_patch = frac_veg
             , cstate_frac_veg_nosno_alb_patch = frac_veg
+            , cstate_patch_wtgcell = patchWeights
+            , cstate_xl_patch = VU.generate np (\p -> pftScalar (pft_xl pft) p 0.01)
+            , cstate_rhol_patch = patchBand (pft_rhol pft)
+            , cstate_rhos_patch = patchBand (pft_rhos pft)
+            , cstate_taul_patch = patchBand (pft_taul pft)
+            , cstate_taus_patch = patchBand (pft_taus pft)
             , cstate_fsun_patch = VU.replicate np 0.5
             , cstate_laisun_patch = VU.map (* 0.5) elai_raw
             , cstate_laisha_patch = VU.map (* 0.5) elai_raw
@@ -203,6 +295,7 @@ initCLMStateFromDir dir = do
             , wdiag_frac_sno_eff_col = VU.singleton 0.0
             , wdiag_frac_h2osfc_col = VU.singleton 0.0
             , wdiag_snow_depth_col = VU.singleton 0.0
+            , wdiag_snow_persist_col = VU.singleton 0.0
             , wdiag_qg_col = VU.singleton 0.005
             , wdiag_qg_snow_col = VU.singleton 0.005
             , wdiag_qg_soil_col = VU.singleton 0.005
@@ -212,10 +305,10 @@ initCLMStateFromDir dir = do
         , clmSnl = 0
         }
 
-  soil_color_raw <- readFloat64Vector (dir </> "surfdata" </> "soil_color.bin")
+  soil_color_raw <- readInt64Vector (dir </> "surfdata" </> "soil_color.bin")
   let ng = mdNg dims
       soil_color_int = VU.generate ng $ \i ->
-        max 1 (min 20 (round (soil_color_raw VU.! i) :: Int))
+        max 1 (min 20 (soil_color_raw VU.! i))
       col_gc = VU.generate nc (\_ -> 0)
       albConst = initSoilAlbedoTables 20 soil_color_int col_gc
 
@@ -231,7 +324,9 @@ buildTimestepContext
   -> Double    -- ^ dtime [s]
   -> TimestepContext
 buildTimestepContext fr nstep dtime =
-  let forcIdx = (nstep - 1) `div` 2
+  let -- Binary forcing exports are hourly; CLM may advance at a shorter timestep.
+      stepsPerForcing = max 1 (round (3600.0 / dtime) :: Int)
+      forcIdx = (nstep - 1) `div` stepsPerForcing
       (fts, _fr') = readForcingStepPure fr forcIdx
 
       forc_t    = ft_tbot fts
@@ -247,10 +342,8 @@ buildTimestepContext fr nstep dtime =
       forc_rho = computeAirDensity forc_pbot forc_t forc_vp
       (forc_rain, forc_snow) = partitionPrecip forc_t forc_precip
 
-      forc_solad_vis = forc_fsds * 0.35
-      forc_solad_nir = forc_fsds * 0.35
-      forc_solai_vis = forc_fsds * 0.15
-      forc_solai_nir = forc_fsds * 0.15
+      (forc_solad_vis, forc_solad_nir, forc_solai_vis, forc_solai_nir) =
+        splitShortwaveBands forc_fsds
 
       calday = fromIntegral (nstep - 1) * dtime / 86400.0 + 1.0
       (declin, _eccf) = computeOrbital defaultOrbitalParams calday
@@ -286,20 +379,44 @@ buildTimestepContext fr nstep dtime =
 
 data DailyDiag = DailyDiag
   { dd_t_grnd     :: !Double
+  , dd_fsa        :: !Double
   , dd_h2osno     :: !Double
   , dd_snow_depth :: !Double
   , dd_frac_sno   :: !Double
   , dd_eflx_sh    :: !Double
   , dd_eflx_lh    :: !Double
   , dd_count      :: !Int
+  -- CN diagnostics
+  , dd_gpp        :: !Double  -- ^ GPP (gC/m2/s)
+  , dd_npp        :: !Double  -- ^ NPP (gC/m2/s)
+  , dd_nee        :: !Double  -- ^ NEE (gC/m2/s)
+  , dd_hr         :: !Double  -- ^ Heterotrophic resp (gC/m2/s)
+  , dd_leafc      :: !Double  -- ^ Leaf C (gC/m2)
+  , dd_soilorgc   :: !Double  -- ^ Soil organic C (gC/m2)
   } deriving (Show)
 
 zeroDailyDiag :: DailyDiag
-zeroDailyDiag = DailyDiag 0 0 0 0 0 0 0
+zeroDailyDiag = DailyDiag
+  { dd_t_grnd = 0.0
+  , dd_fsa = 0.0
+  , dd_h2osno = 0.0
+  , dd_snow_depth = 0.0
+  , dd_frac_sno = 0.0
+  , dd_eflx_sh = 0.0
+  , dd_eflx_lh = 0.0
+  , dd_count = 0
+  , dd_gpp = 0.0
+  , dd_npp = 0.0
+  , dd_nee = 0.0
+  , dd_hr = 0.0
+  , dd_leafc = 0.0
+  , dd_soilorgc = 0.0
+  }
 
 accumDiag :: DailyDiag -> CLMState -> DailyDiag
 accumDiag dd st = DailyDiag
   { dd_t_grnd     = dd_t_grnd dd + t_grnd_col (clmTemp st)
+  , dd_fsa        = dd_fsa dd + fsa_patch (clmEnergyFlux st)
   , dd_h2osno     = dd_h2osno dd + h2osno_col (clmWaterState st)
   , dd_snow_depth = dd_snow_depth dd
                   + (if VU.null v then 0.0 else v VU.! 0)
@@ -308,6 +425,12 @@ accumDiag dd st = DailyDiag
   , dd_eflx_sh    = dd_eflx_sh dd + eflx_sh_tot_patch (clmEnergyFlux st)
   , dd_eflx_lh    = dd_eflx_lh dd + eflx_lh_tot_patch (clmEnergyFlux st)
   , dd_count      = dd_count dd + 1
+  , dd_gpp        = dd_gpp dd + clmGPP st
+  , dd_npp        = dd_npp dd + clmNPP st
+  , dd_nee        = dd_nee dd + clmNEE st
+  , dd_hr         = dd_hr dd + clmHR st
+  , dd_leafc      = dd_leafc dd + clmLeafC st
+  , dd_soilorgc   = dd_soilorgc dd + clmSoilOrgC st
   }
   where
     v = wdiag_snow_depth_col (clmWaterDiagBulk st)
@@ -319,12 +442,19 @@ avgDiag dd =
   in if n <= 0 then dd
      else DailyDiag
        { dd_t_grnd     = dd_t_grnd dd / n
+       , dd_fsa        = dd_fsa dd / n
        , dd_h2osno     = dd_h2osno dd / n
        , dd_snow_depth = dd_snow_depth dd / n
        , dd_frac_sno   = dd_frac_sno dd / n
        , dd_eflx_sh    = dd_eflx_sh dd / n
        , dd_eflx_lh    = dd_eflx_lh dd / n
        , dd_count      = dd_count dd
+       , dd_gpp        = dd_gpp dd / n
+       , dd_npp        = dd_npp dd / n
+       , dd_nee        = dd_nee dd / n
+       , dd_hr         = dd_hr dd / n
+       , dd_leafc      = dd_leafc dd / n
+       , dd_soilorgc   = dd_soilorgc dd / n
        }
 
 -- ============================================================================
@@ -339,11 +469,29 @@ runPipeline cfg = do
       stepsPerDay = round (86400.0 / dtime) :: Int
       totalSteps = ndays * stepsPerDay
 
-  (st0, forcing, albConst) <- initCLMStateFromDir dir
+  (st0_, forcing, albConst) <- initCLMStateFromDir dir
 
-  when (pcVerbose cfg) $
+  let st0 = if pcUseCN cfg
+            then st0_ { clmCNActive = True
+                       , clmLeafC = 200.0
+                       , clmFrootC = 150.0
+                       , clmLiveStemC = 500.0
+                       , clmDeadStemC = 5000.0
+                       , clmCPool = 0.0
+                       , clmSoilOrgC = 8000.0
+                       , clmLitterC = 300.0
+                       , clmSMINN = 5.0
+                       , clmLeafN = 8.0
+                       , clmFPG = 1.0
+                       }
+            else st0_
+
+  when (pcVerbose cfg) $ do
     putStrLn $ "Pipeline runner: " ++ show ndays ++ " days, "
             ++ show stepsPerDay ++ " steps/day, dtime=" ++ show dtime ++ "s"
+    when (pcUseCN cfg) $
+      putStrLn $ "  CN biogeochemistry ENABLED (leafC=" ++ show (clmLeafC st0)
+              ++ ", soilOrgC=" ++ show (clmSoilOrgC st0) ++ " gC/m2)"
 
   let drvCfg = defaultDriverConfig
       pipeline = wiredPhysicsPipeline albConst
@@ -369,11 +517,18 @@ runPipeline cfg = do
             then do
               let avg = avgDiag dayAcc'
                   dayNum = step `div` spd
-              when (pcVerbose (defaultPipelineConfig)) $
+              when (pcVerbose cfg) $ do
                 putStrLn $ "  Day " ++ show dayNum
                         ++ ": T_GRND=" ++ show (dd_t_grnd avg) ++ " K"
                         ++ ", H2OSNO=" ++ show (dd_h2osno avg) ++ " kg/m2"
                         ++ ", SNOW_DEPTH=" ++ show (dd_snow_depth avg) ++ " m"
+                when (pcUseCN cfg) $
+                  putStrLn $ "    CN: GPP=" ++ showF (dd_gpp avg * 86400.0) ++ " gC/m2/d"
+                          ++ ", NPP=" ++ showF (dd_npp avg * 86400.0) ++ " gC/m2/d"
+                          ++ ", NEE=" ++ showF (dd_nee avg * 86400.0) ++ " gC/m2/d"
+                          ++ ", HR=" ++ showF (dd_hr avg * 86400.0) ++ " gC/m2/d"
+                          ++ ", LeafC=" ++ showF (dd_leafc avg) ++ " gC/m2"
+                          ++ ", SoilC=" ++ showF (dd_soilorgc avg) ++ " gC/m2"
               go st' drvSt' fr (step + 1) zeroDailyDiag (avg : results) total spd drvCfg dtime pl
             else
               go st' drvSt' fr (step + 1) dayAcc' results total spd drvCfg dtime pl
@@ -384,10 +539,11 @@ runPipeline cfg = do
 
 writeDailyCSV :: FilePath -> [DailyDiag] -> IO ()
 writeDailyCSV path dailies = do
-  let header = "day,T_GRND,EFLX_LH_TOT,EFLX_SH_TOT,H2OSNO,SNOW_DEPTH,FRAC_SNO"
+  let header = "day,T_GRND,FSA,EFLX_LH_TOT,EFLX_SH_TOT,H2OSNO,SNOW_DEPTH,FRAC_SNO"
       rows = zipWith mkRow [1::Int ..] dailies
       mkRow d dd = show d
                 ++ "," ++ showE (dd_t_grnd dd)
+                ++ "," ++ showE (dd_fsa dd)
                 ++ "," ++ showE (dd_eflx_lh dd)
                 ++ "," ++ showE (dd_eflx_sh dd)
                 ++ "," ++ showE (dd_h2osno dd)
@@ -396,3 +552,47 @@ writeDailyCSV path dailies = do
       showE x = show x
   writeFile path (unlines (header : rows))
   putStrLn $ "Wrote " ++ show (length dailies) ++ " daily averages to " ++ path
+
+-- | Format a Double to 3 decimal places for display.
+showF :: Double -> String
+showF x = show (fromIntegral (round (x * 1000.0) :: Int) / 1000.0 :: Double)
+
+-- ============================================================================
+-- CLM forward model for calibration: run full physics, extract QRUNOFF
+-- ============================================================================
+
+-- | Run the full CLM physics pipeline and return hourly QRUNOFF (mm/s).
+-- This is the forward model used for streamflow calibration.
+-- Uses the actual clmDrv physics pipeline (soil temp, snow, hydrology, etc.)
+runCLMForQrunoff :: PipelineConfig -> IO [Double]
+runCLMForQrunoff cfg = do
+  let dir = pcDataDir cfg
+      dtime = pcDtime cfg
+      ndays = pcNdays cfg
+      stepsPerDay = round (86400.0 / dtime) :: Int
+      totalSteps = ndays * stepsPerDay
+
+  (st0_, forcing, albConst) <- initCLMStateFromDir dir
+
+  let st0 = if pcUseCN cfg
+            then st0_ { clmCNActive = True
+                       , clmLeafC = 200.0, clmFrootC = 150.0
+                       , clmLiveStemC = 500.0, clmDeadStemC = 5000.0
+                       , clmSoilOrgC = 8000.0, clmLitterC = 300.0
+                       , clmSMINN = 5.0, clmLeafN = 8.0, clmFPG = 1.0
+                       }
+            else st0_
+
+  let drvCfg = defaultDriverConfig
+      pipeline = wiredPhysicsPipeline albConst
+
+  goQ st0 defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
+  where
+    goQ !st !drvSt !fr !step !qAcc !total !drvCfg !dtime !pl
+      | step > total = return (reverse qAcc)
+      | otherwise = do
+          let ctx = buildTimestepContext fr step dtime
+              (!drvSt', !st') = clmDrv drvCfg pl ctx drvSt st
+              wf = clmWaterFlux st'
+              qrunoff = qflx_surf_col wf + qflx_drain_col wf
+          goQ st' drvSt' fr (step + 1) (qrunoff : qAcc) total drvCfg dtime pl
