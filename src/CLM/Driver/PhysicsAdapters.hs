@@ -93,6 +93,8 @@ import CLM.BioGeoPhys.SoilMoistStress
 import qualified CLM.BioGeoChem.Allocation as Alloc
 import qualified CLM.BioGeoChem.Phenology as Phen
 import qualified CLM.BioGeoChem.NutrientCompetition as NComp
+import qualified CLM.BioGeoChem.MaintResp as MR
+import qualified CLM.Types.CNVegNitrogenStateData as NState
 import CLM.BioGeoChem.CNDriver
   ( CNDriverConfig(..), defaultCNDriverConfig
   , CNDriverInput(..), CNDriverResult(..)
@@ -3064,11 +3066,11 @@ scalarVegPath :: Double -> CLMState -> CLMState
 scalarVegPath dt st =
     let !gpp = clmGPP st
 
-        -- Step 1: Maintenance respiration (leaf + froot + stem)
-        !leafMR = clmLeafC st * 2.525e-6  -- base rate at 25C
-        !frootMR = clmFrootC st * 2.525e-6
-        !stemMR = clmLiveStemC st * 2.525e-6 * 0.5  -- wood has lower rate
-        !mr = leafMR + frootMR + stemMR
+        -- Step 1: Maintenance respiration (per-patch, MaintResp.cnMaintResp)
+        -- Replaces the former scalar MR (leafC*2.525e-6 + ...) with the real
+        -- per-patch kernel driven by the canopy lmr carriers and CN veg N pools,
+        -- then aggregated patch-weighted to the column scalar `mr` (gC/m2/s).
+        !mr = computeColumnMaintResp st
 
         -- Step 2: Available C for allocation (GPP - MR)
         !availC = max 0.0 (gpp - mr)
@@ -3157,6 +3159,119 @@ scalarVegPath dt st =
           , clmNEE = nee
           , clmFPG = fpg
           }
+
+-- | Per-patch maintenance respiration aggregated to the single-column scalar.
+--
+-- Builds 'MR.MaintRespInput' per active patch from the canopy lmr carriers
+-- (@cstate_lmrsun/lmrsha_patch@, populated in the canopy adapter), the per-patch
+-- CN veg nitrogen pools (@cnvns_{froot,livestem,livecroot}n_patch@), per-patch
+-- temperatures (@t_ref2m/t_veg_patch_vec@), the column soil temperature profile
+-- (@t_soisno_col@, snow-first → soil layers stripped), per-patch fine-root
+-- fraction (@sstate_rootfr_patch@ as @crootfr@) and patch PFT type
+-- (@clmPatchIvt@). Calls 'MR.cnMaintResp' and patch-weight-sums leaf+froot+
+-- livestem+livecroot MR to the column flux (gC/m2/s), matching how @gppAgg@ is
+-- patch-weighted in the canopy adapter.
+--
+-- Sourcing notes (closest-available, no rabbit-holing):
+--   * t_a10 (10-day mean for the acclimation factor) is not carried; we use the
+--     per-patch t_ref2m as the closest available temperature. With
+--     rootstem_acc = False this only feeds the (unused) acclimation factor.
+--   * pftcon woody flag: harness patches are non-woody/non-crop, so livestem/
+--     livecroot MR are 0 here regardless; we pass an all-zero woody table.
+computeColumnMaintResp :: CLMState -> Double
+computeColumnMaintResp st =
+  let cs   = clmCanopyState st
+      temp = clmTemp st
+      ss   = clmSoilState st
+      nst  = clmCNVegNState st
+
+      lmrsun = cstate_lmrsun_patch cs
+      lmrsha = cstate_lmrsha_patch cs
+      np = maximum
+        [ 0
+        , VU.length lmrsun
+        , VU.length lmrsha
+        , VU.length (cstate_laisun_patch cs)
+        , VU.length (cstate_patch_wtgcell cs)
+        ]
+  in if np == 0
+       -- No per-patch carriers injected: fall back to the legacy scalar MR so
+       -- behaviour is unchanged when the canopy adapter has not run.
+       then clmLeafC st * 2.525e-6
+          + clmFrootC st * 2.525e-6
+          + clmLiveStemC st * 2.525e-6 * 0.5
+       else
+        let nlev = max 1 nlevgrnd
+            getV v p = if p < VU.length v then v VU.! p else 0.0
+            getI v p = if p < VU.length v then v VU.! p else 0
+            -- column soil temps (soil layers only, snow-first stripped); nc = 1.
+            tsoiSoil = VU.generate nlev $ \j -> soilLayer (t_soisno_col temp) j
+            -- per-patch fine-root fraction (np*nlevgrnd), used as crootfr.
+            crootfr = VU.generate (np * nlev) $ \ix ->
+              let p = ix `mod` np
+                  j = ix `div` np
+                  src = p * nlev + j
+                  rfp = sstate_rootfr_patch ss
+              in if src < VU.length rfp then rfp VU.! src
+                 else if not (VU.null (sstate_rootfr_col ss)) && j < VU.length (sstate_rootfr_col ss)
+                      then sstate_rootfr_col ss VU.! j
+                      else 0.0
+            ivt = VU.generate np $ \p -> getI (clmPatchIvt st) p
+            colmap = VU.replicate np 0   -- single-column harness
+            maskP = VU.generate np $ \p ->
+              getV (cstate_patch_wtgcell cs) p > 0.0
+                || (VU.null (cstate_patch_wtgcell cs) && p == 0)
+            tref = VU.generate np $ \p ->
+              if p < VU.length (t_ref2m_patch_vec temp)
+                then t_ref2m_patch_vec temp VU.! p else t_ref2m_patch temp
+            tveg = VU.generate np $ \p ->
+              if p < VU.length (t_veg_patch_vec temp)
+                then t_veg_patch_vec temp VU.! p else t_veg_patch temp
+            fracVegV = VU.generate np $ \p ->
+              if p < VU.length (cstate_frac_veg_nosno_patch cs)
+                then cstate_frac_veg_nosno_patch cs VU.! p else 0
+            -- Resize every per-patch vector to exactly np (the kernel indexes
+            -- raw with VU.!, so short/empty carriers would crash otherwise).
+            pad v = VU.generate np $ \p -> getV v p
+            -- maxval(ivt)+2 sizing for the 1-based woody table (iv = ivt+1).
+            woodyLen = (if VU.null ivt then 0 else VU.maximum ivt) + 2
+            input = MR.MaintRespInput
+              { MR.mri_np            = np
+              , MR.mri_nc            = 1
+              , MR.mri_nlevgrnd      = nlev
+              , MR.mri_mask_p        = maskP
+              , MR.mri_ivt           = ivt
+              , MR.mri_column        = colmap
+              , MR.mri_pftcon        = MR.PftConMaintResp
+                  { MR.pmr_woody = VU.replicate (max 1 woodyLen) 0.0 }
+              , MR.mri_params        = MR.defaultMaintRespParams
+              , MR.mri_npcropmin     = 1000   -- no crops in harness
+              , MR.mri_frac_veg_nosno = fracVegV
+              , MR.mri_laisun       = pad (cstate_laisun_patch cs)
+              , MR.mri_laisha       = pad (cstate_laisha_patch cs)
+              , MR.mri_crootfr      = crootfr
+              , MR.mri_t_ref2m      = tref
+              , MR.mri_t_a10        = tref   -- closest available; see note above
+              , MR.mri_t_soisno     = tsoiSoil
+              , MR.mri_lmrsun       = pad lmrsun
+              , MR.mri_lmrsha       = pad lmrsha
+              , MR.mri_rootstem_acc = False
+              , MR.mri_frootn       = pad (NState.cnvns_frootn_patch nst)
+              , MR.mri_livestemn    = pad (NState.cnvns_livestemn_patch nst)
+              , MR.mri_livecrootn   = pad (NState.cnvns_livecrootn_patch nst)
+              }
+            out = MR.cnMaintResp input
+            wt p = getV (cstate_patch_wtgcell cs) p
+            wsum = let s = sum [ wt p | p <- [0 .. np - 1] ]
+                   in if s > 1.0e-12 then s else 1.0
+            wnorm p = if VU.null (cstate_patch_wtgcell cs)
+                        then (if p == 0 then 1.0 else 0.0)
+                        else wt p / wsum
+            mrP p = getV (MR.mro_leaf_mr out) p
+                  + getV (MR.mro_froot_mr out) p
+                  + getV (MR.mro_livestem_mr out) p
+                  + getV (MR.mro_livecroot_mr out) p
+        in sum [ wnorm p * mrP p | p <- [0 .. np - 1] ]
 
 -- | CN biogeochemistry post-drainage step.
 -- Handles N leaching (loss of mineral N with drainage water).
