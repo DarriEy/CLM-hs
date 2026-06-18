@@ -1261,6 +1261,8 @@ soilTemperatureFullStep _cfg ctx st =
         , sti_eflx_bot         = 0.0
         , sti_dtime            = dtime
         , sti_snowCondMethod   = Jordan1991
+        , sti_thk_override     = let v = sstate_thk_override_col ss
+                                 in if VU.null v then Nothing else Just v
         }
 
       stOutput = solveSoilTemperature stInput

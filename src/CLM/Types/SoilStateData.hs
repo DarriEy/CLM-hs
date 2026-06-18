@@ -51,6 +51,13 @@ data SoilStateData = SoilStateData
   , sstate_tkdry_col                :: !(VU.Vector Double) -- ^ col thermal conductivity, dry soil [W/m/K]
   , sstate_tksatu_col               :: !(VU.Vector Double) -- ^ col thermal conductivity, saturated [W/m-K]
   , sstate_csol_col                 :: !(VU.Vector Double) -- ^ col heat capacity, soil solids [J/m^3/K]
+  , sstate_thk_override_col         :: !(VU.Vector Double)
+      -- ^ Optional injected per-layer thermal conductivity for the soil-temp
+      -- heat solve [W/m/K], laid out per column as nlevtot = nlevsno+nlevgrnd
+      -- slots (snow layers first, then soil), matching the Fortran dump's
+      -- THK_C(levtot) ordering. Empty ⇒ no override (default conductivity
+      -- computation is used). Used by the Fortran-parity harness to inject the
+      -- exact bgc-spinup conductivity.
     -- Roots
   , sstate_rootr_patch              :: !(VU.Vector Double) -- ^ patch effective root fraction (npatches * nlevgrnd)
   , sstate_rootr_col                :: !(VU.Vector Double) -- ^ col effective root fraction
@@ -106,6 +113,7 @@ defaultSoilStateData = SoilStateData
   , sstate_tkdry_col                = VU.empty
   , sstate_tksatu_col               = VU.empty
   , sstate_csol_col                 = VU.empty
+  , sstate_thk_override_col         = VU.empty
   , sstate_rootr_patch              = VU.empty
   , sstate_rootr_col                = VU.empty
   , sstate_rootfr_col               = VU.empty

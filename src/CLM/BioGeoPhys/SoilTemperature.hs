@@ -104,6 +104,12 @@ data ThermPropInput = ThermPropInput
   , tpi_frac_sno      :: !Double           -- ^ Effective snow fraction
   , tpi_h2osfc        :: !Double           -- ^ Surface water [kg/m2]
   , tpi_snowCondMethod :: !SnowThermalCond -- ^ Snow thermal conductivity method
+  , tpi_thk_override  :: !(Maybe (VU.Vector Double))
+      -- ^ Optional injected per-layer thermal conductivity [W/m/K], indexed
+      -- 0..nlevsno+nlevgrnd-1 (snow layers first, then soil) matching the
+      -- Fortran dump's levtot ordering. When Just, overrides the computed
+      -- per-layer @thk@ value (bedrock handling still applied). When Nothing,
+      -- behavior is byte-identical to the default conductivity computation.
   } deriving (Show)
 
 -- | Snow thermal conductivity method
@@ -144,6 +150,14 @@ soilThermProp inp = ThermPropOutput
     nbed  = tpi_nbedrock inp
     h2osno_nl = tpi_h2osno_no_layers inp
     frac_sno  = tpi_frac_sno inp
+    thkOvr    = tpi_thk_override inp  -- optional injected per-layer thk
+
+    -- Override lookup for slot @jj@ (same 0-based slot ordering: snow first,
+    -- then soil). Returns the injected value if an override vector is present
+    -- and the slot is in range.
+    thkOverrideAt jj = case thkOvr of
+      Just v | jj >= 0 && jj < VU.length v -> Just (v VU.! jj)
+      _                                    -> Nothing
 
     -- ---- Layer-centre thermal conductivity (thk) ----
     thkOut = VU.generate nlev $ \jj ->
@@ -171,20 +185,27 @@ soilThermProp inp = ThermPropOutput
           fl      | fl_den > 0.0 = (liq_j / (denh2o * dz_j)) / fl_den
                   | otherwise    = 0.0
           dksat   = tkmg_j * tkwat ** (fl * ws_j) * tkice ** ((1.0 - fl) * ws_j)
-          thk_val | satw > 1.0e-7 = dke * dksat + (1.0 - dke) * tkdry_j
-                  | otherwise     = tkdry_j
+          thk_computed | satw > 1.0e-7 = dke * dksat + (1.0 - dke) * tkdry_j
+                       | otherwise     = tkdry_j
+          -- Prefer the injected Fortran conductivity for this layer when present.
+          thk_val = case thkOverrideAt jj of
+                      Just o  -> o
+                      Nothing -> thk_computed
       in if j > nbed then thkBedrock else thk_val
 
     snowThk jj =
-      let denom = max frac_sno 1.0e-6 * max (dz VU.! jj) 1.0e-6
-          bw_val = (ice VU.! jj + liq VU.! jj) / denom
-      in case tpi_snowCondMethod inp of
-           Jordan1991 ->
-             tkair + (7.75e-5 * bw_val + 1.105e-6 * bw_val * bw_val) * (tkice - tkair)
-           Sturm1997
-             | bw_val <= 156.0 -> 0.023 + 0.234 * (bw_val / 1000.0)
-             | otherwise       -> 0.138 - 1.01 * (bw_val / 1000.0)
-                                  + 3.233 * (bw_val / 1000.0) ** 2
+      case thkOverrideAt jj of
+        Just o  -> o
+        Nothing ->
+          let denom = max frac_sno 1.0e-6 * max (dz VU.! jj) 1.0e-6
+              bw_val = (ice VU.! jj + liq VU.! jj) / denom
+          in case tpi_snowCondMethod inp of
+               Jordan1991 ->
+                 tkair + (7.75e-5 * bw_val + 1.105e-6 * bw_val * bw_val) * (tkice - tkair)
+               Sturm1997
+                 | bw_val <= 156.0 -> 0.023 + 0.234 * (bw_val / 1000.0)
+                 | otherwise       -> 0.138 - 1.01 * (bw_val / 1000.0)
+                                      + 3.233 * (bw_val / 1000.0) ** 2
 
     -- ---- Interface thermal conductivity (tk) ----
     tkInterf = VU.generate nlev $ \jj ->
@@ -779,6 +800,9 @@ data SoilTempInput = SoilTempInput
   , sti_eflx_bot         :: !Double  -- ^ Bottom boundary heat flux [W/m2]
   , sti_dtime            :: !Double  -- ^ Timestep [s]
   , sti_snowCondMethod   :: !SnowThermalCond
+  , sti_thk_override     :: !(Maybe (VU.Vector Double))
+      -- ^ Optional injected per-layer thermal conductivity (see
+      -- 'tpi_thk_override'). Nothing ⇒ default conductivity computation.
   } deriving (Show)
 
 -- | Output of the soil temperature solver.
@@ -846,6 +870,7 @@ solveSoilTemperature inp = SoilTempOutput
       , tpi_frac_sno         = fse
       , tpi_h2osfc           = sti_h2osfc inp
       , tpi_snowCondMethod   = sti_snowCondMethod inp
+      , tpi_thk_override     = sti_thk_override inp
       }
     tpOut = soilThermProp tpInp
 

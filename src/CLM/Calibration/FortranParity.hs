@@ -282,6 +282,11 @@ injectBeforeStep h path = do
     mbsw    <- getVec nc "BSW_P"
     msucsat <- getVec nc "SUCSAT_P"
     mhksat  <- getVec nc "HKSAT_P"
+    -- Exact Fortran per-layer thermal conductivity (levtot ordering, snow-first
+    -- then soil) — injected into the heat solve like the hydraulic params, since
+    -- the bgc-run soil texture differs from the test/data base and cannot be
+    -- reconstructed from surfdata.
+    mthk    <- getVec nc "THK_C"
     ymd'     <- round <$> getScalar nc "timemgr_rst_curr_ymd"  22020715
     tod'     <- round <$> getScalar nc "timemgr_rst_curr_tod"  46800
     stepSec' <- getScalar nc "timemgr_rst_step_sec" 1800
@@ -331,6 +336,7 @@ injectBeforeStep h path = do
               { sstate_watsat_col = withSoil (sstate_watsat_col baseSS) mwatsat
               , sstate_bsw_col    = withSoil (sstate_bsw_col baseSS)    mbsw
               , sstate_sucsat_col = withSoil (sstate_sucsat_col baseSS) msucsat
+              , sstate_thk_override_col = maybe VU.empty id mthk
               }
           , clmCanopyState = baseCS
               { cstate_elai_patch = maybe (cstate_elai_patch baseCS) (overlayFirst (cstate_elai_patch baseCS)) melai
