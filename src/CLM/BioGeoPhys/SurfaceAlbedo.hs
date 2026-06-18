@@ -791,6 +791,10 @@ data SurfAlbDriverOutput = SurfAlbDriverOutput
   , sado_ftii      :: !(VU.Vector Double)       -- ^ Diffuse-through fraction
   -- Sun/shade (from vis band two-stream)
   , sado_fsun      :: !Double                   -- ^ Sunlit fraction
+  , sado_fabd_sun_z :: !Double                  -- ^ Sunlit direct absorbed per lai (VIS, layer 1)
+  , sado_fabi_sun_z :: !Double                  -- ^ Sunlit diffuse absorbed per lai (VIS, layer 1)
+  , sado_fabd_sha_z :: !Double                  -- ^ Shaded direct absorbed per lai (VIS, layer 1)
+  , sado_fabi_sha_z :: !Double                  -- ^ Shaded diffuse absorbed per lai (VIS, layer 1)
   , sado_vcmaxcintsun :: !Double                -- ^ Vcmax scaling, sunlit
   , sado_vcmaxcintsha :: !Double                -- ^ Vcmax scaling, shaded
   } deriving (Show)
@@ -840,6 +844,10 @@ surfaceAlbedoDriver con inp =
          , sado_ftid      = VU.replicate numrad 0.0
          , sado_ftii      = VU.replicate numrad 1.0
          , sado_fsun      = 0.0
+         , sado_fabd_sun_z = 0.0
+         , sado_fabi_sun_z = 0.0
+         , sado_fabd_sha_z = 0.0
+         , sado_fabi_sha_z = 0.0
          , sado_vcmaxcintsun = 0.0
          , sado_vcmaxcintsha = 0.0
          }
@@ -903,6 +911,10 @@ surfaceAlbedoDriver con inp =
             , sado_ftid      = ftid
             , sado_ftii      = ftii
             , sado_fsun      = fsun
+            , sado_fabd_sun_z = tsr_fabd_sun_z1 visRes
+            , sado_fabi_sun_z = tsr_fabi_sun_z1 visRes
+            , sado_fabd_sha_z = tsr_fabd_sha_z1 visRes
+            , sado_fabi_sha_z = tsr_fabi_sha_z1 visRes
             , sado_vcmaxcintsun = tsr_vcmaxcintsun visRes
             , sado_vcmaxcintsha = tsr_vcmaxcintsha visRes
             }
