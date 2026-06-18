@@ -20,6 +20,7 @@ module CLM.Infrastructure.ForcingReader
   , computeAirDensity
   , applyForcingDefaults
   , splitShortwaveBands
+  , splitShortwaveBandsCLMNCEP
     -- * Binary I/O
   , forcingReaderInit
   , forcingReaderInitBinary
@@ -162,6 +163,36 @@ splitShortwaveBands fsds =
   , fsds * 0.20  -- VIS diffuse
   , fsds * 0.10  -- NIR diffuse
   )
+
+-- | Faithful CESM/CDEPS @datm@ CLMNCEP shortwave partitioning.
+--
+-- Ported from @datm_datamode_clmncep_mod.F90@ (lines 486-498). The total
+-- downwelling shortwave @swdn@ is split 50/50 between the NIR and VIS bands; the
+-- direct fraction within each band is a cubic in the per-band flux, fitted by
+-- CESM to one year of hourly CAM (cam3_5_55) output:
+--
+-- @
+--   swndr/swvdr = swdn * 0.5
+--   ratio_nir   = clamp(0.29548 + 0.00504*swndr - 1.4957e-5*swndr^2 + 1.4881e-8*swndr^3, 0.01, 0.99)
+--   ratio_vis   = clamp(0.17639 + 0.00380*swvdr - 9.0039e-6*swvdr^2 + 8.1351e-9*swvdr^3, 0.01, 0.99)
+--   solad_nir   = ratio_nir * swndr;   solai_nir = (1-ratio_nir) * swndr
+--   solad_vis   = ratio_vis * swvdr;   solai_vis = (1-ratio_vis) * swvdr
+-- @
+--
+-- Returns (solad_vis, solad_nir, solai_vis, solai_nir).
+splitShortwaveBandsCLMNCEP :: Double -> (Double, Double, Double, Double)
+splitShortwaveBandsCLMNCEP swdn =
+  let half = swdn * 0.5
+      clampR x = min 0.99 (max 0.01 x)
+      ratioNir = clampR (0.29548 + 0.00504*half - 1.4957e-5*half*half
+                          + 1.4881e-8*half*half*half)
+      ratioVis = clampR (0.17639 + 0.00380*half - 9.0039e-6*half*half
+                          + 8.1351e-9*half*half*half)
+  in ( ratioVis * half          -- VIS direct
+     , ratioNir * half          -- NIR direct
+     , (1.0 - ratioVis) * half  -- VIS diffuse
+     , (1.0 - ratioNir) * half  -- NIR diffuse
+     )
 
 -- | Apply default values for reference heights, CO2, O2.
 -- Returns (forc_hgt, forc_pco2, forc_po2) with defaults applied.

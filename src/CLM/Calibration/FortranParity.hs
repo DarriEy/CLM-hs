@@ -67,7 +67,7 @@ import CLM.Driver.PipelineRunner
   ( initCLMStateFromDir, SurfaceAlbedoConstants )
 import CLM.Infrastructure.ForcingReader
   ( computeVaporPressureFromQ, computePotentialTemperature, computeAirDensity
-  , splitShortwaveBands )
+  , splitShortwaveBandsCLMNCEP )
 import CLM.Infrastructure.Orbital (computeOrbital, defaultOrbitalParams)
 
 import CLM.Types.TemperatureData (TemperatureData(..))
@@ -78,6 +78,7 @@ import CLM.Types.SoilStateData (SoilStateData(..))
 import CLM.Types.EnergyFluxData (EnergyFluxData(..))
 import CLM.Types.CanopyStateData (CanopyStateData(..))
 import CLM.Types.ColumnData (ColumnData(..))
+import CLM.Types.GridcellData (GridcellData(..))
 
 -- ============================================================================
 -- Reference data locations
@@ -88,10 +89,15 @@ bgcDumpDir :: FilePath
 bgcDumpDir =
   "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_bgc_spinup/bgc_ref_summer"
 
--- | Bow-at-Banff hourly atmospheric forcing (2003 cycle), as used by CLM.jl.
+-- | Bow-at-Banff hourly atmospheric forcing. The bgc spinup (whose dumps drive
+-- this harness) cycles a SINGLE forcing year — 2002 — confirmed in the run's
+-- @atm.log@ (@shr_stream_getCalendar ... clmforc.2002.nc@). The 2002 file's
+-- clear-sky-shaped FSDS reproduces the dump's absorbed solar (SABG/SABV) after
+-- the solar-zenith downscaling below; the 2003 file is a different (cloudier)
+-- climatology and does NOT match the dumps.
 bowForcingFile :: FilePath
 bowForcingFile =
-  "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2003.nc"
+  "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2002.nc"
 
 -- | The 28 contiguous summer timesteps that were instrumented.
 bgcSteps :: [Int]
@@ -171,13 +177,60 @@ readForcingCalibrated idx0 targetT = do
           then Nothing
           else
             -- Instantaneous fields (T, wind, humidity) align at the
-            -- temperature-matched index. Shortwave FSDS is the preceding
-            -- interval-average and CLM applies it one interval lagged
-            -- (verified: dump FORC_T_G ↔ TBOT[i], dump absorbed solar ↔
-            -- FSDS[i-1]); so read FSDS from i-1.
-            let best  = minimumBy (comparing (\i -> abs (tbot VU.! i - targetT))) cands
-                swIdx = max 0 (best - 1)
-            in Just (fsds VU.! swIdx, wind VU.! best, qbot VU.! best)
+            -- temperature-matched index @best@. Shortwave FSDS in the file is an
+            -- INTERVAL AVERAGE: FSDS[i] is the mean over the hour ENDING at
+            -- timestamp i (verified: FSDS turns non-zero exactly at the sunrise
+            -- hour). The model step's instantaneous solar geometry time is
+            -- t_inst = calday - dtime/86400 (see 'injectBeforeStep'); that hour
+            -- is the START of the bucket whose timestamp is @best@, so the
+            -- governing average is FSDS[best] (interval [t_inst, t_inst+dtime]).
+            -- The caller applies the shr_orb_cosz solar-zenith downscaling
+            --   FSDS_inst = FSDS_avg * cosz_inst / mean(max(0,cosz)) .
+            let best = minimumBy (comparing (\i -> abs (tbot VU.! i - targetT))) cands
+            in Just (fsds VU.! best, wind VU.! best, qbot VU.! best)
+
+-- | Solar zenith cosine via shr_orb_cosz (share/src/shr_orb_mod.F90 lines
+-- 155-156): @cosz = sin(lat)sin(declin) - cos(lat)cos(declin)cos(2pi*frac+lon)@,
+-- with @frac@ the UTC day fraction. lat/lon in radians.
+shrOrbCosz :: Double -> Double -> Double -> Double -> Double
+shrOrbCosz lat lon declin calday =
+  let frac = calday - fromIntegral (floor calday :: Int)
+  in sin lat * sin declin - cos lat * cos declin * cos (frac * 2.0 * pi + lon)
+
+-- | datm solar-zenith downscaling factor for an interval-averaged FSDS.
+--
+-- CLM's data atmosphere disaggregates an interval-mean shortwave to the model
+-- instant via @FSDS_inst = FSDS_avg * cosz_inst / mean(max(0,cosz))@, where the
+-- mean is taken over the FSDS averaging interval (CLMNCEP/coszen mode). Here
+-- @tInst@ is the model step's instantaneous solar-geometry time
+-- (calday - dtime/86400, calibrated to reproduce the dump @coszen@ to ~1e-4),
+-- and the averaging interval is the forcing timestep CENTERED on @tInst@,
+-- i.e. @[tInst - dtime/2, tInst + dtime/2]@. This was selected by minimising
+-- the residual against the dump's bare-patch-implied FSDS over the 28-step
+-- window (centered interval: ~13 W/m² RMS; one-sided intervals: 60-77 W/m²).
+-- The result is clamped (cap the up-scale, zero below the horizon) to stay
+-- finite at dawn/dusk.
+solarSwScale
+  :: Double  -- ^ latitude  [rad]
+  -> Double  -- ^ longitude [rad]
+  -> Double  -- ^ declination [rad]
+  -> Double  -- ^ dtime [s]
+  -> Double  -- ^ instantaneous geometry time (calday - dtime/86400)
+  -> Double  -- ^ instantaneous cosz (dump ground truth)
+  -> Double
+solarSwScale lat lon declin dtime tInst coszInst
+  | coszInst <= 1.0e-4 = 0.0
+  | coszBar  <= 1.0e-4 = 0.0
+  | otherwise          = min 4.0 (coszInst / coszBar)
+  where
+    dDay  = dtime / 86400.0
+    nsub  = 120 :: Int
+    t0    = tInst - 0.5 * dDay   -- forcing interval centered on tInst
+    coszBar =
+      let s = sum [ max 0.0 (shrOrbCosz lat lon declin
+                              (t0 + dDay * (fromIntegral k + 0.5) / fromIntegral nsub))
+                  | k <- [0 .. nsub - 1] ]
+      in s / fromIntegral nsub
 
 -- ============================================================================
 -- Harness state
@@ -223,6 +276,8 @@ injectBeforeStep h path = do
     mt_veg <- getVec nc "T_VEG"
     melai  <- getVec nc "elai"
     mtlai  <- getVec nc "tlai"
+    mesai  <- getVec nc "esai"
+    mtsai  <- getVec nc "tsai"
     mwatsat <- getVec nc "WATSAT_P"
     mbsw    <- getVec nc "BSW_P"
     msucsat <- getVec nc "SUCSAT_P"
@@ -280,6 +335,8 @@ injectBeforeStep h path = do
           , clmCanopyState = baseCS
               { cstate_elai_patch = maybe (cstate_elai_patch baseCS) (overlayFirst (cstate_elai_patch baseCS)) melai
               , cstate_tlai_patch = maybe (cstate_tlai_patch baseCS) (overlayFirst (cstate_tlai_patch baseCS)) mtlai
+              , cstate_esai_patch = maybe (cstate_esai_patch baseCS) (overlayFirst (cstate_esai_patch baseCS)) mesai
+              , cstate_tsai_patch = maybe (cstate_tsai_patch baseCS) (overlayFirst (cstate_tsai_patch baseCS)) mtsai
               }
           , clmSnl = snl
           }
@@ -304,10 +361,20 @@ injectBeforeStep h path = do
       dtime  = if stepSec > 0 then stepSec else 1800.0
 
   mfrc <- readForcingCalibrated idx forc_t
-  let (fsds, wind, forc_q) = case mfrc of
+  let (fsdsAvg, wind, forc_q) = case mfrc of
         Just (s, w, q) -> (s, w, q)
         Nothing        -> (0.0, 2.0, 0.005)   -- forcing file absent
-      (solad_vis, solad_nir, solai_vis, solai_nir) = splitShortwaveBands fsds
+      -- Solar-zenith downscaling of the interval-averaged FSDS to the model
+      -- instant. The instantaneous geometry time tInst = calday - dtime/86400
+      -- reproduces the dump @coszen@ (cz_inst) to ~1e-4; we use the dump value
+      -- itself as the ground-truth instantaneous cosine.
+      grc   = clmGridcell (phBase h)
+      lat   = if VU.null (grc_lat grc) then 0.8964 else grc_lat grc VU.! 0
+      lon   = if VU.null (grc_lon grc) then 0.0    else grc_lon grc VU.! 0
+      tInst = calday - dtime / 86400.0
+      swScale = solarSwScale lat lon declin dtime tInst coszen
+      fsds  = fsdsAvg * swScale
+      (solad_vis, solad_nir, solai_vis, solai_nir) = splitShortwaveBandsCLMNCEP fsds
       forc_vp  = computeVaporPressureFromQ forc_q forc_pbot
       forc_th  = computePotentialTemperature forc_t forc_pbot
       forc_rho = computeAirDensity forc_pbot forc_t forc_vp
@@ -332,9 +399,6 @@ injectBeforeStep h path = do
         , tcForcWind    = VU.singleton wind
         , tcForcHgt     = 30.0
         }
-  -- coszen is read for diagnostics / future direct injection; declination
-  -- above reproduces it closely for this lat/time.
-  _ <- return coszen
   return (st, ctx)
 
 -- | Inject → one 'clmDrvBoundaries' step → boundary snapshots.
