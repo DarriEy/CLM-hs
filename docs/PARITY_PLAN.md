@@ -144,6 +144,31 @@ so all errors below are physics. Single-column Bow, n1757845 + 28-step window:
 Build constraint: one Stack build-lock per repo, so parallel agents serialize on
 build/verify unless run in separate git worktrees (which pay a full cold rebuild).
 
+## Progress (updated 2026-06-18)
+
+**Biogeophysical first-step parity COMPLETE** — all registry fields pass at step
+n1757845. 28-step window status:
+
+| group | fields | window-max | tol | status |
+|---|---|---|---|---|
+| Hydrology | H2OSOI_LIQ, ZWT, ZWT_PERCH, H2OSFC | pass | — | ✅ |
+| Radiation | SABV_P, SABG_P | 1.5 / 2.5 | 5.0 | ✅ |
+| Snow/ice (summer) | H2OSOI_ICE, SNOW_DEPTH, frac_sno | 0 | — | ✅ |
+| Temperature | T_GRND, T_SOISNO | 0.59 | 0.20 | first ✅, window in progress |
+| Canopy temp | T_VEG | 3.46 | 1.20 | first ✅, window in progress |
+
+The temperature window residual is the single localized cause — the fabricated
+photosynthesis/stomatal path (midday transpiration too weak) — being fixed in
+wave 2b (wire real `canopySunShadeFracs` PAR + Vcmax25, remove the RSSUN floor).
+
+**Bugs found so far were in the adapter glue + harness forcing, NOT the ported
+physics modules** (hydrology hardcoded ZWT; radiation coszen/forcing-year/band
+split/esai injection; soil-temp drag coeffs/roverg unit/nbedrock). The Fortran
+two-stream, albedo, Zeng-Decker solver, and soil heat solve were already faithful.
+
+Branch `parity-phase0`; worktrees per wave merged in. CN is the next phase
+(`docs/CN_PARITY_PLAN.md`).
+
 ## Done criteria
 All Phase-0 tolerance-table fields pass at every boundary across the 28-step
 window; CN pools per-step < ~1%; drift bounded; checklist markers cleared with
