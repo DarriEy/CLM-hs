@@ -27,6 +27,11 @@ data CanopyStateData = CanopyStateData
   , cstate_elai240_patch            :: !(VU.Vector Double) -- ^ LAI with burying, 10-day avg
   , cstate_laisun_patch             :: !(VU.Vector Double) -- ^ Sunlit projected LAI
   , cstate_laisha_patch             :: !(VU.Vector Double) -- ^ Shaded projected LAI
+    -- Sunlit/shaded photosynthesis & leaf maintenance respiration (patch 1D) — carrier for CN
+  , cstate_psnsun_patch             :: !(VU.Vector Double) -- ^ Sunlit leaf photosynthesis [umol CO2/m2/s]
+  , cstate_psnsha_patch             :: !(VU.Vector Double) -- ^ Shaded leaf photosynthesis [umol CO2/m2/s]
+  , cstate_lmrsun_patch             :: !(VU.Vector Double) -- ^ Sunlit leaf maintenance respiration [umol CO2/m2/s]
+  , cstate_lmrsha_patch             :: !(VU.Vector Double) -- ^ Shaded leaf maintenance respiration [umol CO2/m2/s]
   , cstate_mlaidiff_patch           :: !(VU.Vector Double) -- ^ Diff between LAI month one and two
     -- Sunlit/shaded LAI by canopy layer (patch 2D: npatch * nlevcan)
   , cstate_laisun_z_patch           :: !(VU.Vector Double) -- ^ Sunlit LAI per canopy layer (flattened)
@@ -80,6 +85,10 @@ defaultCanopyStateData = CanopyStateData
   , cstate_elai240_patch            = VU.empty
   , cstate_laisun_patch             = VU.empty
   , cstate_laisha_patch             = VU.empty
+  , cstate_psnsun_patch             = VU.empty
+  , cstate_psnsha_patch             = VU.empty
+  , cstate_lmrsun_patch             = VU.empty
+  , cstate_lmrsha_patch             = VU.empty
   , cstate_mlaidiff_patch           = VU.empty
   , cstate_laisun_z_patch           = VU.empty
   , cstate_laisha_z_patch           = VU.empty

@@ -948,12 +948,19 @@ canopyFluxesStep _cfg ctx st =
                 !gpp_est =
                   (lpr_psn_z leafSun * laisun' + lpr_psn_z leafSha * laisha')
                   * 1.0e-6 * 12.011
-            in Just (cfOut, gpp_est)
+                -- Per-patch sunlit/shaded photosynthesis & leaf maintenance
+                -- respiration (umol CO2/m2/s), carried for a later CN step.
+                -- Same per-leaf source as gpp_est above.
+                !psnSunP = lpr_psn_z leafSun
+                !psnShaP = lpr_psn_z leafSha
+                !lmrSunP = lpr_lmr_z leafSun
+                !lmrShaP = lpr_lmr_z leafSha
+            in Just (cfOut, gpp_est, (psnSunP, psnShaP, lmrSunP, lmrShaP))
 
       patchResults = [ runCanopyPatch p | p <- [0 .. patchCount - 1] ]
       fromPatch p fallback select =
         case patchResults !! p of
-          Just (cfOut, _) -> select cfOut
+          Just (cfOut, _, _) -> select cfOut
           Nothing -> fallback p
 
       shTotBase = expandVec (eflx_sh_tot_patch_vec ef0) (eflx_sh_tot_patch ef0)
@@ -1018,8 +1025,19 @@ canopyFluxesStep _cfg ctx st =
       gppAgg =
         sum
           [ patchWt p * gpp
-          | (p, Just (_, gpp)) <- zip [0 .. patchCount - 1] patchResults
+          | (p, Just (_, gpp, _)) <- zip [0 .. patchCount - 1] patchResults
           ]
+      -- Per-patch sunlit/shaded photosynthesis & leaf maintenance respiration,
+      -- carried on the canopy state for a later CN step. Defaults to 0.0 for
+      -- non-canopy patches, consistent with laisun/laisha vector indexing.
+      psnLmrAt p select =
+        case patchResults !! p of
+          Just (_, _, quad) -> select quad
+          Nothing -> 0.0
+      psnSunVec = VU.generate patchCount $ \p -> psnLmrAt p (\(a,_,_,_) -> a)
+      psnShaVec = VU.generate patchCount $ \p -> psnLmrAt p (\(_,b,_,_) -> b)
+      lmrSunVec = VU.generate patchCount $ \p -> psnLmrAt p (\(_,_,c,_) -> c)
+      lmrShaVec = VU.generate patchCount $ \p -> psnLmrAt p (\(_,_,_,d) -> d)
 
       ef' = ef0
         { eflx_sh_tot_patch = weightedVec shTotVec
@@ -1066,6 +1084,12 @@ canopyFluxesStep _cfg ctx st =
         { fvel_ram1_patch = ram1Vec
         , fvel_ustar_patch = ustarVec
         }
+      cs' = cs
+        { cstate_psnsun_patch = psnSunVec
+        , cstate_psnsha_patch = psnShaVec
+        , cstate_lmrsun_patch = lmrSunVec
+        , cstate_lmrsha_patch = lmrShaVec
+        }
 
   in st { clmEnergyFlux = ef'
         , clmTemp = temp'
@@ -1073,6 +1097,7 @@ canopyFluxesStep _cfg ctx st =
         , clmWaterState = ws'
         , clmWaterDiagBulk = wdiag'
         , clmFrictionVel = fv'
+        , clmCanopyState = cs'
         , clmGPP = if clmCNActive st then gppAgg else 0.0
         }
 
