@@ -33,6 +33,7 @@ module CLM.Calibration.FortranParity
   , ParityHarness(..)
   , initParityHarness
   , injectBeforeStep
+  , contextForStep
   , runOneStepBoundaries
     -- * Diffing
   , Kind(..)
@@ -45,6 +46,7 @@ module CLM.Calibration.FortranParity
     -- * Reports
   , identityReport
   , baselineReport
+  , driftReport
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -413,8 +415,18 @@ readPatchIvt nc = do
 -- forcing context for the one-step run.
 injectBeforeStep :: ParityHarness -> FilePath -> IO (CLMState, TimestepContext)
 injectBeforeStep h path = do
+  st  <- injectState h path
+  ctx <- contextForStep h path
+  return (st, ctx)
+
+-- | Read ONLY the biophysical + CN state from a @before_step@ dump and overlay
+-- it onto the harness base structure. Factored out of 'injectBeforeStep' so the
+-- free-running drift harness can build a step's forcing context (see
+-- 'contextForStep') WITHOUT clobbering the carried free-running state.
+injectState :: ParityHarness -> FilePath -> IO CLMState
+injectState h path = do
   -- ---- read everything we need from the dump -----------------------------
-  (st, ymd, tod, stepSec, coszen) <- withDump path $ \nc -> do
+  (st, _ymd, _tod, _stepSec, _coszen) <- withDump path $ \nc -> do
     let base = phBase h
     t_soisno   <- maybe (t_soisno_col (clmTemp base)) id <$> getVec nc "T_SOISNO"
     h2osoi_liq <- maybe (h2osoi_liq_col (clmWaterState base)) id <$> getVec nc "H2OSOI_LIQ"
@@ -517,6 +529,22 @@ injectBeforeStep h path = do
           }
     -- forcing inputs that the dump DOES carry (Fortran-exact)
     return (st', ymd', tod', stepSec', coszen')
+  return st
+
+-- | Build the 'TimestepContext' for a step from its @before_step@ dump WITHOUT
+-- injecting any state. Reads only the forcing/time/coszen the step needs:
+-- ymd/tod/step_sec + the dump-carried atmospheric inputs (T/pbot/lw/rain/snow)
+-- and the file-sourced shortwave/wind/humidity, with the same solar-zenith
+-- downscaling as 'injectBeforeStep'. The free-running drift harness uses this
+-- to advance forcing each step while carrying its OWN evolved state forward.
+contextForStep :: ParityHarness -> FilePath -> IO TimestepContext
+contextForStep h path = do
+  (ymd, tod, stepSec, coszen) <- withDump path $ \nc -> do
+    ymd'     <- round <$> getScalar nc "timemgr_rst_curr_ymd"  22020715
+    tod'     <- round <$> getScalar nc "timemgr_rst_curr_tod"  46800
+    stepSec' <- getScalar nc "timemgr_rst_step_sec" 1800
+    coszen'  <- getScalar nc "coszen" =<< getScalar nc "coszen_grc" 0.0
+    return (ymd' :: Int, tod' :: Int, stepSec', coszen')
 
   -- ---- atmospheric forcing: dump for T/pbot/lw/rain/snow, file for sw/wind/q
   (forc_t, forc_pbot, forc_lw, forc_rain, forc_snow) <- withDump path $ \nc -> do
@@ -574,7 +602,7 @@ injectBeforeStep h path = do
         , tcForcWind    = VU.singleton wind
         , tcForcHgt     = 30.0
         }
-  return (st, ctx)
+  return ctx
 
 -- | Inject → one 'clmDrvBoundaries' step → boundary snapshots.
 runOneStepBoundaries :: ParityHarness -> (CLMState, TimestepContext) -> BoundarySnapshots
@@ -836,3 +864,98 @@ aggregate fds =
   , let g = filter ((== name) . fdName) fds
   , not (null g)
   ]
+
+-- ============================================================================
+-- Free-running drift report (the discriminating CN measurement)
+-- ============================================================================
+--
+-- Single-step parity ('baselineReport') re-injects the Fortran state before
+-- EVERY step, so it measures per-step translation error. In this near-
+-- equilibrium spinup window the per-step CN POOL change is ~0 (single-step pool
+-- parity is trivially satisfied) and the dump's @_P@ flux probes are dead-zero,
+-- so neither single-step metric discriminates CN correctness.
+--
+-- The rigorous test (per CLM.jl @scripts/fortran_parity_drift.jl@) is FREE-
+-- RUNNING DRIFT: inject the Fortran restart ONCE at the first step, then run the
+-- driver forward over the window WITHOUT re-injecting state — only advancing the
+-- forcing/time context per step (via 'contextForStep'). The carried state is the
+-- model's own evolved trajectory; errors accumulate, so the drift against each
+-- step's Fortran dump is discriminating: bounded drift ⇒ the wired CN physics
+-- tracks Fortran, diverging drift ⇒ a missing/incorrect CN process.
+
+-- | Is a registry field a CN/BGC pool (compared at after_competition) rather
+-- than a biophysical field?
+isCNField :: Boundary -> Bool
+isCNField b = b == AfterCompetition || b == AfterEcosysDynPredrain
+
+-- | Free-running drift: inject ONCE at @head bgcSteps@, then for each available
+-- consecutive step build that step's forcing context (state NOT re-injected),
+-- run one 'clmDrvBoundaries' step on the carried state, and diff the evolved
+-- pools against that step's @after_<boundary>@ dump. Carries 'bsFinal' forward.
+--
+-- Returns @(fieldName, isCN, relDriftSeries)@ for each registry field, where the
+-- series has one |rel| entry per executed step (index 0 = step 1). Prints a
+-- table of the drift at step 1, the mid step, and the window max, CN fields and
+-- biophysical fields reported separately.
+driftReport :: FilePath -> IO [(String, Bool, [Double])]
+driftReport testDataDir = do
+  h <- initParityHarness testDataDir
+  steps <- filterExisting bgcSteps "before_step"
+  if null steps
+    then do putStrLn "FortranParity drift: no dumps present, skipping."
+            return []
+    else do
+      let n0 = head steps
+      -- 1. inject ONCE at the first step
+      st0 <- injectState h (dumpPath bgcDumpDir "before_step" n0)
+      -- 2/3. free-run, carrying the evolved state forward, diffing each step
+      (_finalSt, perStepRev) <- foldStepsM (st0, []) steps $ \(st, acc) n -> do
+        ctx <- contextForStep h (dumpPath bgcDumpDir "before_step" n)
+        let snaps = runOneStepBoundaries h (st, ctx)
+        diffs <- compareToDumps snaps bgcDumpDir n
+        -- carry the FULL evolved end-of-step state forward (no re-injection)
+        return (bsFinal snaps, diffs : acc)
+      let perStep = reverse perStepRev            -- step-1 first
+          nSteps  = length perStep
+          -- per-field |rel| drift series across executed steps (only steps that
+          -- actually mapped this field to a dump contribute — no NaN padding)
+          series name = [ fdRel d | ds <- perStep, d <- lookupName name ds ]
+          out =
+            [ (name, isCNField b, series name)
+            | (name, _, b, _, _) <- registry ]
+          -- only keep fields that mapped to a dump on at least one step
+          out' = [ e | e@(_,_,ser) <- out, not (null ser) ]
+      printDriftTable n0 nSteps out'
+      return out'
+  where
+    lookupName nm ds = filter ((== nm) . fdName) ds
+
+-- | Strict left-fold over steps in IO (avoids building a giant thunked state).
+foldStepsM :: (CLMState, [a]) -> [Int]
+           -> ((CLMState, [a]) -> Int -> IO (CLMState, [a]))
+           -> IO (CLMState, [a])
+foldStepsM z [] _ = return z
+foldStepsM z@(!_st, _) (n:ns) f = do
+  z' <- f z n
+  foldStepsM z' ns f
+
+-- | Print the drift table: step 1, the mid step (~14), and the window max, with
+-- CN fields and biophysical fields in separate sections.
+printDriftTable :: Int -> Int -> [(String, Bool, [Double])] -> IO ()
+printDriftTable n0 nSteps rows = do
+  let midIx  = max 0 (min (nSteps - 1) ((nSteps + 1) `div` 2 - 1))  -- ~step 14 of 28
+      at i xs = if i >= 0 && i < length xs then xs !! i else 0/0
+      finiteMax xs = foldl' (\m x -> if isNaN x || isInfinite x then m else max m x) 0.0 xs
+      sect ttl predicate = do
+        putStrLn ""
+        putStrLn ttl
+        putStrLn (printf "%-22s %14s %14s %14s" "field"
+                    "rel@step1" (printf "rel@step%d" (midIx + 1) :: String) "rel@max")
+        forM_ [ r | r@(_,isc,_) <- rows, predicate isc ] $ \(name, _, ser) ->
+          putStrLn (printf "%-22s %14.4e %14.4e %14.4e"
+                      name (at 0 ser) (at midIx ser) (finiteMax ser))
+  putStrLn ""
+  printf "=== Free-running CN drift — inject once @ n%d, free-run %d steps ===\n" n0 nSteps
+  putStrLn "(per-field max |rel| drift vs each step's Fortran dump; state NOT re-injected)"
+  sect "--- Biophysical fields (expected small — biophysics is at parity) ---" not
+  sect "--- CN / BGC fields (the drift signal) ---" id

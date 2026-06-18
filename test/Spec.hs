@@ -67,7 +67,8 @@ import CLM.Calibration.SiteCalibration
   , injectParams, runCLMAndRoute
   , CalibrationConfig(..), defaultCalibConfig, calibrateSiteCLM )
 import CLM.Calibration.FortranParity
-  ( bgcDumpDir, bgcSteps, dumpPath, baselineReport, identityReport, FieldDiff(..) )
+  ( bgcDumpDir, bgcSteps, dumpPath, baselineReport, identityReport, driftReport
+  , FieldDiff(..) )
 import Numeric.AD (grad)
 
 -- Production-source markers that indicate unfinished porting work.
@@ -1279,4 +1280,22 @@ main = hspec $ do
           -- printed above; we do NOT assert parity here (that is Phase 1 work).
           not (null diffs) `shouldBe` True
           all (\fd -> not (isNaN (fdAbs fd)) && not (isInfinite (fdAbs fd))) diffs
+            `shouldBe` True
+
+  -- =====================================================================
+  -- Free-running CN drift (the discriminating CN measurement) — gated
+  -- =====================================================================
+  describe "CN drift (free-running, gated)" $ do
+    it "injects once, free-runs the window, reports compounded drift per field" $ do
+      have <- doesFileExist (dumpPath bgcDumpDir "before_step" (head bgcSteps))
+      if not have
+        then pendingWith "Fortran reference dumps not present on this machine"
+        else do
+          rows <- driftReport "test/data"
+          -- Measurement only: assert the harness produced drift series and that
+          -- every reported drift value is finite (no NaN/Inf blow-up). We do NOT
+          -- assert bounded vs diverging here — the printed table is the signal.
+          not (null rows) `shouldBe` True
+          let allVals = concatMap (\(_,_,ser) -> ser) rows
+          all (\x -> not (isNaN x) && not (isInfinite x)) allVals
             `shouldBe` True
