@@ -578,8 +578,13 @@ leafPhotosynthesis inp =
                 then lmr_z_1 * 0.67
                 else lmr_z_1
 
-      -- Conversion factor: mol/m3
-      cf = forc_pbot / (rgas * tgcm) * 1.0e06
+      -- Conversion factor [umol/m3]: rgas here is the universal gas constant in
+      -- J/kmol/K (8314.46), so the molar conversion needs the 1e-3 factor to
+      -- reduce it to J/mol/K. Fortran PhotosynthesisMod (line 1818):
+      --   cf = forc_pbot/(rgas*1.e-3*tgcm)*1.e06
+      -- Without the 1e-3, cf (and hence gb_mol) is 1000x too small, which drives
+      -- the leaf surface CO2 (cs) negative and the Medlyn gs solve to garbage.
+      cf = forc_pbot / (rgas * 1.0e-3 * tgcm) * 1.0e06
       gb = 1.0 / rb
       gb_mol = gb * cf
 

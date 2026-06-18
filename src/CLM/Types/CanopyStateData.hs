@@ -51,6 +51,9 @@ data CanopyStateData = CanopyStateData
   , cstate_fsun_patch               :: !(VU.Vector Double) -- ^ Sunlit fraction of canopy
   , cstate_fsun24_patch             :: !(VU.Vector Double) -- ^ 24hr avg sunlit fraction
   , cstate_fsun240_patch            :: !(VU.Vector Double) -- ^ 240hr avg sunlit fraction
+    -- Absorbed PAR (patch 1D, big-leaf layer 1) [W/m2 per unit sunlit/shaded LAI]
+  , cstate_parsun_patch             :: !(VU.Vector Double) -- ^ Absorbed PAR by sunlit leaves
+  , cstate_parsha_patch             :: !(VU.Vector Double) -- ^ Absorbed PAR by shaded leaves
     -- Leaf properties (patch 1D)
   , cstate_dleaf_patch              :: !(VU.Vector Double) -- ^ Characteristic leaf width [m]
   , cstate_rscanopy_patch           :: !(VU.Vector Double) -- ^ Canopy stomatal resistance [s/m]
@@ -95,6 +98,8 @@ defaultCanopyStateData = CanopyStateData
   , cstate_fsun_patch               = VU.empty
   , cstate_fsun24_patch             = VU.empty
   , cstate_fsun240_patch            = VU.empty
+  , cstate_parsun_patch             = VU.empty
+  , cstate_parsha_patch             = VU.empty
   , cstate_dleaf_patch              = VU.empty
   , cstate_rscanopy_patch           = VU.empty
   , cstate_vegwp_patch              = VU.empty
