@@ -103,6 +103,19 @@ So the CN physics fan-out should validate against the flux probes + drift, NOT
 the near-static pool snapshots. Add the flux-probe registry entries as each
 physics group is wired.
 
+## Decomposition/N-cycling wired + drift validated (2026-06-18)
+
+- Decomposition cascade + nitrif/denitrif + leaching wired vectorized
+  (`cnDriverNoLeaching` + `NitrifDenitrif` + `cnDriverLeaching`), faithful to
+  Fortran order. `_P` flux probes confirmed DEAD (unpopulated in dumps) — so a
+  **free-running drift harness** (`driftReport`, gated test) is the discriminating
+  CN metric: inject once, run 28 steps, diff pools vs each step's dump.
+- **CN drift is BOUNDED (no divergence), matching CLM.jl:** mineral N
+  (`sminn_vr`/`smin_no3`/`smin_nh4`) ~1% plateau; soil/litter pools 1e-4–4e-3;
+  veg pools (`leafc`/`frootc`) ~1e-4; `xsmrpool` ~1.8% (fast buffer pool).
+- Residual drift is concentrated in the veg-pool / N-uptake path (`xsmrpool`,
+  mineral N), NOT decomposition → next group = allocation/FUN/maintenance.
+
 ## Recommendation
 
 Land biogeophysics first (hydrology+radiation done; soil-temp in progress). Then
