@@ -50,6 +50,10 @@ module CLM.Driver.CLMDriver
   , module CLM.Types.Atm2LndData
   , module CLM.Types.Lnd2AtmData
   , module CLM.Types.UrbanParamsData
+  , module CLM.Types.CNVegCarbonStateData
+  , module CLM.Types.CNVegNitrogenStateData
+  , module CLM.Types.SoilBGCCarbonStateData
+  , module CLM.Types.SoilBGCNitrogenStateData
     -- * Utilities
   , computeSpecificHumidity
   , writeDiagnostic
@@ -80,6 +84,10 @@ import CLM.Types.LakeStateData   (LakeStateData(..), defaultLakeStateData)
 import CLM.Types.Atm2LndData     (Atm2LndData(..), defaultAtm2LndData)
 import CLM.Types.Lnd2AtmData     (Lnd2AtmData(..), defaultLnd2AtmData)
 import CLM.Types.UrbanParamsData (UrbanParamsData(..), defaultUrbanParamsData)
+import CLM.Types.CNVegCarbonStateData (CNVegCarbonStateData(..), defaultCNVegCarbonStateData)
+import CLM.Types.CNVegNitrogenStateData (CNVegNitrogenStateData(..), defaultCNVegNitrogenStateData)
+import CLM.Types.SoilBGCCarbonStateData (SoilBGCCarbonStateData(..), defaultSoilBGCCarbonStateData)
+import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..), defaultSoilBGCNitrogenStateData)
 import CLM.Infrastructure.Filters (FilterSet(..), defaultFilterSet)
 
 -- ============================================================================
@@ -219,6 +227,19 @@ data CLMState = CLMState
   , clmSMINN       :: !Double           -- ^ Soil mineral nitrogen (gN/m2)
   , clmLeafN       :: !Double           -- ^ Leaf nitrogen pool (gN/m2)
   , clmFPG         :: !Double           -- ^ Fraction of potential growth [0,1]
+    -- Vectorized CN/BGC state (CN parity foundation). These hold the full
+    -- per-patch vegetation and per-layer soil/litter decomposition pools.
+    -- The scalar CN fields above are retained for backwards compatibility; the
+    -- vectorized fields below are what the Fortran-parity harness injects and
+    -- compares. Physics that updates them is wired in a later phase.
+  , clmCNVegCState   :: !CNVegCarbonStateData    -- ^ Per-patch vegetation C pools
+  , clmCNVegNState   :: !CNVegNitrogenStateData  -- ^ Per-patch vegetation N pools
+  , clmSoilBGCCState :: !SoilBGCCarbonStateData  -- ^ Per-layer soil/litter C pools
+  , clmSoilBGCNState :: !SoilBGCNitrogenStateData-- ^ Per-layer soil/litter + mineral N pools
+    -- CN/BGC subgrid metadata
+  , clmPatchIvt      :: !(VU.Vector Int)  -- ^ Per-patch PFT type (pfts1d_itypveg)
+  , clmNlevDecomp    :: !Int              -- ^ Number of decomposition soil layers
+  , clmNDecompPools  :: !Int              -- ^ Number of decomposition pools
     -- Calibration parameters (injected by SiteCalibration, read by hydrology)
   , clmP_baseflow_scalar :: !Double
   , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
@@ -271,6 +292,13 @@ defaultCLMState = CLMState
   , clmSMINN        = 0.0
   , clmLeafN        = 0.0
   , clmFPG          = 1.0
+  , clmCNVegCState   = defaultCNVegCarbonStateData
+  , clmCNVegNState   = defaultCNVegNitrogenStateData
+  , clmSoilBGCCState = defaultSoilBGCCarbonStateData
+  , clmSoilBGCNState = defaultSoilBGCNitrogenStateData
+  , clmPatchIvt      = VU.empty
+  , clmNlevDecomp    = 0
+  , clmNDecompPools  = 0
   , clmP_baseflow_scalar = 0.01
   , clmP_fff        = 0.5
   , clmP_fmax       = 0.5

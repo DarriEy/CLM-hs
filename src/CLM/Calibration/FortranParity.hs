@@ -79,6 +79,10 @@ import CLM.Types.EnergyFluxData (EnergyFluxData(..))
 import CLM.Types.CanopyStateData (CanopyStateData(..))
 import CLM.Types.ColumnData (ColumnData(..))
 import CLM.Types.GridcellData (GridcellData(..))
+import CLM.Types.CNVegCarbonStateData (CNVegCarbonStateData(..), defaultCNVegCarbonStateData)
+import CLM.Types.CNVegNitrogenStateData (CNVegNitrogenStateData(..), defaultCNVegNitrogenStateData)
+import CLM.Types.SoilBGCCarbonStateData (SoilBGCCarbonStateData(..), defaultSoilBGCCarbonStateData)
+import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..), defaultSoilBGCNitrogenStateData)
 
 -- ============================================================================
 -- Reference data locations
@@ -254,6 +258,156 @@ overlayFirst base new
   | VU.null new = base
   | otherwise   = VU.imap (\i b -> if i < VU.length new then new VU.! i else b) base
 
+-- ============================================================================
+-- CN/BGC injection
+-- ============================================================================
+--
+-- Decomposition-pool index mapping (from 'CLM.BioGeoChem.DecompBGC', which uses
+-- the standard CLM-BGC cascade with 1-based Fortran pool indices
+-- i_met_lit=1, i_cel_lit=2, i_lig_lit=3, i_act_som=4, i_slo_som=5, i_pas_som=6,
+-- i_cwd=7). Translated to the 0-based pool axis of
+-- @sbgccs_decomp_cpools_vr_col@ / @sbgcns_decomp_npools_vr_col@:
+--
+--   pool 0 = litr1 (metabolic litter,   dump litr1c_vr / litr1n_vr)
+--   pool 1 = litr2 (cellulose litter,   dump litr2c_vr / litr2n_vr)
+--   pool 2 = litr3 (lignin litter,      dump litr3c_vr / litr3n_vr)
+--   pool 3 = soil1 (active SOM,         dump soil1c_vr / soil1n_vr)
+--   pool 4 = soil2 (slow SOM,           dump soil2c_vr / soil2n_vr)
+--   pool 5 = soil3 (passive SOM,        dump soil3c_vr / soil3n_vr)
+--   pool 6 = cwd   (coarse woody debris,dump cwdc_vr   / cwdn_vr)
+--
+-- Flattening convention (single column): the flat decomp vector is POOL-MAJOR
+-- over layers, i.e. @flat[pool * nlevdecomp + lev]@. With one column the column
+-- axis drops out; for multi-column this generalises to
+-- @flat[(pool * ncol + col) * nlevdecomp + lev]@.
+
+-- | Number of decomposition soil layers used for CN injection (= levgrnd in the
+-- single-column bgc dumps).
+cnNlevDecomp :: Int
+cnNlevDecomp = 25
+
+-- | Number of decomposition pools (litr1/2/3, soil1/2/3, cwd) — see mapping above.
+cnNDecompPools :: Int
+cnNDecompPools = 7
+
+-- | Ordered dump variable names for the C decomposition pools, pool index 0..6.
+decompCPoolVars :: [String]
+decompCPoolVars =
+  [ "litr1c_vr", "litr2c_vr", "litr3c_vr"
+  , "soil1c_vr", "soil2c_vr", "soil3c_vr", "cwdc_vr" ]
+
+-- | Ordered dump variable names for the N decomposition pools, pool index 0..6.
+decompNPoolVars :: [String]
+decompNPoolVars =
+  [ "litr1n_vr", "litr2n_vr", "litr3n_vr"
+  , "soil1n_vr", "soil2n_vr", "soil3n_vr", "cwdn_vr" ]
+
+-- | Read a per-layer vr variable, padded/truncated to 'cnNlevDecomp'.
+getLayerVec :: NcFile -> String -> IO (VU.Vector Double)
+getLayerVec nc name = do
+  mv <- getVec nc name
+  return $ case mv of
+    Nothing -> VU.replicate cnNlevDecomp 0.0
+    Just v  -> VU.generate cnNlevDecomp (\i -> if i < VU.length v then v VU.! i else 0.0)
+
+-- | Build a pool-major flattened decomp vector (length npools*nlevdecomp) from
+-- a list of per-pool layer-variable names.
+readDecompFlat :: NcFile -> [String] -> IO (VU.Vector Double)
+readDecompFlat nc vars = do
+  perPool <- mapM (getLayerVec nc) vars
+  return (VU.concat perPool)
+
+-- | Read a per-patch CN vector, 'VU.empty' if absent.
+getPatchVec :: NcFile -> String -> IO (VU.Vector Double)
+getPatchVec nc name = maybe VU.empty id <$> getVec nc name
+
+-- | Inject the per-patch vegetation carbon pools.
+readCNVegCarbon :: NcFile -> IO CNVegCarbonStateData
+readCNVegCarbon nc = do
+  leafc            <- getPatchVec nc "leafc"
+  leafc_storage    <- getPatchVec nc "leafc_storage"
+  leafc_xfer       <- getPatchVec nc "leafc_xfer"
+  frootc           <- getPatchVec nc "frootc"
+  frootc_storage   <- getPatchVec nc "frootc_storage"
+  frootc_xfer      <- getPatchVec nc "frootc_xfer"
+  livestemc        <- getPatchVec nc "livestemc"
+  livestemc_storage<- getPatchVec nc "livestemc_storage"
+  livestemc_xfer   <- getPatchVec nc "livestemc_xfer"
+  deadstemc        <- getPatchVec nc "deadstemc"
+  deadstemc_storage<- getPatchVec nc "deadstemc_storage"
+  deadstemc_xfer   <- getPatchVec nc "deadstemc_xfer"
+  cpool            <- getPatchVec nc "cpool"
+  xsmrpool         <- getPatchVec nc "xsmrpool"
+  return defaultCNVegCarbonStateData
+    { cnvcs_leafc_patch             = leafc
+    , cnvcs_leafc_storage_patch     = leafc_storage
+    , cnvcs_leafc_xfer_patch        = leafc_xfer
+    , cnvcs_frootc_patch            = frootc
+    , cnvcs_frootc_storage_patch    = frootc_storage
+    , cnvcs_frootc_xfer_patch       = frootc_xfer
+    , cnvcs_livestemc_patch         = livestemc
+    , cnvcs_livestemc_storage_patch = livestemc_storage
+    , cnvcs_livestemc_xfer_patch    = livestemc_xfer
+    , cnvcs_deadstemc_patch         = deadstemc
+    , cnvcs_deadstemc_storage_patch = deadstemc_storage
+    , cnvcs_deadstemc_xfer_patch    = deadstemc_xfer
+    , cnvcs_cpool_patch             = cpool
+    , cnvcs_xsmrpool_patch          = xsmrpool
+    }
+
+-- | Inject the per-patch vegetation nitrogen pools.
+readCNVegNitrogen :: NcFile -> IO CNVegNitrogenStateData
+readCNVegNitrogen nc = do
+  leafn         <- getPatchVec nc "leafn"
+  leafn_storage <- getPatchVec nc "leafn_storage"
+  leafn_xfer    <- getPatchVec nc "leafn_xfer"
+  frootn        <- getPatchVec nc "frootn"
+  livestemn     <- getPatchVec nc "livestemn"
+  deadstemn     <- getPatchVec nc "deadstemn"
+  npool         <- getPatchVec nc "npool"
+  return defaultCNVegNitrogenStateData
+    { cnvns_leafn_patch         = leafn
+    , cnvns_leafn_storage_patch = leafn_storage
+    , cnvns_leafn_xfer_patch    = leafn_xfer
+    , cnvns_frootn_patch        = frootn
+    , cnvns_livestemn_patch     = livestemn
+    , cnvns_deadstemn_patch     = deadstemn
+    , cnvns_npool_patch         = npool
+    }
+
+-- | Inject the per-layer soil/litter decomposition carbon pools.
+readSoilBGCCarbon :: NcFile -> IO SoilBGCCarbonStateData
+readSoilBGCCarbon nc = do
+  decompC <- readDecompFlat nc decompCPoolVars
+  cwdc    <- getLayerVec nc "cwdc_vr"
+  return defaultSoilBGCCarbonStateData
+    { sbgccs_decomp_cpools_vr_col = decompC
+      -- column-summary cwd carbon (vertically resolved) kept for convenience
+    , sbgccs_cwdc_col             = VU.singleton (VU.sum cwdc)
+    }
+
+-- | Inject the per-layer soil/litter decomposition + mineral nitrogen pools.
+readSoilBGCNitrogen :: NcFile -> IO SoilBGCNitrogenStateData
+readSoilBGCNitrogen nc = do
+  decompN  <- readDecompFlat nc decompNPoolVars
+  sminn    <- getLayerVec nc "sminn_vr"
+  no3      <- getLayerVec nc "smin_no3_vr"
+  nh4      <- getLayerVec nc "smin_nh4_vr"
+  return defaultSoilBGCNitrogenStateData
+    { sbgcns_decomp_npools_vr_col = decompN
+    , sbgcns_sminn_vr_col         = sminn
+    , sbgcns_smin_no3_vr_col      = no3
+    , sbgcns_smin_nh4_vr_col      = nh4
+    }
+
+-- | Read per-patch PFT type (pfts1d_itypveg), rounded to Int.
+readPatchIvt :: NcFile -> IO (VU.Vector Int)
+readPatchIvt nc = do
+  mv <- getVec nc "pfts1d_itypveg"
+  return $ case mv of
+    Nothing -> VU.empty
+    Just v  -> VU.map round v
+
 -- | Inject a @before_step@ dump onto the base structure and build the matching
 -- forcing context for the one-step run.
 injectBeforeStep :: ParityHarness -> FilePath -> IO (CLMState, TimestepContext)
@@ -287,6 +441,12 @@ injectBeforeStep h path = do
     -- the bgc-run soil texture differs from the test/data base and cannot be
     -- reconstructed from surfdata.
     mthk    <- getVec nc "THK_C"
+    -- ---- CN/BGC state (vectorized) -------------------------------------
+    cnVegC   <- readCNVegCarbon nc
+    cnVegN   <- readCNVegNitrogen nc
+    soilBgcC <- readSoilBGCCarbon nc
+    soilBgcN <- readSoilBGCNitrogen nc
+    patchIvt <- readPatchIvt nc
     ymd'     <- round <$> getScalar nc "timemgr_rst_curr_ymd"  22020715
     tod'     <- round <$> getScalar nc "timemgr_rst_curr_tod"  46800
     stepSec' <- getScalar nc "timemgr_rst_step_sec" 1800
@@ -345,6 +505,14 @@ injectBeforeStep h path = do
               , cstate_tsai_patch = maybe (cstate_tsai_patch baseCS) (overlayFirst (cstate_tsai_patch baseCS)) mtsai
               }
           , clmSnl = snl
+            -- vectorized CN/BGC state injected from the dump
+          , clmCNVegCState   = cnVegC
+          , clmCNVegNState   = cnVegN
+          , clmSoilBGCCState = soilBgcC
+          , clmSoilBGCNState = soilBgcN
+          , clmPatchIvt      = patchIvt
+          , clmNlevDecomp    = cnNlevDecomp
+          , clmNDecompPools  = cnNDecompPools
           }
     -- forcing inputs that the dump DOES carry (Fortran-exact)
     return (st', ymd', tod', stepSec', coszen')
@@ -427,6 +595,15 @@ data Boundary
   | AfterSoilFluxes
   | AfterHydrologyNoDrain
   | AfterHydrologyDrainage
+    -- CN/BGC boundaries. The harness pipeline does not yet snapshot inside the
+    -- CN phase (CN physics is unwired), so these map to the end-of-step state
+    -- 'bsFinal'. Because the CN steps are identity in the wired pipeline, the
+    -- end-of-step CN state equals the injected before_step CN state, and the
+    -- diff against the CN-boundary dump is the one-step change Fortran made that
+    -- Haskell has not yet reproduced. When CN physics is wired in a later phase,
+    -- dedicated CN snapshots should be added to 'BoundarySnapshots'.
+  | AfterEcosysDynPredrain
+  | AfterCompetition
   deriving (Eq, Show)
 
 -- | The dump-file boundary name for a 'Boundary'.
@@ -437,6 +614,8 @@ boundaryDumpName b = case b of
   AfterSoilFluxes        -> "after_soilfluxes"
   AfterHydrologyNoDrain  -> "after_hydrologynodrainage"
   AfterHydrologyDrainage -> "after_hydrologydrainage"
+  AfterEcosysDynPredrain -> "after_ecosysdyn_predrain"
+  AfterCompetition       -> "after_competition"
 
 -- | The captured snapshot for a 'Boundary'.
 boundarySnapshot :: Boundary -> BoundarySnapshots -> CLMState
@@ -446,6 +625,8 @@ boundarySnapshot b = case b of
   AfterSoilFluxes        -> bsAfterSoilFluxes
   AfterHydrologyNoDrain  -> bsAfterHydrologyNoDrain
   AfterHydrologyDrainage -> bsFinal
+  AfterEcosysDynPredrain -> bsFinal
+  AfterCompetition       -> bsFinal
 
 -- | (Fortran var name, shape, boundary, model getter, abs tolerance).
 registry :: [(String, Kind, Boundary, CLMState -> [Double], Double)]
@@ -462,8 +643,42 @@ registry =
   , ("ZWT_PERCH",  Col1d, AfterHydrologyDrainage, \s -> headList (sh_zwt_perched_col (clmSoilHydro s)), 0.05)
   , ("SNOW_DEPTH", Col1d, AfterHydrologyDrainage, \s -> headList (wdiag_snow_depth_col (clmWaterDiagBulk s)), 1.0e-3)
   , ("frac_sno",   Col1d, AfterHydrologyDrainage, \s -> headList (wdiag_frac_sno_col (clmWaterDiagBulk s)),   1.0e-3)
+    -- ---- CN/BGC baseline fields (compared at after_competition) -----------
+    -- Per-patch vegetation pools. Tolerances are deliberately generous: this is
+    -- a measurement baseline (CN physics is unwired), so most CN fields are
+    -- EXPECTED to FAIL with the one-step Fortran change. The point is to REPORT
+    -- the diff, not pass it.
+  , ("leafc",      Patch, AfterCompetition,      \s -> VU.toList (cnvcs_leafc_patch     (clmCNVegCState s)), 1.0e-2)
+  , ("frootc",     Patch, AfterCompetition,      \s -> VU.toList (cnvcs_frootc_patch    (clmCNVegCState s)), 1.0e-2)
+  , ("livestemc",  Patch, AfterCompetition,      \s -> VU.toList (cnvcs_livestemc_patch (clmCNVegCState s)), 1.0e-2)
+  , ("deadstemc",  Patch, AfterCompetition,      \s -> VU.toList (cnvcs_deadstemc_patch (clmCNVegCState s)), 1.0e-2)
+  , ("cpool",      Patch, AfterCompetition,      \s -> VU.toList (cnvcs_cpool_patch     (clmCNVegCState s)), 1.0e-2)
+  , ("xsmrpool",   Patch, AfterCompetition,      \s -> VU.toList (cnvcs_xsmrpool_patch  (clmCNVegCState s)), 1.0e-2)
+  , ("leafn",      Patch, AfterCompetition,      \s -> VU.toList (cnvns_leafn_patch     (clmCNVegNState s)), 1.0e-2)
+    -- Per-layer soil/litter decomposition C pools (extracted by pool index).
+  , ("litr1c_vr",  Col2d, AfterCompetition,      \s -> poolC s 0, 1.0e-2)
+  , ("litr2c_vr",  Col2d, AfterCompetition,      \s -> poolC s 1, 1.0e-2)
+  , ("litr3c_vr",  Col2d, AfterCompetition,      \s -> poolC s 2, 1.0e-2)
+  , ("soil1c_vr",  Col2d, AfterCompetition,      \s -> poolC s 3, 1.0e-2)
+  , ("soil2c_vr",  Col2d, AfterCompetition,      \s -> poolC s 4, 1.0e-2)
+  , ("soil3c_vr",  Col2d, AfterCompetition,      \s -> poolC s 5, 1.0e-2)
+  , ("cwdc_vr",    Col2d, AfterCompetition,      \s -> poolC s 6, 1.0e-2)
+    -- Per-layer mineral N pools.
+  , ("sminn_vr",     Col2d, AfterCompetition,    \s -> VU.toList (sbgcns_sminn_vr_col    (clmSoilBGCNState s)), 1.0e-2)
+  , ("smin_no3_vr",  Col2d, AfterCompetition,    \s -> VU.toList (sbgcns_smin_no3_vr_col (clmSoilBGCNState s)), 1.0e-2)
+  , ("smin_nh4_vr",  Col2d, AfterCompetition,    \s -> VU.toList (sbgcns_smin_nh4_vr_col (clmSoilBGCNState s)), 1.0e-2)
   ]
-  where headList v = if VU.null v then [] else [v VU.! 0]
+  where
+    headList v = if VU.null v then [] else [v VU.! 0]
+    -- Extract one decomposition pool's layer slice from the pool-major flat
+    -- vector @flat[pool * nlevdecomp + lev]@ (see CN injection mapping above).
+    poolC s p =
+      let flat = sbgccs_decomp_cpools_vr_col (clmSoilBGCCState s)
+          nlev = let n = clmNlevDecomp s in if n > 0 then n else cnNlevDecomp
+          lo   = p * nlev
+      in if lo + nlev <= VU.length flat
+           then VU.toList (VU.slice lo nlev flat)
+           else []
 
 -- | Result of comparing one field against a dump.
 data FieldDiff = FieldDiff
