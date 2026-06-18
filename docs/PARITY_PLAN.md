@@ -146,28 +146,37 @@ build/verify unless run in separate git worktrees (which pay a full cold rebuild
 
 ## Progress (updated 2026-06-18)
 
-**Biogeophysical first-step parity COMPLETE** — all registry fields pass at step
-n1757845. 28-step window status:
+**BIOGEOPHYSICAL SINGLE-STEP PARITY COMPLETE** — all 12 registry fields pass at
+BOTH the first step and the 28-step window max (integrated at `2ced79b`):
 
 | group | fields | window-max | tol | status |
 |---|---|---|---|---|
-| Hydrology | H2OSOI_LIQ, ZWT, ZWT_PERCH, H2OSFC | pass | — | ✅ |
-| Radiation | SABV_P, SABG_P | 1.5 / 2.5 | 5.0 | ✅ |
+| Hydrology | H2OSOI_LIQ, ZWT, ZWT_PERCH, H2OSFC | 0.031 / 0 | — | ✅ |
+| Radiation | SABV_P, SABG_P | 1.54 / 2.46 | 5.0 | ✅ |
 | Snow/ice (summer) | H2OSOI_ICE, SNOW_DEPTH, frac_sno | 0 | — | ✅ |
-| Temperature | T_GRND, T_SOISNO | 0.59 | 0.20 | first ✅, window in progress |
-| Canopy temp | T_VEG | 3.46 | 1.20 | first ✅, window in progress |
+| Temperature | T_GRND, T_SOISNO | 0.116 | 0.20 | ✅ |
+| Canopy temp | T_VEG | 0.72 | 1.20 | ✅ |
 
-The temperature window residual is the single localized cause — the fabricated
-photosynthesis/stomatal path (midday transpiration too weak) — being fixed in
-wave 2b (wire real `canopySunShadeFracs` PAR + Vcmax25, remove the RSSUN floor).
+Full suite: 111 examples, 4 failures — exactly the documented pre-existing ones
+(port-audit stub scan, QRUNOFF fixture, 2 Julia-trajectory tests); no regressions.
 
-**Bugs found so far were in the adapter glue + harness forcing, NOT the ported
-physics modules** (hydrology hardcoded ZWT; radiation coszen/forcing-year/band
-split/esai injection; soil-temp drag coeffs/roverg unit/nbedrock). The Fortran
-two-stream, albedo, Zeng-Decker solver, and soil heat solve were already faithful.
+**Every bug was in the adapter glue, harness forcing, or input params — NEVER the
+ported physics modules**, which were already faithful (two-stream, albedo,
+Zeng-Decker Richards solver, soil heat solve, Medlyn stomatal). Fixes by wave:
+- Hydrology: adapter discarded prognostic ZWT (hardcoded 5.0) + unstable explicit
+  solver → real implicit Zeng-Decker + prognostic state.
+- Radiation: coszen = cos(declination) → real zenith; forcing **year 2002 not 2003**;
+  solar zenith time-downscaling; CLMNCEP band split; inject esai/tsai.
+- Soil/canopy temp: canopy drag coeffs from param file; `roverg` ×1000 unit;
+  `nbedrock` from zbedrock.
+- Photosynthesis: `rgas` ×1e-3 (made gb_mol 1000× small, masked by a stomatal
+  floor); wired real sun/shade PAR; CLM5 per-PFT Medlyn slopes; bare t_veg=forc_t.
+- Soil thermal: inject the dump's exact per-layer `THK_C` (bgc-run soil texture
+  differs from test/data and is unreconstructable from surfdata).
 
-Branch `parity-phase0`; worktrees per wave merged in. CN is the next phase
-(`docs/CN_PARITY_PLAN.md`).
+Branch `parity-phase0`; per-wave worktrees merged. **Next phase: CN/BGC**
+(`docs/CN_PARITY_PLAN.md`) — a subsystem rewrite (vectorize scalar CN → per-pft/
+per-layer, port the real BGC physics).
 
 ## Done criteria
 All Phase-0 tolerance-table fields pass at every boundary across the 28-step
