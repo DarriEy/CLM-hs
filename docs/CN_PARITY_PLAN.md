@@ -75,6 +75,34 @@ Per-step (re-inject each step, run one step, diff at boundary):
   `scripts/fortran_parity_cn_summer.jl` / `fortran_parity_drift.jl` and the
   `probe_*.jl` harnesses — mirror their inject→step→diff structure.
 
+## Foundation built + key finding (2026-06-18, `973dc76`)
+
+CN state is now wired into `CLMState` (`clmCNVegCState/NState`, `clmSoilBGCCState/NState`,
+`clmPatchIvt`, `clmNlevDecomp/NDecompPools`), the harness injects all of it from
+`before_step` (identity check = 0.0 for all 17 CN fields), and 17 pool fields are
+in the registry at `after_competition`.
+
+**Finding that reshapes validation strategy:** the dumps are a *near-equilibrium
+spinup* window, so the per-step change in CN POOL STATE is tiny — soil/litter/
+mineral-N pools don't move at all over one step here, and veg pools move at
+1e-4–1e-5. So single-step *pool-state* parity is **near-trivially satisfied
+regardless of physics correctness** (only `xsmrpool` shows a measurable 1.4e-2
+one-step delta). Pool snapshots are therefore a WEAK CN metric in this window.
+
+**The discriminating CN metrics (matching CLM.jl's actual CN validation) are:**
+1. **Per-step FLUX probes** — the dump carries `GROSS_NMIN_VR_P`, `F_NIT_VR_P`,
+   `F_DENIT_VR_P`, `POT_F_NIT_VR_P`, `ACT_IMMOB_NH4_VR_P`, `SMIN_NH4_TO_PLANT_VR_P`
+   (per-layer N-transformation fluxes), plus allocation/uptake internals
+   (availc, plant_ndemand, FUN N-uptake per CLM.jl probes). These are the
+   per-step physics outputs and ARE discriminating.
+2. **Multi-step free-running DRIFT** — inject once, run N steps without
+   re-injection, check pools stay bounded (CLM.jl: mineral N ~0.7%/day plateau,
+   leafc <0.1%).
+
+So the CN physics fan-out should validate against the flux probes + drift, NOT
+the near-static pool snapshots. Add the flux-probe registry entries as each
+physics group is wired.
+
 ## Recommendation
 
 Land biogeophysics first (hydrology+radiation done; soil-temp in progress). Then
