@@ -113,8 +113,8 @@ defaultCanopyFluxesParams :: CanopyFluxesParams
 defaultCanopyFluxesParams = CanopyFluxesParams
   { cfp_lai_dl   = 0.5
   , cfp_z_dl     = 0.05
-  , cfp_a_coef   = 0.5
-  , cfp_a_exp    = 1.0
+  , cfp_a_coef   = 0.13
+  , cfp_a_exp    = 0.45
   , cfp_csoilc   = 0.004
   , cfp_cv       = 0.01
   , cfp_wind_min = 1.0

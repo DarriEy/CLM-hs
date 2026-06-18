@@ -132,6 +132,7 @@ initCLMStateFromDir dir = do
   h2osno_raw <- readFloat64Vector (dir </> "coldstart" </> "h2osno.bin")
   t_veg_raw <- readOptionalVector (dir </> "coldstart" </> "t_veg.bin") VU.empty
   t_ref2m_raw <- readOptionalVector (dir </> "coldstart" </> "t_ref2m.bin") VU.empty
+  zbedrock_raw <- readOptionalVector (dir </> "surfdata" </> "zbedrock.bin") VU.empty
 
   elai_raw <- readFloat64Vector (dir </> "coldstart" </> "elai.bin")
   esai_raw <- readFloat64Vector (dir </> "coldstart" </> "esai.bin")
@@ -197,11 +198,26 @@ initCLMStateFromDir dir = do
       soilDz = VU.generate nlevgrnd $ \j -> safeAt dz (nlevsno + j) 0.0
       soilZi = VU.generate nlevgrnd $ \j ->
         safeAt zi (nlevsno + j + 1) (safeAt zi (nlevsno + j) 0.0)
+      -- Bedrock layer index (Fortran initVerticalMod: nbedrock = j where
+      -- zisoi(j-1) < zbedrock <= zisoi(j); zisoi(0)=0). soilZi is the soil
+      -- interface depths zisoi(1..nlevsoi). Default nlevsoi when no bedrock.
+      zbedrock_in = safeAt zbedrock_raw 0 (safeAt soilZi (nlevsoi - 1) 0.0)
+      zisoiF k  -- Fortran 1-based zisoi(k), with zisoi(0)=0
+        | k <= 0    = 0.0
+        | otherwise = safeAt soilZi (k - 1) 0.0
+      nbedrockComputed
+        | VU.null zbedrock_raw = nlevsoi
+        | otherwise =
+            let go j acc
+                  | j > nlevsoi = acc
+                  | zisoiF (j - 1) < zbedrock_in && zisoiF j >= zbedrock_in = go (j + 1) j
+                  | otherwise = go (j + 1) acc
+            in go 1 nlevsoi
       rootFrForPatch p = computeRootFr RootFrInput
         { rfi_method = Zeng2001Root
         , rfi_nlevsoi = nlevsoi
         , rfi_nlevgrnd = nlevgrnd
-        , rfi_nbedrock = nlevsoi
+        , rfi_nbedrock = nbedrockComputed
         , rfi_is_fates = False
         , rfi_roota_par = pftScalar (pft_roota_par pft) p 7.0
         , rfi_rootb_par = pftScalar (pft_rootb_par pft) p 2.0
@@ -286,7 +302,7 @@ initCLMStateFromDir dir = do
         , clmGridcell = (clmGridcell defaultCLMState)
             { grc_lat = VU.singleton (mdLat dims)
             , grc_lon = VU.singleton (mdLon dims)
-            , grc_nbedrock = VU.singleton nlevsoi
+            , grc_nbedrock = VU.singleton nbedrockComputed
             , grc_dayl = VU.singleton 43200.0
             , grc_max_dayl = VU.singleton 86400.0
             }

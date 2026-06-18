@@ -28,9 +28,11 @@ import qualified Data.Vector.Unboxed as VU
 -- Constants
 -- ========================================================================
 
--- | R / (g * 18.016e-3) — Fortran ROVERG
+-- | Fortran ROVERG = R_wv/g*1000 = (Rgas/Mwv)/g*1000  [mm/K]
+-- clm_varcon: roverg = SHR_CONST_RWV/SHR_CONST_G*1000, with the matric
+-- potential @psit@ expressed in mm, so the 1000 factor (m->mm) is essential.
 roverg :: Double
-roverg = rgas / (9.80616 * 18.016)
+roverg = rgas / (9.80616 * 18.016) * 1000.0
 
 -- | Special value for missing data
 spval :: Double
