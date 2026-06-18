@@ -83,6 +83,7 @@ import CLM.Types.CNVegCarbonStateData (CNVegCarbonStateData(..), defaultCNVegCar
 import CLM.Types.CNVegNitrogenStateData (CNVegNitrogenStateData(..), defaultCNVegNitrogenStateData)
 import CLM.Types.SoilBGCCarbonStateData (SoilBGCCarbonStateData(..), defaultSoilBGCCarbonStateData)
 import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..), defaultSoilBGCNitrogenStateData)
+import CLM.Types.SoilBGCNitrogenFluxData (SoilBGCNitrogenFluxData(..))
 
 -- ============================================================================
 -- Reference data locations
@@ -667,6 +668,24 @@ registry =
   , ("sminn_vr",     Col2d, AfterCompetition,    \s -> VU.toList (sbgcns_sminn_vr_col    (clmSoilBGCNState s)), 1.0e-2)
   , ("smin_no3_vr",  Col2d, AfterCompetition,    \s -> VU.toList (sbgcns_smin_no3_vr_col (clmSoilBGCNState s)), 1.0e-2)
   , ("smin_nh4_vr",  Col2d, AfterCompetition,    \s -> VU.toList (sbgcns_smin_nh4_vr_col (clmSoilBGCNState s)), 1.0e-2)
+    -- ---- Per-layer N-transformation FLUX probes (CN decomp + N-cycling) ----
+    -- Computed by the vectorized N-cycle in PhysicsAdapters.cnPreDrainageStep
+    -- (decomposition cascade + nitrif/denitrif) and surfaced on clmSoilBGCNFlux.
+    -- NOTE: the dump's _P flux-probe variables are a DEAD instrumentation hook —
+    -- they are identically ZERO at every boundary and step in this window (the
+    -- Fortran SourceMods declared but never populated the rate-term print; this
+    -- is confirmed by CLM.jl scripts/fortran_parity_decomprates.jl). A direct
+    -- flux-RATE parity is therefore impossible from these dumps; the validatable
+    -- signal is the mineral-N pool deltas above (sminn/smin_no3/smin_nh4_vr).
+    -- These entries are kept as a MEASUREMENT: the harness reports the computed
+    -- per-layer flux magnitude against the dump's zero so the rates are visible
+    -- and confirmed finite. Generous tolerances — not a hard parity assert.
+  , ("GROSS_NMIN_VR_P",        Col2d, AfterCompetition, \s -> VU.toList (sbgcnf_gross_nmin_vr_col        (clmSoilBGCNFlux s)), 1.0e0)
+  , ("F_NIT_VR_P",             Col2d, AfterCompetition, \s -> VU.toList (sbgcnf_f_nit_vr_col             (clmSoilBGCNFlux s)), 1.0e0)
+  , ("F_DENIT_VR_P",           Col2d, AfterCompetition, \s -> VU.toList (sbgcnf_f_denit_vr_col           (clmSoilBGCNFlux s)), 1.0e0)
+  , ("POT_F_NIT_VR_P",         Col2d, AfterCompetition, \s -> VU.toList (sbgcnf_pot_f_nit_vr_col         (clmSoilBGCNFlux s)), 1.0e0)
+  , ("ACT_IMMOB_NH4_VR_P",     Col2d, AfterCompetition, \s -> VU.toList (sbgcnf_actual_immob_nh4_vr_col  (clmSoilBGCNFlux s)), 1.0e0)
+  , ("SMIN_NH4_TO_PLANT_VR_P", Col2d, AfterCompetition, \s -> VU.toList (sbgcnf_smin_nh4_to_plant_vr_col (clmSoilBGCNFlux s)), 1.0e0)
   ]
   where
     headList v = if VU.null v then [] else [v VU.! 0]

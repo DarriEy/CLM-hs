@@ -54,6 +54,9 @@ module CLM.Driver.CLMDriver
   , module CLM.Types.CNVegNitrogenStateData
   , module CLM.Types.SoilBGCCarbonStateData
   , module CLM.Types.SoilBGCNitrogenStateData
+  , module CLM.Types.SoilBGCCarbonFluxData
+  , module CLM.Types.SoilBGCNitrogenFluxData
+  , module CLM.Types.SoilBGCStateData
     -- * Utilities
   , computeSpecificHumidity
   , writeDiagnostic
@@ -88,6 +91,9 @@ import CLM.Types.CNVegCarbonStateData (CNVegCarbonStateData(..), defaultCNVegCar
 import CLM.Types.CNVegNitrogenStateData (CNVegNitrogenStateData(..), defaultCNVegNitrogenStateData)
 import CLM.Types.SoilBGCCarbonStateData (SoilBGCCarbonStateData(..), defaultSoilBGCCarbonStateData)
 import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..), defaultSoilBGCNitrogenStateData)
+import CLM.Types.SoilBGCCarbonFluxData (SoilBGCCarbonFluxData(..), defaultSoilBGCCarbonFluxData)
+import CLM.Types.SoilBGCNitrogenFluxData (SoilBGCNitrogenFluxData(..), defaultSoilBGCNitrogenFluxData)
+import CLM.Types.SoilBGCStateData (SoilBGCStateData(..), defaultSoilBGCStateData)
 import CLM.Infrastructure.Filters (FilterSet(..), defaultFilterSet)
 
 -- ============================================================================
@@ -236,6 +242,12 @@ data CLMState = CLMState
   , clmCNVegNState   :: !CNVegNitrogenStateData  -- ^ Per-patch vegetation N pools
   , clmSoilBGCCState :: !SoilBGCCarbonStateData  -- ^ Per-layer soil/litter C pools
   , clmSoilBGCNState :: !SoilBGCNitrogenStateData-- ^ Per-layer soil/litter + mineral N pools
+    -- Vectorized CN/BGC flux state (computed by the vectorized N-cycle in
+    -- 'cnPreDrainageStep'/'cnPostDrainageStep'; surfaces per-layer N-transformation
+    -- fluxes for parity comparison against the dump's _P flux probes).
+  , clmSoilBGCCFlux  :: !SoilBGCCarbonFluxData    -- ^ Per-layer soil/litter C fluxes (HR, c-transfer)
+  , clmSoilBGCNFlux  :: !SoilBGCNitrogenFluxData  -- ^ Per-layer N fluxes (gross_nmin, f_nit, f_denit, immob, ...)
+  , clmSoilBGCState  :: !SoilBGCStateData         -- ^ Per-layer soil BGC diagnostic state (fpi_vr, profiles)
     -- CN/BGC subgrid metadata
   , clmPatchIvt      :: !(VU.Vector Int)  -- ^ Per-patch PFT type (pfts1d_itypveg)
   , clmNlevDecomp    :: !Int              -- ^ Number of decomposition soil layers
@@ -296,6 +308,9 @@ defaultCLMState = CLMState
   , clmCNVegNState   = defaultCNVegNitrogenStateData
   , clmSoilBGCCState = defaultSoilBGCCarbonStateData
   , clmSoilBGCNState = defaultSoilBGCNitrogenStateData
+  , clmSoilBGCCFlux  = defaultSoilBGCCarbonFluxData
+  , clmSoilBGCNFlux  = defaultSoilBGCNitrogenFluxData
+  , clmSoilBGCState  = defaultSoilBGCStateData
   , clmPatchIvt      = VU.empty
   , clmNlevDecomp    = 0
   , clmNDecompPools  = 0
