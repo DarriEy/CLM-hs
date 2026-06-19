@@ -178,6 +178,33 @@ Branch `parity-phase0`; per-wave worktrees merged. **Next phase: CN/BGC**
 (`docs/CN_PARITY_PLAN.md`) — a subsystem rewrite (vectorize scalar CN → per-pft/
 per-layer, port the real BGC physics).
 
+## Generality validation (2026-06-19) — confirms faithful, not overfit
+
+Validated the harness against a SECOND independent case to guard against
+overfitting the single summer window: `clm_parity_run` n13461 = 2003-07-15,
+coszen≈0.87 (local solar noon, PEAK sun), real-year-2003 forcing — a very
+different radiation/flux regime and forcing year. Result: **10/12 fields PASS**:
+
+| field | absΔ @ n13461 | tol | verdict |
+|---|---|---|---|
+| SABV_P / SABG_P | 1.11 / 1.00 | 5.0 | ✅ at PEAK sun → solar downscaling generalizes |
+| T_VEG | 1.01 K | 1.20 | ✅ |
+| H2OSOI_LIQ + hydrology/snow | ≤0.016 | — | ✅ |
+| T_GRND / T_SOISNO | 0.44 K (rel 0.15%) | 0.20 | ✗ — residual amplified at high flux |
+
+Key takeaways:
+- The radiation port (whose solar-zenith downscaling was *calibrated* on the
+  low-sun BGC window) **holds at peak sun** → genuine physics, not overfit.
+- Hydrology, canopy temperature, snow generalize.
+- `THK_C` is injected at n13461 too, so the T_GRND 0.44 K is NOT an artifact —
+  it's a real **soil-temp/ground-flux coupling residual that grows with ground
+  heat flux** (0.12 K at low sun → 0.44 K at peak sun). Well-localized next
+  target (`SoilTemperature`/`SoilFluxes` ground-flux response), generality-
+  confirmed rather than overfit-driven.
+
+Harness is now parameterized by forcing file + dump dir (`initParityHarnessWith`,
+`generalityReport`); gated generality test in `test/Spec.hs`.
+
 ## Done criteria
 All Phase-0 tolerance-table fields pass at every boundary across the 28-step
 window; CN pools per-step < ~1%; drift bounded; checklist markers cleared with
