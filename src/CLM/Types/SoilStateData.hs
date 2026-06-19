@@ -58,6 +58,10 @@ data SoilStateData = SoilStateData
       -- THK_C(levtot) ordering. Empty ⇒ no override (default conductivity
       -- computation is used). Used by the Fortran-parity harness to inject the
       -- exact bgc-spinup conductivity.
+  , sstate_cv_override_col          :: !(VU.Vector Double)
+      -- ^ Optional injected per-layer volumetric heat capacity [J/m2/K], same
+      -- levtot layout as 'sstate_thk_override_col'. Empty ⇒ default cv. Used by
+      -- the parity harness to inject the exact Fortran cv (cvdump CV_C).
     -- Roots
   , sstate_rootr_patch              :: !(VU.Vector Double) -- ^ patch effective root fraction (npatches * nlevgrnd)
   , sstate_rootr_col                :: !(VU.Vector Double) -- ^ col effective root fraction
@@ -114,6 +118,7 @@ defaultSoilStateData = SoilStateData
   , sstate_tksatu_col               = VU.empty
   , sstate_csol_col                 = VU.empty
   , sstate_thk_override_col         = VU.empty
+  , sstate_cv_override_col          = VU.empty
   , sstate_rootr_patch              = VU.empty
   , sstate_rootr_col                = VU.empty
   , sstate_rootfr_col               = VU.empty

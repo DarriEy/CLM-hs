@@ -764,6 +764,7 @@ stepSimulation !st nstep dtime =
         , sti_dtime            = dtime
         , sti_snowCondMethod   = Jordan1991
         , sti_thk_override     = Nothing
+        , sti_cv_override      = Nothing
         }
       stOutput = solveSoilTemperature stInput
 

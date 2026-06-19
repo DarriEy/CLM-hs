@@ -54,8 +54,9 @@ module CLM.Calibration.FortranParity
   ) where
 
 import qualified Data.Vector.Unboxed as VU
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeFileName, dropExtension)
 import System.Directory (doesFileExist)
+import Text.Read (readMaybe)
 import Text.Printf (printf)
 import Control.Monad (forM, forM_)
 import Data.List (foldl', nub, minimumBy)
@@ -120,6 +121,13 @@ bowForcingFile2003 =
 -- (local solar noon, PEAK sun) — a very different radiation/flux regime.
 spDumpDir :: FilePath
 spDumpDir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run"
+
+-- | Directory of the cv sidecar dumps (re-instrumented Fortran run, 2003): one
+-- @cvdump_n<nstep>.nc@ per step carrying @CV_C(column,levtot)@ = the exact
+-- Fortran soil volumetric heat capacity. Used to inject cv into the soil-temp
+-- solve (analogous to injecting THK_C), to close T_GRND at high ground flux.
+cvDumpDir :: FilePath
+cvDumpDir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/cvdump_run"
 
 -- | The 28 contiguous summer timesteps that were instrumented.
 bgcSteps :: [Int]
@@ -425,6 +433,33 @@ readSoilBGCNitrogen nc = do
     , sbgcns_smin_nh4_vr_col      = nh4
     }
 
+-- | Extract the nstep from a dump path like ".../pdump_before_step_n13461.nc".
+parseNstep :: FilePath -> Maybe Int
+parseNstep p =
+  let base   = dropExtension (takeFileName p)         -- pdump_before_step_n13461
+      digits = reverse (takeWhile (/= 'n') (reverse base))
+  in readMaybe digits
+
+-- | Read the exact Fortran soil heat capacity (CV_C) from the cv sidecar dump
+-- matching this step, if it exists; empty otherwise (⇒ default cv).
+readCvOverride :: FilePath -> IO (VU.Vector Double)
+readCvOverride beforeStepPath =
+  case parseNstep beforeStepPath of
+    Nothing -> return VU.empty
+    Just n  -> do
+      let cvPath = cvDumpDir </> ("cvdump_n" ++ show n ++ ".nc")
+      exists <- doesFileExist cvPath
+      if not exists
+        then return VU.empty
+        else do
+          r <- ncOpen cvPath
+          case r of
+            Left _   -> return VU.empty
+            Right nc -> do
+              mcv <- getVec nc "CV_C"
+              ncClose nc
+              return (maybe VU.empty id mcv)
+
 -- | Read per-patch PFT type (pfts1d_itypveg), rounded to Int.
 readPatchIvt :: NcFile -> IO (VU.Vector Int)
 readPatchIvt nc = do
@@ -551,7 +586,11 @@ injectState h path = do
           }
     -- forcing inputs that the dump DOES carry (Fortran-exact)
     return (st', ymd', tod', stepSec', coszen')
-  return st
+  -- Inject the exact Fortran soil heat capacity (CV_C) from the cv sidecar dump
+  -- for this step, if one exists (cvdump_run/cvdump_n<nstep>.nc). Mirrors the
+  -- THK_C conductivity injection; empty ⇒ default cv.
+  mcv <- readCvOverride path
+  return st { clmSoilState = (clmSoilState st) { sstate_cv_override_col = mcv } }
 
 -- | Build the 'TimestepContext' for a step from its @before_step@ dump WITHOUT
 -- injecting any state. Reads only the forcing/time/coszen the step needs:

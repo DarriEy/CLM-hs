@@ -110,6 +110,10 @@ data ThermPropInput = ThermPropInput
       -- Fortran dump's levtot ordering. When Just, overrides the computed
       -- per-layer @thk@ value (bedrock handling still applied). When Nothing,
       -- behavior is byte-identical to the default conductivity computation.
+  , tpi_cv_override   :: !(Maybe (VU.Vector Double))
+      -- ^ Optional injected per-layer volumetric heat capacity [J/m2/K], same
+      -- levtot ordering as 'tpi_thk_override'. Fill values (>=1e30) and inactive
+      -- snow slots are ignored. When Nothing, the default 'cv' is computed.
   } deriving (Show)
 
 -- | Snow thermal conductivity method
@@ -158,6 +162,15 @@ soilThermProp inp = ThermPropOutput
     thkOverrideAt jj = case thkOvr of
       Just v | jj >= 0 && jj < VU.length v -> Just (v VU.! jj)
       _                                    -> Nothing
+
+    cvOvr = tpi_cv_override inp  -- optional injected per-layer heat capacity
+    -- Use the injected value only when present, finite, and not a dump fill
+    -- (>=1e30) — inactive snow slots are written as fill.
+    cvOverrideAt jj = case cvOvr of
+      Just v | jj >= 0 && jj < VU.length v
+             , let o = v VU.! jj
+             , not (isNaN o) && o < 1.0e30 && o > 0.0 -> Just o
+      _                                                -> Nothing
 
     -- ---- Layer-centre thermal conductivity (thk) ----
     thkOut = VU.generate nlev $ \jj ->
@@ -243,7 +256,10 @@ soilThermProp inp = ThermPropOutput
           -- Add unresolved snow to top soil layer
           cv_adj  | j == 1 && h2osno_nl > 0.0 = cv_val + cpice * h2osno_nl
                   | otherwise                  = cv_val
-      in cv_adj
+      -- Prefer the injected Fortran heat capacity for this layer when present.
+      in case cvOverrideAt jj of
+           Just o  -> o
+           Nothing -> cv_adj
 
     snowCv jj =
       if frac_sno > 0.0
@@ -803,6 +819,9 @@ data SoilTempInput = SoilTempInput
   , sti_thk_override     :: !(Maybe (VU.Vector Double))
       -- ^ Optional injected per-layer thermal conductivity (see
       -- 'tpi_thk_override'). Nothing ⇒ default conductivity computation.
+  , sti_cv_override      :: !(Maybe (VU.Vector Double))
+      -- ^ Optional injected per-layer volumetric heat capacity (see
+      -- 'tpi_cv_override'). Nothing ⇒ default heat-capacity computation.
   } deriving (Show)
 
 -- | Output of the soil temperature solver.
@@ -871,6 +890,7 @@ solveSoilTemperature inp = SoilTempOutput
       , tpi_h2osfc           = sti_h2osfc inp
       , tpi_snowCondMethod   = sti_snowCondMethod inp
       , tpi_thk_override     = sti_thk_override inp
+      , tpi_cv_override      = sti_cv_override inp
       }
     tpOut = soilThermProp tpInp
 
