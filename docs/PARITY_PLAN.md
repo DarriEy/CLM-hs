@@ -223,6 +223,25 @@ The peak-sun T_GRND residual (0.44 K at n13461, 0.15% rel) was traced end-to-end
 
 New harness infra: `EFLX_GNET_P` registry probe + `cv` override + cvdump reader.
 
+## T_GRND high-flux residual — CLOSED (2026-06-19)
+
+The peak-sun T_GRND residual is resolved: **T_GRND passes at BOTH cases** — BGC
+low-sun 0.101 K and peak-sun n13461 **0.011 K** (tol 0.20). The diagnostic chain
+(re-instrument cv → rule out heat capacity → expose EFLX_GNET → EFLX_SHG)
+surfaced FOUR real bugs, all in glue/inputs, none in the ported physics:
+1. Bareground `bgi_beta` = soilbeta (wrong) → 1.0 (M-O convective coef).
+2. `computePotentialTemperature` inflated thv ~7% at altitude; single-point datm
+   delivers forc_th = forc_t.
+3. `moninObukIni` used the wrong convective velocity + `ur`; Fortran uses fixed
+   `wc=0.5` and `um`.
+4. z0m/displa fallback was PFT-independent; now keyed off PFT (C3 grass z0mr=0.12).
+Result: grass ground SH −8.0 → +2.7 (Fortran +1.4), T_VEG also improved
+(1.01 → 0.28 K). Suite 113 examples, 4 pre-existing failures, no regressions.
+
+Note: the `EFLX_GNET_P` registry probe still shows a bare-patch gap at peak sun,
+but it's a boundary-convention artifact (our pre-solve flux vs the dump's
+post-solve value at after_soiltemperature) — the actual T_GRND parity passes.
+
 ## Done criteria
 All Phase-0 tolerance-table fields pass at every boundary across the 28-step
 window; CN pools per-step < ~1%; drift bounded; checklist markers cleared with
