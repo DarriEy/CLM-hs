@@ -3335,14 +3335,23 @@ perPatchAllocationOverlay dt st =
           -- Display pool: only the background litterfall loss (and onset xfer,
           -- ~0 in this window). New photosynthate does NOT enter the display
           -- pool directly — see storageGain below.
+          -- Background (continuous) leaf/froot litterfall applies only to
+          -- EVERGREEN PFTs. Deciduous PFTs (e.g. C3 grass) shed at phenological
+          -- OFFSET, not as in-season background litter, so their displayed
+          -- leafc/frootc stay ~static mid-season (matching the Fortran dump).
+          -- CLM evergreen PFT indices: 1,2 needleleaf evergreen; 4,5 broadleaf
+          -- evergreen tree; 9 broadleaf evergreen shrub.
+          isEvergreenPft iv = iv == 1 || iv == 2 || iv == 4 || iv == 5 || iv == 9
           displayLoss old =
             VU.generate np $ \p ->
               let cur = getV old p
               in case allocs !! p of
                    Nothing -> cur
-                   Just _  ->
-                     let (lit, _) = Phen.backgroundLitterfall leaf_long cur 0.0 dt
-                     in max 0.0 (cur - lit)
+                   Just _
+                     | isEvergreenPft (ivt VU.! p) ->
+                         let (lit, _) = Phen.backgroundLitterfall leaf_long cur 0.0 dt
+                         in max 0.0 (cur - lit)
+                     | otherwise -> cur
 
           -- Storage pool: receives the new allocation. In CLM's non-onset
           -- season, cpool_to_{leaf,froot}c new growth is routed to the STORAGE
