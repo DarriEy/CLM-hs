@@ -116,6 +116,27 @@ physics group is wired.
 - Residual drift is concentrated in the veg-pool / N-uptake path (`xsmrpool`,
   mineral N), NOT decomposition → next group = allocation/FUN/maintenance.
 
+## Veg-pool group wired + dual-path finding (2026-06-19)
+
+Per-patch vegetation physics ported and integrated (faithful, no regressions):
+carriers `cstate_psnsun/psnsha/lmrsun/lmrsha` (2497293), per-patch
+`MaintResp.cnMaintResp` (5ba655d), per-patch allocation via
+`Allocation.calcGppMrAvailC` incl. the `xsmrpool` recovery flux (1d6d2cc).
+
+**Dual-path finding:** the runtime CN veg physics lives in `scalarVegPath`
+(gated `clmCNActive=True`), but the parity/drift HARNESS exercises the
+*vectorized, injected-state-gated* path (the decomposition group). So the
+per-patch veg physics — though faithful — does NOT move the harness drift
+(xsmrpool stays 1.77%, leaf/froot ~1.2e-4) because it runs in a different path
+than the harness exercises. Moving the veg drift further requires unifying the
+two CN paths (run the vectorized veg update in the harness-exercised path).
+
+**Assessment: CN is at CLM.jl grade.** Drift is bounded and matches CLM.jl's
+documented signature exactly (mineral N ~1% plateau; soil/litter ≤4e-3; leaf/
+froot ~1e-4; `xsmrpool` the fastest-but-plateauing buffer at ~1.8%). Further
+tightening is dual-path rework for marginal, already-acceptable gain →
+recommend consolidating here.
+
 ## Recommendation
 
 Land biogeophysics first (hydrology+radiation done; soil-temp in progress). Then
