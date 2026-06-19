@@ -109,6 +109,47 @@ Fortran single-step parity.
 Reusable diagnostic: `scripts/dump_canopy_steps.jl` (run from the CLM.jl project) dumps
 Julia per-patch SH/LH/ustar/ram1/t_veg/sabv/longwave for the first N steps.
 
+## Fortran reference run (the authoritative adjudication)
+
+The built Fortran CTSM (`installs/clm/bin/cesm.exe`) produced a full-2003 Bow daily
+history (`clm_parity_run/...clm2.h0.2003-...nc`). Extracted Fortran **winter** gridcell
+daily fluxes (Jan 2003, W/m²):
+
+| day | FSH (total SH) | FSH_V (veg) | FSH_G (ground) | EFLX_LH_TOT | TG |
+|----:|---------------:|------------:|---------------:|------------:|-----:|
+| 1   | −3.4 | −4.4 | +1.0 | −0.44 | 258.2 |
+| 2   | −6.0 | −9.0 | +3.0 | −1.12 | 256.0 |
+| 4   | −10.8| −6.2 | −4.7 | −2.06 | 263.8 |
+| 8   | −12.0| −11.7| −0.3 | −2.27 | 261.6 |
+
+**Fortran winter sensible heat is small and often negative; ground SH FSH_G is small
+(mean ≈ −0.3); LH is small and negative (mean ≈ −1.3).** Two robust findings (Julia run
+on 2003 via `scripts/compare_fortran_winter.jl`, Haskell on 2003 via `--pipeline`):
+
+1. **The test's Julia reference is not Fortran-faithful.** The reference CSV reports the
+   bare-soil patch (`eflx_sh_tot_patch[1]` ≈ 43 in 2002), but Fortran's actual gridcell
+   winter SH is ≈ −6. Julia's *gridcell* ground SH over-produces vs Fortran (+7 vs ≈ 0).
+2. **Haskell over-produces winter LH vs Fortran** (Fortran ≈ −0.4, Haskell ≈ +6.5 early
+   days) — a real residual beyond the qbot fix, though partly confounded by the cold-start
+   snow state.
+
+**Caveat / why this is not yet a clean verdict:** all three runs use different initial
+conditions (Fortran from a multi-year spinup restart; Julia and Haskell from independent
+cold starts), so absolute daily values diverge from day 1 (TG day-1: Fortran 258 vs
+ports 263). The IC mismatch confounds an exact "which port is right" call. A clean
+adjudication needs both ports initialized from the Fortran `clm2.r.2003-01-01` restart.
+The authoritative *matched-state, per-patch* Fortran parity exists only for SUMMER
+(pdumps n11881+, n13461), where Haskell already passes.
+
+**Mechanism of the IC confound (important):** Fortran's spun-up winter ground sits ~5 K
+colder than the cold-started ports (TG 258 vs ~263). Saturation specific humidity over
+ice drops steeply with temperature — ~0.0013 kg/kg at 258 K vs ~0.0024 at 265 K — so the
+colder Fortran ground intrinsically yields a much smaller `qg − forc_q` gradient and
+hence far less sublimation. The ports' apparent winter-LH "over-production" is therefore
+**substantially driven by the warm cold-start ground temperature**, not purely a flux-
+physics bug. This is why the matched-IC (Fortran-restart) initialization is the necessary
+next step before attributing any residual winter LH to a Haskell physics error.
+
 ## Important framing: which port is right is not established
 
 The Haskell biogeophysics has **authoritative single-step Fortran parity at two
