@@ -37,7 +37,7 @@ import qualified Data.Vector.Unboxed as VU
 import System.Directory (doesDirectoryExist)
 import System.FilePath ((</>))
 
-import CLM.Constants.PhysicalConstants (tfrz, rair, cpair)
+import CLM.Constants.PhysicalConstants (tfrz, rair)
 import CLM.Infrastructure.BinaryIO (readFloat64Vector)
 import CLM.Infrastructure.NetCDF
   ( NcFile, ncOpen, ncClose, ncHasVar, ncReadDouble1D )
@@ -143,10 +143,16 @@ computeVaporPressureFromRH rhPct tbot =
   in rh * esat
 
 -- | Compute potential temperature.
--- th = T * (100000 / pbot) ^ (Rd / cp)
+--
+-- The Fortran datm for this observed single-point forcing delivers
+-- @forc_th = forc_t@ (@Sa_ptem == TBOT@; no reference-pressure adjustment),
+-- so thv/thvstar in the surface layer match the reference. Applying the
+-- textbook @(100000/pbot)^kappa@ factor here (pbot≈79000 Pa at Bow's altitude)
+-- inflated forc_th/thv by ~7% (307 vs 287 K) and biased the Monin-Obukhov
+-- stability solve — corrupting under-canopy ground sensible heat at peak sun.
+-- Matches the Julia reference (forcing_reader.jl): forc_th = forc_t.
 computePotentialTemperature :: Double -> Double -> Double
-computePotentialTemperature tbot pbot =
-  tbot * (100000.0 / pbot) ** (rair / cpair)
+computePotentialTemperature tbot _pbot = tbot
 
 -- | Compute air density from equation of state.
 -- rho = (p - 0.378 * e) / (Rd * T)

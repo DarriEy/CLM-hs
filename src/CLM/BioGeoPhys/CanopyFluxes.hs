@@ -201,11 +201,19 @@ moninObukIni :: Double  -- ^ zetamaxstable (max stable zeta)
              -> Double  -- ^ z0m (roughness length for momentum) [m]
              -> (Double, Double)  -- ^ (um, obu)
 moninObukIni zetamaxstable ur thv dthv zldis z0m =
-  let wc2  = if dthv >= 0.0  -- stable
-             then 0.0
-             else beta_canopy * (negate grav * ur * dthv * zii_canopy / thv) ** (2.0/3.0 :: Double)
-      rib  = grav * zldis * dthv / (thv * ur * ur)
-      um   = sqrt (ur * ur + wc2)
+  -- Faithful port of Fortran MoninObukIni (FrictionVelocityMod.F90) and the
+  -- Julia reference (canopy_fluxes.jl monin_obuk_ini): the initial convective
+  -- velocity is the FIXED constant wc = 0.5 (NOT the Sakaguchi/Zeng convective
+  -- velocity scale), and the bulk Richardson number uses the resulting @um@ in
+  -- its denominator — not @ur@. Using the full convective formula here inflated
+  -- um0 (~5.3 vs 1.12) and pushed the leaf-temperature / Monin-Obukhov solve
+  -- into the wrong stability basin (ustar too low, rah_above too high, under-
+  -- canopy ground sensible heat sign-flipped at peak sun).
+  let wc   = 0.5 :: Double
+      um   = if dthv >= 0.0          -- neutral or stable
+             then max ur 0.1
+             else sqrt (ur * ur + wc * wc)
+      rib  = grav * zldis * dthv / (thv * um * um)
       -- Initial Obukhov length from Richardson number
       zeta | rib >= 0.0  = rib * log (zldis / z0m) / (1.0 - 5.0 * min rib 0.19)
            | otherwise   = rib * log (zldis / z0m)

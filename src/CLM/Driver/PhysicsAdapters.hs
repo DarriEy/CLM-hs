@@ -771,10 +771,25 @@ canopyFluxesStep _cfg ctx st =
             let elai = safeIdx (cstate_elai_patch cs) p
                 esai = safeIdx (cstate_esai_patch cs) p
                 htop = max 0.1 (safeIdx (cstate_htop_patch cs) p)
+                -- Per-PFT roughness/displacement ratios (clm5_params.nc z0mr,
+                -- displar). These differ markedly by PFT: the needleleaf tree
+                -- (pft 1) uses z0mr=0.055/displar=0.67, but the C3 grass (pft 12)
+                -- uses z0mr=0.12/displar=0.68. A pft-independent 0.055 fallback
+                -- under-rougheded the short grass canopy (z0mv 0.0275 vs 0.06),
+                -- biasing ustar low / rah_above high in the Monin-Obukhov solve
+                -- and flipping the sign of under-canopy ground sensible heat at
+                -- peak sun. Key off the patch PFT type when the surface dataset
+                -- value is absent. (Bow column patches: 0=bare, 1=NET tree,
+                -- 2=C3 grass.)
+                ivt = if p < VU.length (clmPatchIvt st)
+                      then clmPatchIvt st VU.! p else (-1)
+                (z0mrPft, displarPft)
+                  | ivt == 12 = (0.12,  0.68)   -- C3 grass
+                  | otherwise = (0.055, 0.67)   -- needleleaf tree / default
                 z0mr = safeIdx (cstate_z0m_patch cs) p
-                z0mv = if z0mr > 0.0 then z0mr else 0.055 * htop
+                z0mv = if z0mr > 0.0 then z0mr else z0mrPft * htop
                 displa = safeIdx (cstate_displa_patch cs) p
-                displa' = if displa > 0.0 then displa else 0.67 * htop
+                displa' = if displa > 0.0 then displa else displarPft * htop
                 vai = elai + esai
                 emv = 1.0 - exp (negate vai / avmuir)
                 canopy_transmit = exp (-0.5 * vai)
