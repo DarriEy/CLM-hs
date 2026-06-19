@@ -496,7 +496,9 @@ baregroundFluxesStep _cfg ctx st =
         , bgi_qg_h2osfc      = qg_h2osfc
         , bgi_dqgdT          = dqgdT
         , bgi_thv            = thv
-        , bgi_beta           = soilbeta'
+          -- Fortran beta_col = 1.0 (coefficient of convective velocity);
+          -- this is distinct from soilbeta (soil evaporation factor below).
+        , bgi_beta           = 1.0
         , bgi_zii            = zii col
         , bgi_t_h2osfc       = t_h2osfc
         , bgi_t_soisno_top   = t_top

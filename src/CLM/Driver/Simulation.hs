@@ -433,7 +433,9 @@ stepSimulation !st nstep dtime =
         , bgi_qg_h2osfc      = qg_h2osfc
         , bgi_dqgdT          = dqgdT
         , bgi_thv            = thv
-        , bgi_beta           = soilbeta
+          -- Fortran beta_col = 1.0 (coefficient of convective velocity),
+          -- distinct from soilbeta (soil evaporation factor, bgi_soilbeta).
+        , bgi_beta           = 1.0
         , bgi_zii            = 1000.0
         , bgi_t_h2osfc       = ss_t_h2osfc st
         , bgi_t_soisno_top   = t_top
