@@ -107,4 +107,18 @@ canopy-turbulence-closure parity effort, distinct from the completed authoritati
 Fortran single-step parity.
 
 Reusable diagnostic: `scripts/dump_canopy_steps.jl` (run from the CLM.jl project) dumps
-Julia per-patch SH/LH/ustar/ram1/t_veg for the first N steps.
+Julia per-patch SH/LH/ustar/ram1/t_veg/sabv/longwave for the first N steps.
+
+## Important framing: which port is right is not established
+
+The Haskell biogeophysics has **authoritative single-step Fortran parity at two
+independent cases** — the low-sun baseline and the 2003 peak-sun case, the latter
+including a vegetated (C3-grass) canopy whose under-canopy ground sensible heat was
+explicitly validated against the Fortran dump (commit `d5f7bd8`). So this winter
+night-time **tree-canopy** convective regime (coszen 0, warm ground driving free
+convection through a 17 m needleleaf canopy) is simply not covered by a Fortran dump.
+Haskell and Julia are two independent ports that converge to different self-consistent
+canopy-turbulence basins here; it is **not demonstrated that Haskell deviates from
+Fortran** — only that it deviates from Julia. Definitively resolving the residual would
+require a Fortran reference run for this exact Bow winter case, not just a Julia diff.
+The authoritative parity target (Fortran, the system of record) is met.
