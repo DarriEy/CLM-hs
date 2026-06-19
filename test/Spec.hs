@@ -68,6 +68,7 @@ import CLM.Calibration.SiteCalibration
   , CalibrationConfig(..), defaultCalibConfig, calibrateSiteCLM )
 import CLM.Calibration.FortranParity
   ( bgcDumpDir, bgcSteps, dumpPath, baselineReport, identityReport, driftReport
+  , generalityReport, spDumpDir, bowForcingFile2003
   , FieldDiff(..) )
 import Numeric.AD (grad)
 
@@ -1298,4 +1299,20 @@ main = hspec $ do
           not (null rows) `shouldBe` True
           let allVals = concatMap (\(_,_,ser) -> ser) rows
           all (\x -> not (isNaN x) && not (isInfinite x)) allVals
+            `shouldBe` True
+
+  -- =====================================================================
+  -- Generality: a SECOND, independent case (clm_parity_run, 2003 forcing,
+  -- peak-sun daytime n13461) to confirm the parity is not overfit to the
+  -- BGC summer window. Measurement-only (per-field PASS/FAIL printed).
+  -- =====================================================================
+  describe "Fortran parity generality (2003 peak-sun n13461, gated)" $ do
+    it "biogeophysics parity holds at a different case (2003, coszen~0.87)" $ do
+      have <- doesFileExist (dumpPath spDumpDir "before_step" 13461)
+      if not have
+        then pendingWith "clm_parity_run dumps not present on this machine"
+        else do
+          diffs <- generalityReport "test/data" bowForcingFile2003 spDumpDir 13461
+          not (null diffs) `shouldBe` True
+          all (\fd -> not (isNaN (fdAbs fd)) && not (isInfinite (fdAbs fd))) diffs
             `shouldBe` True

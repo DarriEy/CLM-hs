@@ -26,12 +26,15 @@ module CLM.Calibration.FortranParity
   ( -- * Reference data
     bgcDumpDir
   , bowForcingFile
+  , bowForcingFile2003
+  , spDumpDir
   , bgcSteps
   , dumpPath
   , boundaries
     -- * Harness
   , ParityHarness(..)
   , initParityHarness
+  , initParityHarnessWith
   , injectBeforeStep
   , contextForStep
   , runOneStepBoundaries
@@ -47,6 +50,7 @@ module CLM.Calibration.FortranParity
   , identityReport
   , baselineReport
   , driftReport
+  , generalityReport
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -105,6 +109,17 @@ bgcDumpDir =
 bowForcingFile :: FilePath
 bowForcingFile =
   "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2002.nc"
+
+-- | Real-year 2003 Bow forcing, used by the clm_parity_run generality case.
+bowForcingFile2003 :: FilePath
+bowForcingFile2003 =
+  "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped/data/forcing/CLM_input/clmforc.2003.nc"
+
+-- | A SECOND, independent reference case for generality (not the BGC spinup):
+-- the clm_parity_run dumps (2003 forcing). n13461 is 2003-07-15 at coszen≈0.87
+-- (local solar noon, PEAK sun) — a very different radiation/flux regime.
+spDumpDir :: FilePath
+spDumpDir = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run"
 
 -- | The 28 contiguous summer timesteps that were instrumented.
 bgcSteps :: [Int]
@@ -165,9 +180,9 @@ dayOfYear m d = (cumDaysNoLeap !! (max 0 (min 11 (m - 1)))) + d
 -- search a small window around the nominal index and pick the record whose
 -- TBOT best matches the dump's exact forcing temperature, then read the
 -- (undumped) shortwave/wind/humidity from that aligned record.
-readForcingCalibrated :: Int -> Double -> IO (Maybe (Double, Double, Double))
-readForcingCalibrated idx0 targetT = do
-  r <- ncOpen bowForcingFile
+readForcingCalibrated :: FilePath -> Int -> Double -> IO (Maybe (Double, Double, Double))
+readForcingCalibrated forcingFile idx0 targetT = do
+  r <- ncOpen forcingFile
   case r of
     Left _   -> return Nothing
     Right nc -> do
@@ -245,15 +260,22 @@ solarSwScale lat lon declin dtime tInst coszInst
 
 -- | Static structure shared across all injected steps.
 data ParityHarness = ParityHarness
-  { phBase :: !CLMState                 -- ^ Bow structure + statics (test/data)
-  , phAlb  :: !SurfaceAlbedoConstants   -- ^ Albedo tables for the wired pipeline
+  { phBase    :: !CLMState                 -- ^ Bow structure + statics (test/data)
+  , phAlb     :: !SurfaceAlbedoConstants   -- ^ Albedo tables for the wired pipeline
+  , phForcing :: !FilePath                 -- ^ Atmospheric forcing file (sw/wind/q)
   }
 
--- | Build the static structure once from the test/data Bow cold-start.
+-- | Build the static structure once from the test/data Bow cold-start, using
+-- the default (2002-cycle) Bow forcing file.
 initParityHarness :: FilePath -> IO ParityHarness
-initParityHarness testDataDir = do
+initParityHarness testDataDir = initParityHarnessWith testDataDir bowForcingFile
+
+-- | As 'initParityHarness' but with an explicit forcing file — used to validate
+-- generality against a different case/year (e.g. the 2003 clm_parity_run dumps).
+initParityHarnessWith :: FilePath -> FilePath -> IO ParityHarness
+initParityHarnessWith testDataDir forcingFile = do
   (st, _forcing, alb) <- initCLMStateFromDir testDataDir
-  return (ParityHarness st alb)
+  return (ParityHarness st alb forcingFile)
 
 -- | Overlay only the first @length new@ entries of a base vector.
 overlayFirst :: VU.Vector Double -> VU.Vector Double -> VU.Vector Double
@@ -563,7 +585,7 @@ contextForStep h path = do
       (declin, _eccf) = computeOrbital defaultOrbitalParams calday
       dtime  = if stepSec > 0 then stepSec else 1800.0
 
-  mfrc <- readForcingCalibrated idx forc_t
+  mfrc <- readForcingCalibrated (phForcing h) idx forc_t
   let (fsdsAvg, wind, forc_q) = case mfrc of
         Just (s, w, q) -> (s, w, q)
         Nothing        -> (0.0, 2.0, 0.005)   -- forcing file absent
@@ -853,6 +875,25 @@ baselineReport testDataDir = do
                     (fdName fd) (fdBoundary fd) (fdAbs fd) (fdRel fd) (fdTol fd)
                     (if fdPass fd then "PASS" else "FAIL"))
       return agg
+
+-- | Generality check: validate the harness at a DIFFERENT case (clm_parity_run,
+-- 2003 forcing, peak-sun daytime) to confirm parity is not overfit to the BGC
+-- summer window. Injects the given before_step, runs one boundary step, and
+-- diffs every registry field at its boundary; prints + returns the diffs.
+generalityReport :: FilePath -> FilePath -> FilePath -> Int -> IO [FieldDiff]
+generalityReport testDataDir forcingFile dumpDir nstep = do
+  h   <- initParityHarnessWith testDataDir forcingFile
+  inj <- injectBeforeStep h (dumpPath dumpDir "before_step" nstep)
+  let snaps = runOneStepBoundaries h inj
+  diffs <- compareToDumps snaps dumpDir nstep
+  putStrLn ""
+  printf "=== Generality parity — %s n%d ===\n" dumpDir nstep
+  putStrLn (printf "%-12s %-26s %12s %12s %10s  %s" "field" "boundary" "absdiff" "reldiff" "tol" "result")
+  forM_ diffs $ \fd ->
+    putStrLn (printf "%-12s %-26s %12.4e %12.4e %10.2e  %s"
+                (fdName fd) (fdBoundary fd) (fdAbs fd) (fdRel fd) (fdTol fd)
+                (if fdPass fd then "PASS" else "FAIL"))
+  return diffs
 
 -- | Worst (max abs, max rel) per field name across all comparisons.
 aggregate :: [FieldDiff] -> [FieldDiff]
