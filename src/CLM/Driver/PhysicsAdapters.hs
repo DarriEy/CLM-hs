@@ -3250,8 +3250,10 @@ perPatchAllocationOverlay dt st =
             }
           gmOut = Alloc.calcGppMrAvailC gmInp
 
-          fpgP = clmFPG st
-          allocP p =
+          -- Allocation for a patch at a given N down-regulation factor.
+          -- (CNAllocationMod: availc is scaled by fpg; the allometric split and
+          -- plant_ndemand fall out of that scaled availc.)
+          allocAt downreg p =
             let iv = ivt VU.! p + 1
             in Alloc.calcAllocation Alloc.AllocInput
                  { Alloc.ali_availc     = Alloc.gmo_availc gmOut VU.! p
@@ -3266,8 +3268,51 @@ perPatchAllocationOverlay dt st =
                  , Alloc.ali_livewdcn   = Alloc.pfa_livewdcn pftcon VU.! iv
                  , Alloc.ali_deadwdcn   = Alloc.pfa_deadwdcn pftcon VU.! iv
                  , Alloc.ali_grperc     = Alloc.pfa_grperc pftcon VU.! iv
-                 , Alloc.ali_downreg    = fpgP
+                 , Alloc.ali_downreg    = downreg
                  }
+
+          -- ------------------------------------------------------------------
+          -- Per-patch N limitation (FPG). CNAllocationMod / NutrientCompetition:
+          --   * each patch has a *potential* plant N demand = N needed to build
+          --     the C it would allocate at full potential growth (downreg = 1).
+          --   * the soil mineral N pool (sminn) and the decomposer immobilization
+          --     demand are column-level; plants and decomposers compete for the
+          --     same pool. fpg = min(1, supply / total_demand) is therefore a
+          --     column property shared by all patches on the column.
+          --   * we scale every patch's allocation by this fpg, so unused C
+          --     (the (1-fpg) fraction) stays in cpool (it is never added to the
+          --     C pools), matching the Fortran down-regulation of growth.
+          -- ------------------------------------------------------------------
+          potAlloc p = allocAt 1.0 p     -- potential (un-limited) allocation
+          -- Column potential plant N demand: sum over active patches of the N
+          -- required to build the potentially-allocated C (gN/m2/s).
+          plantNDemand =
+            sum [ Alloc.alo_plant_ndemand (potAlloc p)
+                | p <- [0 .. np - 1], maskP VU.! p ]
+          -- Decomposer immobilization demand from the vectorized N cycle, if the
+          -- harness injected it: negative net_nmin = net immobilization (a sink
+          -- on sminn that competes with plants). Integrate the per-layer flux
+          -- (gN/m3/s) over the soil layers' thickness; absent that state, 0.
+          netNminVr = sbgcnf_net_nmin_vr_col (clmSoilBGCNFlux st)
+          decompNDemand
+            | VU.null netNminVr = 0.0
+            | otherwise =
+                max 0.0 $ sum
+                  [ negate (netNminVr VU.! j) * dzj
+                  | j <- [0 .. VU.length netNminVr - 1]
+                  , let d = soilLayer (colDz (clmColumn st)) j
+                        dzj = if d > 0.0 then d else 0.025 ]
+          -- Available mineral N is the column scalar sminn (gN/m2).
+          nCompOut = NComp.calcNCompetition NComp.NCompetitionInput
+            { NComp.nci_plant_ndemand     = plantNDemand
+            , NComp.nci_decomp_ndemand    = decompNDemand
+            , NComp.nci_sminn             = clmSMINN st
+            , NComp.nci_dt                = dt
+            , NComp.nci_use_nitrif_denitrif = False
+            }
+          fpgP = NComp.nco_fpg nCompOut
+
+          allocP p = allocAt fpgP p
           allocs = [ if maskP VU.! p then Just (allocP p) else Nothing
                    | p <- [0 .. np - 1] ]
 
