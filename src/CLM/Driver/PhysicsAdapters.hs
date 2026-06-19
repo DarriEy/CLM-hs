@@ -1117,6 +1117,7 @@ data HeatSourceTerms = HeatSourceTerms
   , hst_hs_soil  :: !Double
   , hst_hs_h2osfc :: !Double
   , hst_sabg_lyr  :: !(VU.Vector Double)
+  , hst_eflx_gnet_patch :: !(VU.Vector Double) -- ^ per-patch net ground flux [W/m2]
   } deriving (Show)
 
 computeHeatSourceTerms
@@ -1161,12 +1162,22 @@ computeHeatSourceTerms t_grnd emg forc_lwrad htvp snl t_soisno t_h2osfc
       (hs_total, dhsdT_total, hs_soil_total, hs_h2osfc_total, sabg_lyr_total) =
         foldl accum (0.0, 0.0, 0.0, 0.0, zero_sabg) patches
 
+      -- Per-patch net ground heat flux (our EFLX_GNET), same expression as
+      -- eflx_gnet_top in accum, kept per patch for parity diff vs EFLX_GNET_P.
+      eflxGnetVec = VU.fromList
+        [ (sabg_lyr_p VU.! 0) + emg * forc_lwrad - lwrad_emit
+          - (eflx_sh_grnd + qflx_evap_soi * htvp)
+        | (_wt, _sabg, _sabg_soil, _sabg_snow, _dlrad, _cgrnd,
+           eflx_sh_grnd, _eflx_sh_snow, _eflx_sh_soil, _eflx_sh_h2osfc,
+           qflx_evap_soi, sabg_lyr_p) <- patches ]
+
   in HeatSourceTerms
     { hst_hs_top    = hs_total
     , hst_dhsdT     = dhsdT_total
     , hst_hs_soil   = hs_soil_total
     , hst_hs_h2osfc = hs_h2osfc_total
     , hst_sabg_lyr  = sabg_lyr_total
+    , hst_eflx_gnet_patch = eflxGnetVec
     }
 
 soilTemperatureFullStep :: PhysicsStep
@@ -1270,6 +1281,9 @@ soilTemperatureFullStep _cfg ctx st =
       sabgTop = sum [ patchWt p * safeVec sabgVec (sabg_patch ef) p
                     | p <- [0 .. patchCount - 1] ]
       sabg_lyr = VU.generate nlyr_sabg (\j -> if j == 0 then sabgTop else 0.0)
+      -- Per-patch net ground heat flux (our EFLX_GNET) for parity diff vs the
+      -- dumped EFLX_GNET_P (localizes the high-flux T_GRND residual).
+      eflxGnetVec = VU.generate patchCount (\p -> heatFor lwrad_emit p)
       hs_top = finiteClamp hs_top_raw
       hs_soil = finiteClamp hs_soil_raw
       hs_h2osfc = finiteClamp hs_h2osfc_raw
@@ -1330,6 +1344,7 @@ soilTemperatureFullStep _cfg ctx st =
 
   in st { clmTemp = temp'
         , clmWaterState = ws'
+        , clmEnergyFlux = ef { eflx_gnet_patch_vec = eflxGnetVec }
         }
 
 -- ============================================================================

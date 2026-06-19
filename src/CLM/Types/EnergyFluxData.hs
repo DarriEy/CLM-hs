@@ -26,6 +26,7 @@ data EnergyFluxData = EnergyFluxData
   , eflx_sh_tot_patch_vec  :: !(VU.Vector Double)  -- ^ Patch total sensible heat fluxes [W/m²]
   , eflx_lh_tot_patch_vec  :: !(VU.Vector Double)  -- ^ Patch latent heat fluxes [W/m²]
   , eflx_sh_grnd_patch_vec :: !(VU.Vector Double)  -- ^ Patch ground sensible heat fluxes [W/m²]
+  , eflx_gnet_patch_vec    :: !(VU.Vector Double)  -- ^ Patch net ground heat flux (EFLX_GNET) [W/m²]
   , sabv_patch_vec         :: !(VU.Vector Double)  -- ^ Patch solar absorbed by vegetation [W/m²]
   , sabg_patch_vec         :: !(VU.Vector Double)  -- ^ Patch solar absorbed by ground [W/m²]
   , fsa_patch_vec          :: !(VU.Vector Double)  -- ^ Patch total absorbed solar radiation [W/m²]
@@ -57,6 +58,7 @@ defaultEnergyFluxData = EnergyFluxData
   , eflx_sh_tot_patch_vec  = VU.empty
   , eflx_lh_tot_patch_vec  = VU.empty
   , eflx_sh_grnd_patch_vec = VU.empty
+  , eflx_gnet_patch_vec    = VU.empty
   , sabv_patch_vec         = VU.empty
   , sabg_patch_vec         = VU.empty
   , fsa_patch_vec          = VU.empty

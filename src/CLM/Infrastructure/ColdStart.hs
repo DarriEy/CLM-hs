@@ -589,6 +589,7 @@ initEnergyFluxes = EnergyFluxData
   , eflx_sh_tot_patch_vec  = VU.empty
   , eflx_lh_tot_patch_vec  = VU.empty
   , eflx_sh_grnd_patch_vec = VU.empty
+  , eflx_gnet_patch_vec    = VU.empty
   , sabv_patch_vec         = VU.empty
   , sabg_patch_vec         = VU.empty
   , fsa_patch_vec          = VU.empty
