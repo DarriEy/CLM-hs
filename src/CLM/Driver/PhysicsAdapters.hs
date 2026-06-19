@@ -3058,7 +3058,20 @@ lakeTemperatureStep _cfg ctx st =
 cnPreDrainageStep :: PhysicsStep
 cnPreDrainageStep _cfg ctx st0 =
   let !dt = tcDtime ctx
-      st  = if clmCNActive st0 then scalarVegPath dt st0 else st0
+      -- Runtime path: clmCNActive=True runs the full scalar veg-pool path
+      -- (which itself runs perPatchAllocationOverlay first).
+      --
+      -- Harness path: clmCNActive=False but the harness injects vectorized veg
+      -- state (clmCNVegCState / clmCNVegNState non-empty). In that case run the
+      -- per-patch veg update (computePerPatchMaintResp + perPatchAllocationOverlay,
+      -- which advances the per-patch leafc/frootc/livestemc/cpool/xsmrpool on
+      -- clmCNVegCState) so the drift harness reflects the per-patch veg physics.
+      -- Gated on injected vectorized veg state, mirroring how the vectorized
+      -- decomposition path is gated on injected decomp state — independent of
+      -- clmCNActive.
+      st  | clmCNActive st0          = scalarVegPath dt st0
+          | hasVectorizedVeg st0     = perPatchAllocationOverlay dt st0
+          | otherwise                = st0
   in if hasVectorizedDecomp st
        then runVectorizedNCycle dt st
        else st
@@ -3266,8 +3279,25 @@ perPatchAllocationOverlay dt st =
                    Nothing -> cur
                    Just a  -> max 0.0 (cur + fluxSel a * dt)
 
-          leafc'  = update (cnvcs_leafc_patch cstate)     Alloc.alo_cpool_to_leafc
-          frootc' = update (cnvcs_frootc_patch cstate)    Alloc.alo_cpool_to_frootc
+          -- Per-patch background litterfall turnover (Phen.backgroundLitterfall,
+          -- leaf_long=2yr, matching the scalar path). Without this offsetting
+          -- loss the per-patch leafc/frootc grow monotonically under allocation,
+          -- so include it so the pools stay tightly bounded around equilibrium.
+          -- backgroundLitterfall returns leafc*bglfr*dt for the first arg, so
+          -- the per-pool loss is just the pool's own background litter flux.
+          leaf_long = 2.0
+          updateWithLitter old fluxSel =
+            VU.generate np $ \p ->
+              let cur = getV old p
+              in case allocs !! p of
+                   Nothing -> cur
+                   Just a  ->
+                     let (lit, _) = Phen.backgroundLitterfall leaf_long cur 0.0 dt
+                     in max 0.0 (cur + fluxSel a * dt - lit)
+
+          -- leafc / frootc: allocation gain minus background litterfall loss.
+          leafc'  = updateWithLitter (cnvcs_leafc_patch cstate)  Alloc.alo_cpool_to_leafc
+          frootc' = updateWithLitter (cnvcs_frootc_patch cstate) Alloc.alo_cpool_to_frootc
           stemc'  = update (cnvcs_livestemc_patch cstate) Alloc.alo_cpool_to_livestemc
 
           -- xsmrpool: recovery flux adds back toward zero (cpool_to_xsmrpool =
@@ -3498,6 +3528,16 @@ hasVectorizedDecomp :: CLMState -> Bool
 hasVectorizedDecomp st =
   clmNlevDecomp st > 0 && clmNDecompPools st > 0
     && not (VU.null (sbgccs_decomp_cpools_vr_col (clmSoilBGCCState st)))
+
+-- | True when the harness has injected vectorized per-patch veg C/N state.
+-- Mirrors 'hasVectorizedDecomp': checks that the per-patch veg carbon and
+-- nitrogen pools (leafc / frootn) were injected, so the per-patch veg update
+-- (computePerPatchMaintResp + perPatchAllocationOverlay) can run in the
+-- harness-exercised path independent of 'clmCNActive'.
+hasVectorizedVeg :: CLMState -> Bool
+hasVectorizedVeg st =
+  not (VU.null (cnvcs_leafc_patch (clmCNVegCState st)))
+    && not (VU.null (NState.cnvns_frootn_patch (clmCNVegNState st)))
 
 -- | Number of CENTURY-BGC cascade transitions for the non-FATES 7-pool cascade.
 -- (initDecompCascadeBGC returns 10: 8 SOM/litter + 2 CWD-fragmentation.)
