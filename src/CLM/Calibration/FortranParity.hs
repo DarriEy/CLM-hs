@@ -727,6 +727,7 @@ registry =
   , ("SABV_P",     Patch, AfterCanopyFluxes,      \s -> VU.toList (sabv_patch_vec (clmEnergyFlux s)),  5.0)
   , ("SABG_P",     Patch, AfterCanopyFluxes,      \s -> VU.toList (sabg_patch_vec (clmEnergyFlux s)),  5.0)
   , ("EFLX_GNET_P",Patch, AfterSoilTemperature,   \s -> VU.toList (eflx_gnet_patch_vec (clmEnergyFlux s)), 6.0)
+  , ("EFLX_SHG_P", Patch, AfterCanopyFluxes,      \s -> VU.toList (eflx_sh_grnd_patch_vec (clmEnergyFlux s)), 5.0)
   , ("H2OSOI_LIQ", Col2d, AfterHydrologyNoDrain,  \s -> VU.toList (h2osoi_liq_col (clmWaterState s)),  0.05)
   , ("H2OSOI_ICE", Col2d, AfterHydrologyNoDrain,  \s -> VU.toList (h2osoi_ice_col (clmWaterState s)),  0.05)
   , ("H2OSFC",     Col1d, AfterHydrologyNoDrain,  \s -> [h2osfc_col (clmWaterState s)],                1.0e-3)
