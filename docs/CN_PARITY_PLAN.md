@@ -137,6 +137,26 @@ froot ~1e-4; `xsmrpool` the fastest-but-plateauing buffer at ~1.8%). Further
 tightening is dual-path rework for marginal, already-acceptable gain →
 recommend consolidating here.
 
+## Equilibrium fix — CN at CLM.jl grade (2026-06-19, merged to main 2073cc6)
+
+Chasing the leafc/frootc overshoot revealed the cause via the Fortran dump: in
+the non-onset season, new photosynthate is routed to the STORAGE pools
+(`leafc_storage`/`frootc_storage` grow) while DISPLAY pools (`leafc`/`frootc`)
+stay ~static (litterfall only). The per-patch overlay was routing allocation to
+display → 3.7%/1.3% drift. Fix: route `cpool_to_{leaf,froot}c` into the storage
+pools; display loses only background litterfall.
+
+Result (free-running 28-step drift, all bounded):
+- leafc 3.75% → **0.15%**, frootc 1.30% → **0.17%** (near CLM.jl <0.1%)
+- xsmrpool 1.66% (CLM.jl fastest-buffer regime), sminn_vr ~0.85%, soil/litter tiny
+- biogeophysics 12 fields still PASS, identity 0, suite at 4 pre-existing failures
+
+CN is now at CLM.jl grade: vectorized state, decomposition/N-cycling validated,
+per-patch veg physics (MaintResp/Allocation/FPG) running in the harness path,
+and the allocation↔storage equilibrium captured. Remaining nuance (for future):
+exact per-PFT fcur display/storage split + phenology onset/offset transfer (here
+fcur≈0 captures the dominant non-onset behavior).
+
 ## Recommendation
 
 Land biogeophysics first (hydrology+radiation done; soil-temp in progress). Then
