@@ -95,6 +95,9 @@ import qualified CLM.BioGeoChem.Phenology as Phen
 import qualified CLM.BioGeoChem.NutrientCompetition as NComp
 import qualified CLM.BioGeoChem.MaintResp as MR
 import qualified CLM.Types.CNVegNitrogenStateData as NState
+import CLM.Types.CNVegCarbonStateData
+  ( cnvcs_leafc_patch, cnvcs_frootc_patch, cnvcs_livestemc_patch
+  , cnvcs_cpool_patch, cnvcs_xsmrpool_patch )
 import CLM.BioGeoChem.CNDriver
   ( CNDriverConfig(..), defaultCNDriverConfig
   , CNDriverInput(..), CNDriverResult(..)
@@ -3063,19 +3066,28 @@ cnPreDrainageStep _cfg ctx st0 =
 -- | The legacy scalar veg-pool C/N path (formerly the whole 'cnPreDrainageStep').
 -- Preserved verbatim; gated on 'clmCNActive' upstream.
 scalarVegPath :: Double -> CLMState -> CLMState
-scalarVegPath dt st =
-    let !gpp = clmGPP st
+scalarVegPath dt st0 =
+    let -- Per-patch allocation overlay (xsmrpool / per-patch leafc/frootc/...).
+        -- When the canopy adapter has injected per-patch carriers we run the
+        -- faithful per-patch GPP -> MR -> availC -> allometric-allocation path
+        -- (CNAllocationMod.calc_gpp_mr_availc + the allometric split), update the
+        -- per-patch C pools on clmCNVegCState, and aggregate the column scalars
+        -- patch-weighted for backward compat. Otherwise st is unchanged here and
+        -- the column-scalar path below uses computeColumnMaintResp's fallback.
+        st = perPatchAllocationOverlay dt st0
+
+        !gpp = clmGPP st
 
         -- Step 1: Maintenance respiration (per-patch, MaintResp.cnMaintResp)
-        -- Replaces the former scalar MR (leafC*2.525e-6 + ...) with the real
-        -- per-patch kernel driven by the canopy lmr carriers and CN veg N pools,
-        -- then aggregated patch-weighted to the column scalar `mr` (gC/m2/s).
+        -- aggregated patch-weighted to the column scalar `mr` (gC/m2/s).
         !mr = computeColumnMaintResp st
 
         -- Step 2: Available C for allocation (GPP - MR)
         !availC = max 0.0 (gpp - mr)
 
-        -- Step 3: Allocation using actual Allocation module
+        -- Step 3: Allocation using actual Allocation module (column scalar, for
+        -- backward-compat column pools / N demand; per-patch pools are updated
+        -- in perPatchAllocationOverlay above).
         !allocOut = Alloc.calcAllocation Alloc.AllocInput
           { Alloc.ali_availc = availC
           , Alloc.ali_ivt = 1
@@ -3160,6 +3172,126 @@ scalarVegPath dt st =
           , clmFPG = fpg
           }
 
+-- | Per-patch allocation overlay (the xsmrpool lever).
+--
+-- Faithful port of CNAllocationMod.calc_gpp_mr_availc (gpp/availc/xsmrpool
+-- recovery) followed by the allometric C split. For each active patch:
+--
+--   * GPP   = psnsun*laisun*12.011e-6 + psnsha*laisha*12.011e-6   (gC/m2/s),
+--             the standard sun+shade leaf integration (CNAllocationMod L172-185).
+--   * leaf_mr/froot_mr come from the per-patch MaintResp kernel (already used by
+--     'computeColumnMaintResp').
+--   * availc = gpp - mr, with the negative-cpool handling and xsmrpool recovery
+--     flux  -xsmrpool/(dayscrecover*secspday)  (CNAllocationMod L206-248), all
+--     evaluated inside 'Alloc.calcGppMrAvailC'.
+--   * the resulting availc is split allometrically via 'Alloc.calcAllocation'
+--     (downregulated by clmFPG) into cpool_to_{leafc,frootc,livestemc,...}.
+--
+-- The per-patch C pools on 'clmCNVegCState' (leafc/frootc/livestemc/cpool/
+-- xsmrpool) are then advanced by these fluxes * dt. Column scalars (clmGPP etc.)
+-- are left to the column-scalar path for backward compat. When no per-patch
+-- carriers are present this is the identity.
+perPatchAllocationOverlay :: Double -> CLMState -> CLMState
+perPatchAllocationOverlay dt st =
+  case computePerPatchMaintResp st of
+    Nothing -> st
+    Just (np, maskP, ivt, mrOut, _wnorm) ->
+      let cs = clmCanopyState st
+          cstate = clmCNVegCState st
+          getV v p = if p < VU.length v then v VU.! p else 0.0
+
+          -- woody flag table (1-based; iv = ivt+1). Harness patches are
+          -- non-woody (same assumption as the MR kernel), so all-zero.
+          woodyLen = (if VU.null ivt then 0 else VU.maximum ivt) + 2
+          woodyTab = VU.replicate (max 1 woodyLen) 0.0
+
+          pftcon = Alloc.PftConAllocation
+            { Alloc.pfa_woody    = woodyTab
+            , Alloc.pfa_froot_leaf = VU.replicate (max 1 woodyLen) 1.0
+            , Alloc.pfa_croot_stem = VU.replicate (max 1 woodyLen) 1.0
+            , Alloc.pfa_stem_leaf  = VU.replicate (max 1 woodyLen) 1.5
+            , Alloc.pfa_flivewd    = VU.replicate (max 1 woodyLen) 0.5
+            , Alloc.pfa_leafcn     = VU.replicate (max 1 woodyLen) 25.0
+            , Alloc.pfa_frootcn    = VU.replicate (max 1 woodyLen) 42.0
+            , Alloc.pfa_livewdcn   = VU.replicate (max 1 woodyLen) 50.0
+            , Alloc.pfa_deadwdcn   = VU.replicate (max 1 woodyLen) 500.0
+            , Alloc.pfa_grperc     = VU.replicate (max 1 woodyLen) 0.3
+            }
+
+          pad v = VU.generate np $ \p -> getV v p
+          gmInp = Alloc.GPPMRInput
+            { Alloc.gmi_np            = np
+            , Alloc.gmi_mask          = maskP
+            , Alloc.gmi_ivt           = ivt
+            , Alloc.gmi_psnsun        = pad (cstate_psnsun_patch cs)
+            , Alloc.gmi_psnsha        = pad (cstate_psnsha_patch cs)
+            , Alloc.gmi_laisun        = pad (cstate_laisun_patch cs)
+            , Alloc.gmi_laisha        = pad (cstate_laisha_patch cs)
+            , Alloc.gmi_leaf_mr       = MR.mro_leaf_mr mrOut
+            , Alloc.gmi_froot_mr      = MR.mro_froot_mr mrOut
+            , Alloc.gmi_livestem_mr   = MR.mro_livestem_mr mrOut
+            , Alloc.gmi_livecroot_mr  = MR.mro_livecroot_mr mrOut
+            , Alloc.gmi_xsmrpool      = pad (cnvcs_xsmrpool_patch cstate)
+            , Alloc.gmi_pftcon        = pftcon
+            , Alloc.gmi_params        = Alloc.defaultAllocationParams
+            }
+          gmOut = Alloc.calcGppMrAvailC gmInp
+
+          fpgP = clmFPG st
+          allocP p =
+            let iv = ivt VU.! p + 1
+            in Alloc.calcAllocation Alloc.AllocInput
+                 { Alloc.ali_availc     = Alloc.gmo_availc gmOut VU.! p
+                 , Alloc.ali_ivt        = ivt VU.! p
+                 , Alloc.ali_woody      = Alloc.pfa_woody pftcon VU.! iv
+                 , Alloc.ali_froot_leaf = Alloc.pfa_froot_leaf pftcon VU.! iv
+                 , Alloc.ali_croot_stem = Alloc.pfa_croot_stem pftcon VU.! iv
+                 , Alloc.ali_stem_leaf  = Alloc.pfa_stem_leaf pftcon VU.! iv
+                 , Alloc.ali_flivewd    = Alloc.pfa_flivewd pftcon VU.! iv
+                 , Alloc.ali_leafcn     = Alloc.pfa_leafcn pftcon VU.! iv
+                 , Alloc.ali_frootcn    = Alloc.pfa_frootcn pftcon VU.! iv
+                 , Alloc.ali_livewdcn   = Alloc.pfa_livewdcn pftcon VU.! iv
+                 , Alloc.ali_deadwdcn   = Alloc.pfa_deadwdcn pftcon VU.! iv
+                 , Alloc.ali_grperc     = Alloc.pfa_grperc pftcon VU.! iv
+                 , Alloc.ali_downreg    = fpgP
+                 }
+          allocs = [ if maskP VU.! p then Just (allocP p) else Nothing
+                   | p <- [0 .. np - 1] ]
+
+          -- Advance a per-patch pool vector by a per-patch flux selector.
+          update old fluxSel =
+            VU.generate np $ \p ->
+              let cur = getV old p
+              in case allocs !! p of
+                   Nothing -> cur
+                   Just a  -> max 0.0 (cur + fluxSel a * dt)
+
+          leafc'  = update (cnvcs_leafc_patch cstate)     Alloc.alo_cpool_to_leafc
+          frootc' = update (cnvcs_frootc_patch cstate)    Alloc.alo_cpool_to_frootc
+          stemc'  = update (cnvcs_livestemc_patch cstate) Alloc.alo_cpool_to_livestemc
+
+          -- xsmrpool: recovery flux adds back toward zero (cpool_to_xsmrpool =
+          -- xsmrpool_recover); cpool tracks the same recovery transfer.
+          xsmr' = VU.generate np $ \p ->
+            let cur = getV (cnvcs_xsmrpool_patch cstate) p
+            in if maskP VU.! p
+                 then cur + (Alloc.gmo_xsmrpool_recover gmOut VU.! p) * dt
+                 else cur
+          cpool' = VU.generate np $ \p ->
+            let cur = getV (cnvcs_cpool_patch cstate) p
+            in if maskP VU.! p
+                 then max 0.0 (cur - (Alloc.gmo_xsmrpool_recover gmOut VU.! p) * dt)
+                 else cur
+
+          cstate' = cstate
+            { cnvcs_leafc_patch     = leafc'
+            , cnvcs_frootc_patch    = frootc'
+            , cnvcs_livestemc_patch = stemc'
+            , cnvcs_xsmrpool_patch  = xsmr'
+            , cnvcs_cpool_patch     = cpool'
+            }
+      in st { clmCNVegCState = cstate' }
+
 -- | Per-patch maintenance respiration aggregated to the single-column scalar.
 --
 -- Builds 'MR.MaintRespInput' per active patch from the canopy lmr carriers
@@ -3180,6 +3312,32 @@ scalarVegPath dt st =
 --     livecroot MR are 0 here regardless; we pass an all-zero woody table.
 computeColumnMaintResp :: CLMState -> Double
 computeColumnMaintResp st =
+  case computePerPatchMaintResp st of
+    Nothing ->
+      -- No per-patch carriers injected: legacy scalar MR fallback.
+      clmLeafC st * 2.525e-6
+        + clmFrootC st * 2.525e-6
+        + clmLiveStemC st * 2.525e-6 * 0.5
+    Just (np, _maskP, _ivt, out, wnorm) ->
+      let mrP p = (MR.mro_leaf_mr out VU.! p)
+                + (MR.mro_froot_mr out VU.! p)
+                + (MR.mro_livestem_mr out VU.! p)
+                + (MR.mro_livecroot_mr out VU.! p)
+      in sum [ (wnorm VU.! p) * mrP p | p <- [0 .. np - 1] ]
+
+-- | Per-patch maintenance respiration kernel evaluation.
+--
+-- Returns @Just (np, mask, ivt, MaintRespOutput, wnorm)@ when the canopy
+-- adapter has injected per-patch carriers (so the real per-patch MR kernel can
+-- run), or @Nothing@ when no carriers are present (caller falls back to the
+-- legacy scalar MR). @wnorm@ is the normalized patch weight per patch (sums to
+-- 1 over the column), matching how @gppAgg@ is patch-weighted in the canopy
+-- adapter. This is shared by 'computeColumnMaintResp' (scalar aggregate) and the
+-- per-patch allocation path in 'scalarVegPath'.
+computePerPatchMaintResp
+  :: CLMState
+  -> Maybe (Int, VU.Vector Bool, VU.Vector Int, MR.MaintRespOutput, VU.Vector Double)
+computePerPatchMaintResp st =
   let cs   = clmCanopyState st
       temp = clmTemp st
       ss   = clmSoilState st
@@ -3195,11 +3353,8 @@ computeColumnMaintResp st =
         , VU.length (cstate_patch_wtgcell cs)
         ]
   in if np == 0
-       -- No per-patch carriers injected: fall back to the legacy scalar MR so
-       -- behaviour is unchanged when the canopy adapter has not run.
-       then clmLeafC st * 2.525e-6
-          + clmFrootC st * 2.525e-6
-          + clmLiveStemC st * 2.525e-6 * 0.5
+       -- No per-patch carriers injected: caller falls back to scalar MR.
+       then Nothing
        else
         let nlev = max 1 nlevgrnd
             getV v p = if p < VU.length v then v VU.! p else 0.0
@@ -3264,14 +3419,11 @@ computeColumnMaintResp st =
             wt p = getV (cstate_patch_wtgcell cs) p
             wsum = let s = sum [ wt p | p <- [0 .. np - 1] ]
                    in if s > 1.0e-12 then s else 1.0
-            wnorm p = if VU.null (cstate_patch_wtgcell cs)
-                        then (if p == 0 then 1.0 else 0.0)
-                        else wt p / wsum
-            mrP p = getV (MR.mro_leaf_mr out) p
-                  + getV (MR.mro_froot_mr out) p
-                  + getV (MR.mro_livestem_mr out) p
-                  + getV (MR.mro_livecroot_mr out) p
-        in sum [ wnorm p * mrP p | p <- [0 .. np - 1] ]
+            wnormVec = VU.generate np $ \p ->
+              if VU.null (cstate_patch_wtgcell cs)
+                then (if p == 0 then 1.0 else 0.0)
+                else wt p / wsum
+        in Just (np, maskP, ivt, out, wnormVec)
 
 -- | CN biogeochemistry post-drainage step.
 -- Handles N leaching (loss of mineral N with drainage water).
