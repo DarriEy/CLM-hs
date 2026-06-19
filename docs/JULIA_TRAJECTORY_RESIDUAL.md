@@ -42,6 +42,18 @@ canopy converges to a more stable / weaker-exchange fixed point through the coup
 canopy-turbulence ↔ leaf-energy-balance ↔ convective-velocity feedback. The weaker
 under-canopy exchange also halves the ground sensible heat (SHgrnd 30.7 vs 64.7).
 
+**Ruled out (verified equal to Julia, so do not re-chase):** the reference-height /
+displacement convention. CanopyFluxes.hs:627 internally adds `z0mv + displa` to the raw
+forcing height, so `zldis = (30 + z0mv + displa) − displa = 30 + z0mv ≈ 30.9 m` for the
+tree — identical to Julia's `forc_hgt_u_patch − displa` (canopy_fluxes.jl:1016,1068).
+`z0mv` (0.935 m), `displa` (11.4 m), and the egvf scaling (egvf = 1 for the dense LAI+SAI
+= 3.5 tree) all match. The divergence is downstream, in the leaf-temperature Newton solve
+and canopy conductances (wta/wtg/wtl): Julia converges to a warmer leaf (255.2 vs 252.7 K),
+which raises `thvstar` → convective velocity `wc` 1.66 vs 0.92 → `um` 1.74 vs 1.05 →
+`ustar` 0.30 vs 0.14. Next step: instrument the per-iteration canopy state (rb, wta0,
+wtg0, wtl0, t_veg, taf, wc, um, ustar) in both ports and find the first iteration where
+they part.
+
 Secondary, lower-weight deltas: bare-ground exchange slightly too strong (ustar 0.14 vs
 0.11 → SH 161 vs 123), and bare-patch LH still ~10× high per-patch (0.05 weight, so a
 ~0.4 W/m² contribution to the gridcell mean).
