@@ -58,15 +58,18 @@ for step in 1:NSTEPS
                  mon=Dates.month(cur_dt), day=Dates.day(cur_dt),
                  photosyns=inst.photosyns)
 
-    @printf("\n=== step %d  t_grnd=%.4f forc_q=%.6g forc_t=%.4f ===\n",
-            step, temp.t_grnd_col[1], a2l.forc_q_downscaled_col[1], a2l.forc_t_downscaled_col[1])
+    sab = inst.solarabs
+    @printf("\n=== step %d  t_grnd=%.4f forc_q=%.6g forc_t=%.4f forc_lw=%.3f coszen=%.4f forc_wind=%.4f ===\n",
+            step, temp.t_grnd_col[1], a2l.forc_q_downscaled_col[1], a2l.forc_t_downscaled_col[1],
+            a2l.forc_lwrad_downscaled_col[1], inst.surfalb.coszen_col[1], a2l.forc_u_grc[1])
     @printf("  REPORTED[1]: SH_tot=%.4f  LH_tot=%.4f\n",
             ef.eflx_sh_tot_patch[1], ef.eflx_lh_tot_patch[1])
     for p in bounds.begp:bounds.endp
-        @printf("  p%d wt=%.3f SHveg=%.3f SHgrnd=%.3f SHtot=%.3f LHtot=%.4f tveg=%.3f ustar=%.4f ram1=%.3f\n",
+        @printf("  p%d wt=%.3f SHveg=%.3f SHgrnd=%.3f SHtot=%.3f LHtot=%.4f tveg=%.3f ustar=%.4f ram1=%.3f sabv=%.4f dlrad=%.3f ulrad=%.3f\n",
             p, pch.wtgcell[p], ef.eflx_sh_veg_patch[p], ef.eflx_sh_grnd_patch[p],
             ef.eflx_sh_tot_patch[p], ef.eflx_lh_tot_patch[p],
-            temp.t_veg_patch[p], fv.ustar_patch[p], fv.ram1_patch[p])
+            temp.t_veg_patch[p], fv.ustar_patch[p], fv.ram1_patch[p],
+            sab.sabv_patch[p], ef.dlrad_patch[p], ef.ulrad_patch[p])
     end
 end
 CLM.forcing_reader_close!(fr)

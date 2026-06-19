@@ -58,6 +58,46 @@ Secondary, lower-weight deltas: bare-ground exchange slightly too strong (ustar 
 0.11 → SH 161 vs 123), and bare-patch LH still ~10× high per-patch (0.05 weight, so a
 ~0.4 W/m² contribution to the gridcell mean).
 
+## Deeper localization (step-1 canopy solve, inputs vs Julia)
+
+Instrumented the tree patch's canopy inputs and outputs at step 1 and compared
+against the Julia dump. **The inputs match; the solver diverges.**
+
+| quantity        | Haskell  | Julia    |
+|-----------------|---------:|---------:|
+| t_grnd (input)  |  265.53  |  264.96  |
+| forc_lwrad      |  151.78  |  153.16  |
+| forc_u          |   0.384  |   0.352  |
+| sabv (coszen 0) |   0.0    |   0.0    |
+| z0mv / displa / htop | 0.935 / 11.39 / 17 | (same) |
+| → t_veg (out)   | **252.67** | **255.21** |
+| → ustar         | **0.143**  | **0.304**  |
+| → ram1          |   53.7   |   19.3   |
+| → SH_grnd       |   30.7   |   64.7   |
+
+From near-identical inputs the canopy converges to a 2.5 K colder leaf and half
+the friction velocity. Back-solving the convective-velocity relation gives
+`thvstar` ≈ −0.20 (Haskell) vs −0.45 (Julia): Haskell's canopy-top heat flux is
+~2× weaker, so it sits in a weaker-convection basin. The chain is
+**canopy-top ustar (0.14 vs 0.30) → lower under-canopy uaf → higher rah_below →
+SH_grnd halved (30.7 vs 64.7)**. The 2.5 K step-1 leaf seed then pushes step 2
+into a stability collapse: Haskell's ustar pins to exactly 0.06369 (ram1 246.5)
+identically across steps 2–4 despite changing t_grnd/wind — a degenerate stable
+fixed point, vs Julia's smoothly-varying ustar ≈ 0.22.
+
+**Additional ruled-out items** (verified equal between ports, do not re-chase):
+`use_biomass_heat_storage` (false in both), `use_undercanopy_stability` (false in
+both → same csoilcn branch), egvf roughness scaling, and all forcing/geometry
+inputs above. The residual is purely the coupled canopy-top Monin-Obukhov ustar
+solve and leaf-temperature Newton iteration converging to different self-consistent
+basins.
+
+**Precise next step:** instrument Julia's internal `canopy_fluxes` kernel to dump
+per-iteration `rb`, `wta0/wtg0/wtl0`, `taf`, `dth`, `zeta`, `um`, `ustar` and diff
+against the Haskell `canopyFluxesIteration` per-iteration state; find the first
+iteration where the conductances or stability term part. That requires editing the
+CLM.jl kernel (sister project), so it is a scoped task of its own.
+
 ## Why the test can't pass without deep work
 The test tolerance is 0.5 W/m² (SH/LH) — effectively exact agreement across coupled
 multi-patch winter physics between two independent ports. Closing it requires
