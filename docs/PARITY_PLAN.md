@@ -205,6 +205,24 @@ Key takeaways:
 Harness is now parameterized by forcing file + dump dir (`initParityHarnessWith`,
 `generalityReport`); gated generality test in `test/Spec.hs`.
 
+## T_GRND high-flux residual — fully localized (2026-06-19)
+
+The peak-sun T_GRND residual (0.44 K at n13461, 0.15% rel) was traced end-to-end:
+- **Absorbed solar** (SABV/SABG): correct (pass at peak sun).
+- **Heat capacity** (cv): RULED OUT by re-instrumenting the Fortran dump with a
+  `CV_C` sidecar (rebuilt cesm.exe, reran 2003 case) and injecting it — T_GRND
+  byte-identical, because our `csol`/`cv` already matches Fortran to ~0.7%.
+- **Latent** (ground LH): our `qflx_evap_grnd`≈3e-6 ≈ Fortran `EFLX_LH_P`=0. Ruled out.
+- **ROOT CAUSE — ground SENSIBLE heat flux.** Exposed per-patch `EFLX_GNET` and
+  diffed vs the dumped `EFLX_GNET_P`: off ~20 W/m². Breakdown at n13461 (bare
+  patch): our `eflx_sh_grnd`=50.3 vs Fortran `EFLX_SHG_P`=76.0 — **~26 W/m² too
+  low** → too little sensible heat shed → `EFLX_GNET` too high → ground too warm.
+  A ~10 W/m² longwave term partially offsets. The fix is in the ground
+  sensible-heat / aerodynamic-resistance computation (BaregroundFluxes /
+  CanopyFluxes ground path) at high flux — in-code, not data-limited.
+
+New harness infra: `EFLX_GNET_P` registry probe + `cv` override + cvdump reader.
+
 ## Done criteria
 All Phase-0 tolerance-table fields pass at every boundary across the 28-step
 window; CN pools per-step < ~1%; drift bounded; checklist markers cleared with
