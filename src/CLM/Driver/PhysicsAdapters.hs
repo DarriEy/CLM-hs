@@ -97,7 +97,8 @@ import qualified CLM.BioGeoChem.MaintResp as MR
 import qualified CLM.Types.CNVegNitrogenStateData as NState
 import CLM.Types.CNVegCarbonStateData
   ( cnvcs_leafc_patch, cnvcs_frootc_patch, cnvcs_livestemc_patch
-  , cnvcs_cpool_patch, cnvcs_xsmrpool_patch )
+  , cnvcs_cpool_patch, cnvcs_xsmrpool_patch
+  , cnvcs_leafc_storage_patch, cnvcs_frootc_storage_patch )
 import CLM.BioGeoChem.CNDriver
   ( CNDriverConfig(..), defaultCNDriverConfig
   , CNDriverInput(..), CNDriverResult(..)
@@ -3331,18 +3332,37 @@ perPatchAllocationOverlay dt st =
           -- backgroundLitterfall returns leafc*bglfr*dt for the first arg, so
           -- the per-pool loss is just the pool's own background litter flux.
           leaf_long = 2.0
-          updateWithLitter old fluxSel =
+          -- Display pool: only the background litterfall loss (and onset xfer,
+          -- ~0 in this window). New photosynthate does NOT enter the display
+          -- pool directly — see storageGain below.
+          displayLoss old =
             VU.generate np $ \p ->
               let cur = getV old p
               in case allocs !! p of
                    Nothing -> cur
-                   Just a  ->
+                   Just _  ->
                      let (lit, _) = Phen.backgroundLitterfall leaf_long cur 0.0 dt
-                     in max 0.0 (cur + fluxSel a * dt - lit)
+                     in max 0.0 (cur - lit)
 
-          -- leafc / frootc: allocation gain minus background litterfall loss.
-          leafc'  = updateWithLitter (cnvcs_leafc_patch cstate)  Alloc.alo_cpool_to_leafc
-          frootc' = updateWithLitter (cnvcs_frootc_patch cstate) Alloc.alo_cpool_to_frootc
+          -- Storage pool: receives the new allocation. In CLM's non-onset
+          -- season, cpool_to_{leaf,froot}c new growth is routed to the STORAGE
+          -- pool (transferred to display at next onset), so the DISPLAYED
+          -- leafc/frootc stay ~static while *_storage grows. The Fortran dump
+          -- confirms this for both PFTs (display Δ~1e-4; storage grows). Adding
+          -- the allocation to display instead made leafc/frootc drift ~3.7%.
+          storageGain old fluxSel =
+            VU.generate np $ \p ->
+              let cur = getV old p
+              in case allocs !! p of
+                   Nothing -> cur
+                   Just a  -> max 0.0 (cur + fluxSel a * dt)
+
+          -- Display: litterfall only (new C goes to storage).
+          leafc'          = displayLoss (cnvcs_leafc_patch cstate)
+          frootc'         = displayLoss (cnvcs_frootc_patch cstate)
+          -- Storage: receives the allocation.
+          leafc_storage'  = storageGain (cnvcs_leafc_storage_patch cstate)  Alloc.alo_cpool_to_leafc
+          frootc_storage' = storageGain (cnvcs_frootc_storage_patch cstate) Alloc.alo_cpool_to_frootc
           stemc'  = update (cnvcs_livestemc_patch cstate) Alloc.alo_cpool_to_livestemc
 
           -- xsmrpool: recovery flux adds back toward zero (cpool_to_xsmrpool =
@@ -3359,11 +3379,13 @@ perPatchAllocationOverlay dt st =
                  else cur
 
           cstate' = cstate
-            { cnvcs_leafc_patch     = leafc'
-            , cnvcs_frootc_patch    = frootc'
-            , cnvcs_livestemc_patch = stemc'
-            , cnvcs_xsmrpool_patch  = xsmr'
-            , cnvcs_cpool_patch     = cpool'
+            { cnvcs_leafc_patch          = leafc'
+            , cnvcs_frootc_patch         = frootc'
+            , cnvcs_leafc_storage_patch  = leafc_storage'
+            , cnvcs_frootc_storage_patch = frootc_storage'
+            , cnvcs_livestemc_patch      = stemc'
+            , cnvcs_xsmrpool_patch       = xsmr'
+            , cnvcs_cpool_patch          = cpool'
             }
       in st { clmCNVegCState = cstate' }
 
