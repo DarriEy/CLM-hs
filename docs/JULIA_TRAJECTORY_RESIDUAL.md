@@ -175,27 +175,41 @@ ever runs bulk snow, snl=0):
    depth holds at 3.21 m, so they are what collapses it 3.21 → 0.72 m in one step.
    The fix is the same pack/unpack as combine.
 
-3. **Layered-snow thermal solve uses the wrong matrix structure (the deep blocker).**
-   Even with snow mass conserved and depth stable, the matched-IC run drifts: the snow
-   layers (stable ~261 K) and deep soil (~266 K) are fine, but the **exposed top-soil
-   layer** crashes (258 → 205 K), propagating a cooling wave down the soil column. Probed
-   values: `hs_soil ≈ −59 W/m²`, `dhsdT ≈ −8`, `frac_sno_eff = 0.114`. Root cause: with
-   `frac_sno < 1` (patchy snow — here only 11.4 % snow-covered, depth 3.21 m on that
-   fraction, grid-mean SNOWDP 0.37 m), the bare-soil fraction radiatively cools and our
-   **single inline tridiagonal** with inline fse-weighting (SoilTemperature.hs ~430–518,
-   the `j==1 && snl<0` rows) can't hold it. **Fortran does not use a single tridiagonal
-   here.** It builds a *block matrix* (SoilTemperatureMod.F90 `SetMatrix`, ~2337–2557):
-   separate `bmatrix_snow`, `bmatrix_soil`, `bmatrix_ssw` (standing surface water) blocks
-   plus explicit off-diagonal coupling blocks `bmatrix_snow_soil`(−1) and
-   `bmatrix_soil_snow`(1). Matching it requires reimplementing the soil-temp solve with
-   that block structure and the frac_sno_eff / frac_h2osfc fractional coupling — a real
-   numerical rewrite, validated against the Fortran h0 winter history.
+3. **Patchy-snow surface-flux forcing over-cools the exposed soil (the real blocker —
+   re-scoped).** The matched-IC run drifts: snow layers (~261 K) and deep soil (~266 K)
+   stay fine, but the **exposed top-soil layer** crashes (258 → 205 K) as a downward wave.
 
-**Conclusion:** the port runs bulk-snow-only by design because the explicit multi-layer
-snow physics is incomplete — and the hardest missing piece is the **block-matrix soil-temp
-solve** for patchy snow, not just the layer-management packing. The matched-IC gold-standard
-adjudication needs that solve reimplemented + validated. Committed foundation:
-snl-injection plumbing, `scripts/build_fortran_ic.py`, and the combine-indexing fix.
+   *The soil-temp matrix is NOT the bug.* I read Fortran's block matrix
+   (SoilTemperatureMod.F90 `SetMatrix`/`SetMatrix_Snow`/`SetMatrix_Soil`/`SetRHSVec_*`,
+   ~2337–2832) line-by-line and verified our coefficients **match**: the `j==1 && snl<0`
+   diagonal (`1+(1−cnfac)·fact·(tk/dzp + fse·tk_snowsoil/dzm) − (1−fse)·fact·dhsdT`), the
+   `frac_sno_eff`-weighted snow off-diagonal, the super-diagonal, the interface harmonic-
+   mean tk, and the RHS (`(1−fse)(hs_soil − dhsdT·t) + cnfac(fn_j − fse·fn_jm) + fse·sabg`)
+   all agree. Fortran's 5-band block matrix is only a block-storage form of the same system;
+   with `frac_h2osfc=0` (the standing-surface-water level empty) our contiguous tridiagonal
+   is equivalent. Dumped coefficients confirm it: step-1 row `b=2.10, c=−0.67, a=−0.001`,
+   soil drops only 1 K — the solve is sound.
+
+   *The bug is the surface-flux forcing.* The exposed soil stabilizes BELOW its radiative
+   equilibrium (~226 K) at 205 K, so there is excess non-radiative cooling. Fortran splits
+   the surface into **three** fraction-specific fluxes — `hs_top_snow` (uses
+   `lwrad_emit_snow`, `eflx_sh_snow`, `qflx_ev_snow`), `hs_soil` (uses `lwrad_emit_soil`,
+   `eflx_sh_soil`, `qflx_ev_soil`), `hs_top` — and feeds the top snow layer `hs_top_snow`
+   and the soil layer 1 `hs_soil` (lines 1700–1770, `SetRHSVec_*`). Our adapter
+   (PhysicsAdapters.hs ~1272–1306) feeds the **bulk-ground** `eflx_sh_grnd` / `qflx_evap_grnd`
+   and gives the top snow layer `hs_top`, not `hs_top_snow`. Combined with the lagged,
+   weak winter turbulent feedback (`dhsdT≈−8`, low wind) and the residual winter-LH
+   over-production adding latent cooling, the exposed soil drains. The fraction-specific
+   fluxes already exist (`bgo_eflx_sh_snow/soil`, `bgo_qflx_ev_snow/soil` in
+   BaregroundFluxes.hs:491–499) — they just aren't wired into the soil-temp heat source.
+
+**Conclusion (re-scoped):** the explicit multi-layer snow physics needs (a) the same
+pack/unpack fix in snowCompaction/Divide as in combine, and (b) the **patchy-snow surface
+heat-source split** (hs_top_snow / hs_soil with fraction-specific SH/evap/LW) wired into
+`soilTemperatureFullStep` — **not** a soil-temp matrix rewrite (the matrix already matches
+Fortran). That is a much smaller, more tractable fix than previously thought. Committed
+foundation: snl-injection plumbing, `scripts/build_fortran_ic.py`, combine-indexing fix.
+Validate any fix against the Fortran h0 2003 winter history.
 Reference for the rewrite: SoilTemperatureMod.F90 `SetMatrix`/`SetMatrixSoil`/
 `SetMatrixSnow`, and CLM.jl `soil_temperature.jl` (block band solve).
 
