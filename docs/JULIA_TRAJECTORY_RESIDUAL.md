@@ -282,6 +282,34 @@ albedo/radiation bias); (b) the bare SHgrnd is high (z0mg=0.01 vs 0.0024) but *c
 canopy-top ustar/um is too low. The matched-IC soil crash also persists because the canopy
 converges to ~255 K vs Fortran's TV≈257.
 
+## SOLVER GAP CLOSED: the zldis double-adjustment (commit dcc55c2)
+
+The "irreducible convergence-basin" framing below was **wrong** — a per-iteration diff of
+the Haskell vs Julia canopy Newton solve (tree patch, 2002 step 1) found they diverge at
+**iteration 1** from an identical start, cascading from `ustar` (0.153 vs 0.18). Isolated
+to **`zldis`: Haskell 43.26 vs Julia 30.935**.
+
+Root cause: `canopyFluxes` already adjusts the forcing heights
+(`forc_hgt_u' = raw + z0mv + displa`) and stores them in `inp'`; then the per-iteration
+`canopyFluxesIteration` (CanopyFluxes.hs:632) **re-added `z0mv + displa`**, so
+`zldis = forc_hgt_u' + z0mv = raw + 2·z0mv + displa` instead of `raw + z0mv`. A too-large
+`zldis` inflates `log(zldis/z0m)` → ustar too low → weak exchange → cold leaf. (An earlier
+*static* read of this code wrongly "ruled out" zldis; only the per-iteration diff caught the
+double-count.) Fix: drop the re-add — the heights arrive pre-adjusted.
+
+After the fix the Haskell canopy **matches Julia iteration-by-iteration**: tree ustar
+0.22→0.307 (Julia 0.304), leaf 254.7→255.11 (Julia 255.21), rah_below 308→163 (Julia 164).
+Fortran parity unchanged. **The canopy convective-velocity solver gap is closed.**
+
+What remains is *not* the canopy: the day-1 Julia-trajectory T_GRND residual is now 0.198 K
+(from 0.61 at the start of this work), dominated by **FSA = +1.4 W/m² more absorbed solar**
+(surface-albedo / radiation subsystem) and a snow-depth difference — the canopy temperature
+change barely moved T_GRND (0.222→0.198), so the warm bias lives in radiation, not
+aerodynamics. The matched-IC soil crash also persists unchanged after the canopy fix,
+confirming it is the patchy-snow exposed-soil energy balance, independent of the canopy.
+
+---
+Superseded note (kept for history):
 **Root (verified irreducible at the formula level).** Back-solving the convective velocity:
 Julia converges to `thvstar≈−0.27` (wc 1.47 → um 1.78 → ustar 0.30); Haskell to
 `thvstar≈−0.19` (wc 1.17 → um 1.54 → ustar 0.22). The update is **formula-identical**
