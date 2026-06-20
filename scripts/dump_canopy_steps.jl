@@ -16,7 +16,7 @@ const START_DATE = DateTime(YEAR, 1, 1)
 const DTIME = 1800.0
 const STEPS_PER_DAY = Int(86400 / DTIME)
 const INT_SNOW_MAX = 3113.2
-const NSTEPS = 4
+const NSTEPS = 44
 
 (inst, bounds, filt, tm) = CLM.clm_initialize!(;
     fsurdat = FSURDAT, paramfile = PARAMFILE, start_date = START_DATE,
@@ -59,6 +59,16 @@ for step in 1:NSTEPS
                  photosyns=inst.photosyns)
 
     sab = inst.solarabs
+    sa = inst.surfalb
+    if inst.surfalb.coszen_col[1] > 0.05
+        for p in bounds.begp:bounds.endp
+            pch.wtgcell[p] > 0 || continue
+            @printf("  [FSA p%d] cosz=%.3f wt=%.3f fsa=%.3f fsr=%.3f sabv=%.3f sabg=%.3f albd_v=%.4f albi_v=%.4f albgrd_v=%.4f albgri_v=%.4f\n",
+                p, sa.coszen_col[1], pch.wtgcell[p], sab.fsa_patch[p], sab.fsr_patch[p],
+                sab.sabv_patch[p], sab.sabg_patch[p], sa.albd_patch[p,1], sa.albi_patch[p,1],
+                sa.albgrd_col[1,1], sa.albgri_col[1,1])
+        end
+    end
     @printf("\n=== step %d  t_grnd=%.4f forc_q=%.6g forc_t=%.4f forc_lw=%.3f coszen=%.4f forc_wind=%.4f ===\n",
             step, temp.t_grnd_col[1], a2l.forc_q_downscaled_col[1], a2l.forc_t_downscaled_col[1],
             a2l.forc_lwrad_downscaled_col[1], inst.surfalb.coszen_col[1], a2l.forc_u_grc[1])

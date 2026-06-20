@@ -388,6 +388,11 @@ buildTimestepContext fr nstep dtime =
     , tcDtime         = dtime
     , tcDeclin        = declin
     , tcDeclinP1      = declin
+    -- Supply a real next-radiation calendar day so the surface-radiation step
+    -- computes the proper solar zenith (shr_orb_cosz) instead of the cos(declin)
+    -- fallback. Without this the offline pipeline used cos(declin) ~ 0.92 at Bow
+    -- in January (should be ~0.26), absorbing far too much solar.
+    , tcNextswCday    = calday + dtime / 86400.0
     , tcObliqr        = 0.4091
     , tcIsFirstStep   = nstep == 1
     , tcIsBegCurrDay  = (nstep - 1) `mod` stepsPerDay == 0
