@@ -455,7 +455,7 @@ accumDiag :: DailyDiag -> CLMState -> DailyDiag
 accumDiag dd st = DailyDiag
   { dd_t_grnd     = dd_t_grnd dd + t_grnd_col (clmTemp st)
   , dd_fsa        = dd_fsa dd + fsa_patch (clmEnergyFlux st)
-  , dd_h2osno     = dd_h2osno dd + h2osno_col (clmWaterState st)
+  , dd_h2osno     = dd_h2osno dd + h2osno_col (clmWaterState st) + explicitSnowMass
   , dd_snow_depth = dd_snow_depth dd
                   + (if VU.null v then 0.0 else v VU.! 0)
   , dd_frac_sno   = dd_frac_sno dd
@@ -473,6 +473,17 @@ accumDiag dd st = DailyDiag
   where
     v = wdiag_snow_depth_col (clmWaterDiagBulk st)
     fs = wdiag_frac_sno_col (clmWaterDiagBulk st)
+    -- Grid-mean SWE must include any EXPLICIT snow-layer mass (ice+liq) once a
+    -- layer forms; h2osno_col only holds the unresolved no-layer SWE, which is
+    -- zeroed on layer creation. Snow layers are bottom-packed at
+    -- indices [nlevsno+snl .. nlevsno-1].
+    snl = clmSnl st
+    ice = h2osoi_ice_col (clmWaterState st)
+    liq = h2osoi_liq_col (clmWaterState st)
+    explicitSnowMass
+      | snl >= 0  = 0.0
+      | otherwise = sum [ idx ice j + idx liq j | j <- [nlevsno + snl .. nlevsno - 1] ]
+    idx vec j = if j >= 0 && j < VU.length vec then vec VU.! j else 0.0
 
 avgDiag :: DailyDiag -> DailyDiag
 avgDiag dd =

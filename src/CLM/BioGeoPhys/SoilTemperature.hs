@@ -544,16 +544,24 @@ buildTridiagSystem inp = (tNew, t_h2osfc_new)
               in if isNaN tv then t VU.! jj else tv
          else t VU.! jj
 
-    -- Surface water temperature (single implicit equation)
+    -- Surface water temperature (single implicit equation).
+    -- The surface-water node conducts to soil layer 1; in Fortran this h2osfc
+    -- node is a row of the banded matrix, so its implicit (1-cnfac) conduction
+    -- term references the (just-solved) soil layer-1 temperature. Solving it as a
+    -- standalone equation here, that implicit soil-coupling term MUST appear in
+    -- the RHS as well as the diagonal — otherwise the diagonal conduction drives
+    -- t_h2osfc toward 0 K for a thin film (large tk/c ratio), corrupting t_grnd.
     t_h2osfc_new =
       if fh2o == 0.0
       then tNew VU.! (joff + 1)  -- copy soil layer 1
-      else let rhs_h2o = t_h2o + (dt / c_h2o)
+      else let jj1      = vix 1
+               t_soil1  = tNew VU.! jj1   -- just-solved soil layer 1 temperature
+               dzm_h2o  = 0.5 * dz_h2o + (z VU.! jj1)
+               kcond    = (1.0 - cnfac) * (dt / c_h2o) * tk_h2o / dzm_h2o
+               rhs_h2o  = t_h2o + (dt / c_h2o)
                           * (hs_h2o - dhsdT_ * t_h2o + cnfac * fn_h2osfc_val)
-               jj1     = vix 1
-               dzm_h2o = 0.5 * dz_h2o + (z VU.! jj1)
-               diag    = 1.0 + (1.0 - cnfac) * (dt / c_h2o) * tk_h2o / dzm_h2o
-                             - (dt / c_h2o) * dhsdT_
+                          + kcond * t_soil1
+               diag     = 1.0 + kcond - (dt / c_h2o) * dhsdT_
            in rhs_h2o / diag
 
 -- =========================================================================

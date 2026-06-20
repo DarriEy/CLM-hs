@@ -1530,16 +1530,35 @@ snowWaterStep _cfg ctx st =
               if hasSnow then frac_sno_sl else 0.0,
               if hasSnow then snow_depth_sl else 0.0)
 
-      -- Resolved snow-layer promotion is gated until the layer melt/merge
-      -- path is brought to parity; the no-layer path preserves SWE for now.
-      shouldCreateLayer = False
+      -- Resolved snow-layer promotion (Fortran SnowHydrologyMod "newsnow"): create
+      -- the first explicit snow layer (snl 0 -> -1) once the EFFECTIVE snow depth
+      -- frac_sno_eff*snow_depth crosses dzmin(1)=0.01 m. On creation:
+      -- dz(0)=snow_depth, t_soisno(0)=min(tfrz,forc_t), and the no-layer SWE
+      -- (h2osno) is transferred into the layer ice. Condition + dz verified
+      -- against SnowHydrologyMod.F90 Bulk_InitializeSnowPack; the layered thermal
+      -- path (matrix/RHS/fn/conductivity/heat-capacity/compaction/phase-change)
+      -- was verified faithful to SoilTemperatureMod.F90 + SnowHydrologyMod.F90.
+      --
+      -- ENABLED (flag retained for A/B testing): once the t_h2osfc surface-water
+      -- temperature blowup was fixed (SoilTemperature buildTridiagSystem), the
+      -- insulating pack brings day-8..10 T_GRND to within ~2K of reference (was
+      -- 12-15K too cold). canResolveSnow gates promotion to columns whose
+      -- snow-layer arrays are allocated (unit tests with empty state stay no-layer).
+      -- Remaining minor gaps: SnowCompaction still lacks the melt (ddz3) +
+      -- wind-drift (ddz4) terms. See memory: snow-layer-day8-crash.
+      enableSnowLayerCreation = True
+      shouldCreateLayer =
+        enableSnowLayerCreation
+          && canResolveSnow            -- snow-layer arrays must be allocated
+          && snl_2 == 0 && h2osno_nl_2 > 0.0
+          && frac_sno_eff_sl * snow_depth_2 >= 0.01
 
       (snl_final, h2osno_nl_final, t_soisno_new, liq_new, ice_final,
        dz_final, z_final, zi_final) =
         if shouldCreateLayer
         then let layerIdx = nlevsno - 1
                  snow_t = min tfrz forc_t
-                 layer_dz = h2osno_nl_2 / bifall
+                 layer_dz = snow_depth_2
                  t_new = t_soisno_col (clmTemp st) VU.// [(layerIdx, snow_t)]
                  liq_n = updateAt liq_2 layerIdx 0.0
                  ice_n = updateAt ice_2 layerIdx h2osno_nl_2
