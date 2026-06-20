@@ -702,6 +702,7 @@ canopyFluxesStep _cfg ctx st =
       dqgdT = safeIdx (wdiag_dqgdT_col wdiag) 0
 
       frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
+      frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
       frac_h2osfc = safeIdx (wdiag_frac_h2osfc_col wdiag) 0
       snow_depth = safeIdx (wdiag_snow_depth_col wdiag) 0
 
@@ -917,12 +918,14 @@ canopyFluxesStep _cfg ctx st =
                   , cfi_htop           = htop
                   , cfi_displa         = displa'
                   , cfi_z0mv           = z0mv
-                  -- Ground momentum roughness for the under-canopy drag (csoilb):
-                  -- Fortran/Julia use zsno (0.00085) when snow-covered, else zlnd
-                  -- (0.000775). The prior hardcoded 0.01 was ~12x too large, which
-                  -- inflated rah_below (under-canopy resistance ~308 vs Julia 164),
-                  -- starving the canopy of ground heat and biasing the leaf cold.
-                  , cfi_z0mg           = if frac_sno_eff > 0.0 then 0.00085 else 0.000775
+                  -- Ground momentum roughness for the under-canopy drag (csoilb).
+                  -- ZengWang2007: zsno when snow-covered, else zlnd. The authoritative
+                  -- values come from clm5_params.nc (zsno=0.0024, zlnd=0.01), which
+                  -- override the Fortran code defaults (0.00085/0.000775). The prior
+                  -- code used a flat 0.01 (= zlnd, bare soil) even when snow was
+                  -- present, inflating rah_below (308 vs Julia 164) and biasing the
+                  -- leaf cold. Julia keys on frac_sno (not frac_sno_eff).
+                  , cfi_z0mg           = if frac_sno > 0.0 then 0.0024 else 0.01
                   , cfi_frac_veg_nosno = fracVeg p
                   , cfi_emv            = emv
                   , cfi_emg            = emg
@@ -2797,13 +2800,19 @@ snowLayerDivideStep _cfg _ctx st =
 
            frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
 
+           -- divideSnowLayers (like combine) indexes active layers top-packed
+           -- (0..msno-1); the pipeline stores them bottom-packed
+           -- (nlevsno+snl..nlevsno-1). Pack into the top slots, then unpack back.
+           msno = negate snl
+           packTop src = VU.generate nlevsno $ \i ->
+             if i < msno then src VU.! (nlevsno + snl + i) else 0.0
            slState = SnowLayerState
-             { slDz        = VU.slice 0 nlevsno (colDz col)
-             , slZ         = VU.slice 0 nlevsno (colZ col)
+             { slDz        = packTop (colDz col)
+             , slZ         = packTop (colZ col)
              , slZi        = VU.slice 0 (nlevsno + 1) (colZi col)
-             , slTSoisno   = VU.slice 0 nlevsno (t_soisno_col temp)
-             , slH2osoiIce = VU.slice 0 nlevsno (h2osoi_ice_col ws)
-             , slH2osoiLiq = VU.slice 0 nlevsno (h2osoi_liq_col ws)
+             , slTSoisno   = packTop (t_soisno_col temp)
+             , slH2osoiIce = packTop (h2osoi_ice_col ws)
+             , slH2osoiLiq = packTop (h2osoi_liq_col ws)
              , slSnwRds    = VU.replicate nlevsno 54.526
              , slSnl       = snl
              }
@@ -2813,26 +2822,25 @@ snowLayerDivideStep _cfg _ctx st =
 
            snl_new = slSnl slFinal
            nlevtot = nlevsno + nlevgrnd
-
-           dz_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slDz slFinal VU.! j
-             else colDz col VU.! j
-           z_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slZ slFinal VU.! j
-             else colZ col VU.! j
+           isActiveSnow j = j >= nlevsno + snl_new && j < nlevsno
+           botIdx j = j - (nlevsno + snl_new)
+           unpack srcTop colSrc = VU.generate nlevtot $ \j ->
+             if j >= nlevsno then colSrc VU.! j
+             else if isActiveSnow j then srcTop VU.! botIdx j
+             else 0.0
+           dz_new  = unpack (slDz slFinal)        (colDz col)
+           t_new   = unpack (slTSoisno slFinal)   (t_soisno_col temp)
+           liq_new = unpack (slH2osoiLiq slFinal) (h2osoi_liq_col ws)
+           ice_new = unpack (slH2osoiIce slFinal) (h2osoi_ice_col ws)
            zi_new = VU.generate (nlevtot + 1) $ \j ->
-             if j <= nlevsno then slZi slFinal VU.! j
-             else colZi col VU.! j
-
-           t_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slTSoisno slFinal VU.! j
-             else t_soisno_col temp VU.! j
-           liq_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slH2osoiLiq slFinal VU.! j
-             else h2osoi_liq_col ws VU.! j
-           ice_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slH2osoiIce slFinal VU.! j
-             else h2osoi_ice_col ws VU.! j
+             if j > nlevsno then colZi col VU.! j
+             else if j == nlevsno then 0.0
+             else negate (sum [ dz_new VU.! k
+                              | k <- [max j (nlevsno + snl_new) .. nlevsno - 1] ])
+           z_new = VU.generate nlevtot $ \j ->
+             if j >= nlevsno then colZ col VU.! j
+             else if isActiveSnow j then 0.5 * (zi_new VU.! j + zi_new VU.! (j + 1))
+             else 0.0
 
            col' = col { colDz = dz_new, colZ = z_new, colZi = zi_new }
            temp' = temp { t_soisno_col = t_new }

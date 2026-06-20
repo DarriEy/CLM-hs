@@ -64,6 +64,7 @@ for step in 1:NSTEPS
             a2l.forc_lwrad_downscaled_col[1], inst.surfalb.coszen_col[1], a2l.forc_u_grc[1])
     @printf("  REPORTED[1]: SH_tot=%.4f  LH_tot=%.4f\n",
             ef.eflx_sh_tot_patch[1], ef.eflx_lh_tot_patch[1])
+    @printf("  z0mg_col=%.6g frac_sno=%.4f\n", fv.z0mg_col[1], inst.water.waterdiagnosticbulk_inst.frac_sno_eff_col[1])
     for p in bounds.begp:bounds.endp
         @printf("  p%d wt=%.3f SHveg=%.3f SHgrnd=%.3f tveg=%.3f taf=%.3f ustar=%.4f um=%.4f uaf=%.4f rah1=%.3f rah2=%.3f ram1=%.3f dlrad=%.3f\n",
             p, pch.wtgcell[p], ef.eflx_sh_veg_patch[p], ef.eflx_sh_grnd_patch[p],
