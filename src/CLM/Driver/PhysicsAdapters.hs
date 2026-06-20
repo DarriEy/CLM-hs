@@ -2686,13 +2686,19 @@ snowLayerCombineStep _cfg _ctx st =
            frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
            snow_depth = safeIdx (wdiag_snow_depth_col wdiag) 0
 
+           -- combineSnowLayers indexes active layers top-packed (0..msno-1),
+           -- but the pipeline stores them bottom-packed (nlevsno+snl..nlevsno-1).
+           -- Pack into the top slots before the call and unpack after.
+           msno = negate snl
+           packTop src = VU.generate nlevsno $ \i ->
+             if i < msno then src VU.! (nlevsno + snl + i) else 0.0
            slState = SnowLayerState
-             { slDz        = VU.slice 0 nlevsno (colDz col)
-             , slZ         = VU.slice 0 nlevsno (colZ col)
+             { slDz        = packTop (colDz col)
+             , slZ         = packTop (colZ col)
              , slZi        = VU.slice 0 (nlevsno + 1) (colZi col)
-             , slTSoisno   = VU.slice 0 nlevsno (t_soisno_col temp)
-             , slH2osoiIce = VU.slice 0 nlevsno (h2osoi_ice_col ws)
-             , slH2osoiLiq = VU.slice 0 nlevsno (h2osoi_liq_col ws)
+             , slTSoisno   = packTop (t_soisno_col temp)
+             , slH2osoiIce = packTop (h2osoi_ice_col ws)
+             , slH2osoiLiq = packTop (h2osoi_liq_col ws)
              , slSnwRds    = VU.replicate nlevsno 54.526
              , slSnl       = snl
              }
@@ -2703,26 +2709,31 @@ snowLayerCombineStep _cfg _ctx st =
                0.0 (h2osno_col ws) snow_depth 1 False
 
            snl_new = slSnl slFinal
+           msno_new = negate snl_new
            nlevtot = nlevsno + nlevgrnd
-
-           dz_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slDz slFinal VU.! j
-             else colDz col VU.! j
-           z_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slZ slFinal VU.! j
-             else colZ col VU.! j
+           -- Unpack top-packed result (0..msno_new-1) back to bottom slots
+           -- (nlevsno+snl_new..nlevsno-1); inactive snow slots are zeroed.
+           botIdx j = j - (nlevsno + snl_new)   -- packed index for column slot j
+           isActiveSnow j = j >= nlevsno + snl_new && j < nlevsno
+           unpack srcTop colSrc = VU.generate nlevtot $ \j ->
+             if j >= nlevsno then colSrc VU.! j
+             else if isActiveSnow j then srcTop VU.! botIdx j
+             else 0.0
+           dz_new  = unpack (slDz slFinal)        (colDz col)
+           t_new   = unpack (slTSoisno slFinal)   (t_soisno_col temp)
+           liq_new = unpack (slH2osoiLiq slFinal) (h2osoi_liq_col ws)
+           ice_new = unpack (slH2osoiIce slFinal) (h2osoi_ice_col ws)
+           -- Recompute bottom-packed snow geometry from dz: ground surface
+           -- interface zi(nlevsno)=0, snow interfaces accumulate upward.
            zi_new = VU.generate (nlevtot + 1) $ \j ->
-             if j <= nlevsno then slZi slFinal VU.! j
-             else colZi col VU.! j
-           t_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slTSoisno slFinal VU.! j
-             else t_soisno_col temp VU.! j
-           liq_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slH2osoiLiq slFinal VU.! j
-             else h2osoi_liq_col ws VU.! j
-           ice_new = VU.generate nlevtot $ \j ->
-             if j < nlevsno then slH2osoiIce slFinal VU.! j
-             else h2osoi_ice_col ws VU.! j
+             if j > nlevsno then colZi col VU.! j
+             else if j == nlevsno then 0.0
+             else negate (sum [ dz_new VU.! k
+                              | k <- [max j (nlevsno + snl_new) .. nlevsno - 1] ])
+           z_new = VU.generate nlevtot $ \j ->
+             if j >= nlevsno then colZ col VU.! j
+             else if isActiveSnow j then 0.5 * (zi_new VU.! j + zi_new VU.! (j + 1))
+             else 0.0
 
            col' = col { colDz = dz_new, colZ = z_new, colZi = zi_new }
            temp' = temp { t_soisno_col = t_new }

@@ -132,6 +132,15 @@ initCLMStateFromDir dir = do
   h2osno_raw <- readFloat64Vector (dir </> "coldstart" </> "h2osno.bin")
   t_veg_raw <- readOptionalVector (dir </> "coldstart" </> "t_veg.bin") VU.empty
   t_ref2m_raw <- readOptionalVector (dir </> "coldstart" </> "t_ref2m.bin") VU.empty
+  -- Optional snow-state injection (e.g. from a Fortran restart). When absent,
+  -- these default to a snow-free cold start (snl=0, frac_sno=0), the prior
+  -- behaviour. When present, snl.bin holds the (negative) snow-layer count and
+  -- the snow geometry/temperature/water already live in the top nlevsno slots
+  -- of t_soisno/h2osoi_liq/h2osoi_ice/col_dz/col_z/col_zi.
+  snl_raw <- readOptionalVector (dir </> "coldstart" </> "snl.bin") VU.empty
+  snow_depth_raw <- readOptionalVector (dir </> "coldstart" </> "snow_depth.bin") VU.empty
+  frac_sno_raw <- readOptionalVector (dir </> "coldstart" </> "frac_sno.bin") VU.empty
+  frac_sno_eff_raw <- readOptionalVector (dir </> "coldstart" </> "frac_sno_eff.bin") VU.empty
   zbedrock_raw <- readOptionalVector (dir </> "surfdata" </> "zbedrock.bin") VU.empty
 
   elai_raw <- readFloat64Vector (dir </> "coldstart" </> "elai.bin")
@@ -230,6 +239,14 @@ initCLMStateFromDir dir = do
       smpsoPatch = VU.generate np (\p -> pftScalar (pft_smpso pft) p (-66000.0))
       smpscPatch = VU.generate np (\p -> pftScalar (pft_smpsc pft) p (-255000.0))
 
+      -- Snow-state injection: snl (negative count of active snow layers) and the
+      -- associated snow-fraction diagnostics. Default to a snow-free cold start.
+      snlInit = if VU.null snl_raw then 0 else round (snl_raw VU.! 0)
+      snowDepthInit = safeAt snow_depth_raw 0 0.0
+      fracSnoInit = safeAt frac_sno_raw 0 0.0
+      fracSnoEffInit =
+        if VU.null frac_sno_eff_raw then fracSnoInit else frac_sno_eff_raw VU.! 0
+
   let st = defaultCLMState
         { clmColumn = ColumnData
             { colZ = z, colDz = dz, colZi = zi
@@ -307,10 +324,10 @@ initCLMStateFromDir dir = do
             , grc_max_dayl = VU.singleton 86400.0
             }
         , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
-            { wdiag_frac_sno_col = VU.singleton 0.0
-            , wdiag_frac_sno_eff_col = VU.singleton 0.0
+            { wdiag_frac_sno_col = VU.singleton fracSnoInit
+            , wdiag_frac_sno_eff_col = VU.singleton fracSnoEffInit
             , wdiag_frac_h2osfc_col = VU.singleton 0.0
-            , wdiag_snow_depth_col = VU.singleton 0.0
+            , wdiag_snow_depth_col = VU.singleton snowDepthInit
             , wdiag_snow_persist_col = VU.singleton 0.0
             , wdiag_qg_col = VU.singleton 0.005
             , wdiag_qg_snow_col = VU.singleton 0.005
@@ -318,7 +335,7 @@ initCLMStateFromDir dir = do
             , wdiag_qg_h2osfc_col = VU.singleton 0.005
             , wdiag_dqgdT_col = VU.singleton 0.0
             }
-        , clmSnl = 0
+        , clmSnl = snlInit
         }
 
   soil_color_raw <- readInt64Vector (dir </> "surfdata" </> "soil_color.bin")
@@ -522,7 +539,6 @@ runPipeline cfg = do
               dayAcc' = accumDiag dayAcc st'
               isEndDay = step `mod` spd == 0
 
-          return ()
 
           when (t_grnd_col (clmTemp st') > 400.0 ||
                 t_grnd_col (clmTemp st') < 100.0) $

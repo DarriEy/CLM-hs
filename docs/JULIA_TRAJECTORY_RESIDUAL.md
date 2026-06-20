@@ -150,6 +150,39 @@ hence far less sublimation. The ports' apparent winter-LH "over-production" is t
 physics bug. This is why the matched-IC (Fortran-restart) initialization is the necessary
 next step before attributing any residual winter LH to a Haskell physics error.
 
+## Matched-IC attempt: the explicit snow-layer subsystem is non-functional
+
+Built snow-state injection to run the matched-IC test (both ports from the Fortran
+`clm2.r.2003-01-01` restart). `scripts/build_fortran_ic.py` extracts the restart (snl=−4,
+3.21 m / 4-layer snowpack, 75.7 kg) into a coldstart bin set; `initCLMStateFromDir` now
+reads optional `snl.bin` / `snow_depth.bin` / `frac_sno*.bin` (default: snow-free cold
+start, so existing tests are unaffected). The injection loads correctly (snl=−4, ice 75.7,
+depth 3.21 verified at init).
+
+Running it exposed two faults in the explicit snow-layer subsystem, which is normally
+**dormant** (`PhysicsAdapters` `shouldCreateLayer = False`, line ~1504 — the pipeline only
+ever runs bulk snow, snl=0):
+
+1. **Layer-indexing convention mismatch (fixed).** `combineSnowLayers` /
+   `removeThinLayers` / `computeSnowTotals` (SnowHydrology.hs) index active layers
+   *top-packed* (`0..msno-1`), but the pipeline and Fortran restart store them
+   *bottom-packed* (`nlevsno+snl..nlevsno-1`, slots 8–11). So combine read the empty top
+   slots, saw ice=0, and deleted the entire pack in step 1. Fixed by pack/unpack at the
+   `snowLayerCombineStep` adapter boundary (snow now survives, mass-conserving).
+
+2. **Layered-snow thermal solve is broken (not fixed — large).** Even with the snow
+   surviving, the matched-IC run drifts catastrophically: ground temperature collapses
+   258 → 199 K over 10 days (Fortran: stable 258–265), SH −85 vs Fortran −3. Snow depth
+   also collapses 3.21 → 0.72 m in one step (mass held), implying snowCompaction/Divide
+   carry the same top/bottom-packing fault, and the soil-temperature conduction through
+   injected snow layers is not functional.
+
+**Conclusion:** the port runs bulk-snow-only by design because the explicit multi-layer
+snow physics (promotion, layered conduction, compaction, divide) is incomplete. The
+matched-IC gold-standard adjudication therefore needs that subsystem completed and
+validated — a scoped implementation task, not a one-liner. The snl-injection plumbing and
+the combine-indexing fix are committed as the foundation for it.
+
 ## Important framing: which port is right is not established
 
 The Haskell biogeophysics has **authoritative single-step Fortran parity at two
