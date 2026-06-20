@@ -231,6 +231,32 @@ single remaining blocker for the whole winter regime** (matched-IC crash and tra
 alike). That is the genuinely deep problem flagged earlier; closing it needs per-iteration
 canopy-solve parity (rb / wta0 / wtg0 / wtl0 / leaf-temp Newton step) against Fortran/Julia.
 
+## ROOT-CAUSE FIX: canopy ground roughness z0mg (commit 3da5b2c)
+
+Instrumented the Haskell canopy Newton iteration and diffed the converged tree-patch
+state against Julia (2002 step 1). The below-canopy resistance `rah_below` was 308 vs
+Julia 164 — the warm ground's heat couldn't reach the canopy air, biasing the leaf cold
+(tveg 254.71 vs 255.21, ustar 0.244 vs 0.304). Traced through the under-canopy drag
+`csoilb = vkc/(a_coef·(z0mg·uaf/nu)^a_exp)`: `a_coef/a_exp/csoilc` match `clm5_params.nc`
+(0.13/0.45/0.004), but the **ground momentum roughness z0mg was hardcoded to 0.01 —
+~12× too large**. Fortran/Julia use `zsno=0.00085` (snow) / `zlnd=0.000775` (soil)
+(FrictionVelocityMod.F90:137–618; CLM.jl friction_velocity.jl:440–459). Fixed
+`cfi_z0mg` to be frac_sno-aware.
+
+Result (tree patch, step 1): `rah_below` 308→105, `ustar` 0.244→0.332, **tveg
+254.71→255.57** — the cold-canopy bias is eliminated. It propagates to the ground:
+**Julia-trajectory day-1 T_GRND diff 0.61→0.157 K**, EFLX_LH_TOT diff 3.03→1.83.
+Fortran parity unchanged; no regression. This is the **root fix for the whole winter
+regime** identified above (cold canopy → low dlrad → soil over-cool).
+
+**Residual (z0 method).** The fix uses ZengWang2007 (`zsno=0.00085`, matching Fortran's
+declared value). The Fortran restart is **ctsm5.3, whose default is Meier2022**, and Julia
+uses it — its effective z0mg ≈ 0.0023 (Meier snowmelt branch, `b1=1.4, b4=−0.31`,
+`snomelt_accum≈0.7 mm`). So `rah_below` lands at 105 vs Julia's 164, leaving a slight warm
+overshoot (tveg 255.57 vs 255.21) — actually *closer* to Fortran's TV≈257. Closing the
+last ~0.06 K of the day-1 T_GRND tolerance would need the full Meier2022 z0mg with
+snowmelt-accumulation tracking; the principled 12× fix already captures the bulk.
+
 ## Important framing: which port is right is not established
 
 The Haskell biogeophysics has **authoritative single-step Fortran parity at two
