@@ -159,7 +159,7 @@ reads optional `snl.bin` / `snow_depth.bin` / `frac_sno*.bin` (default: snow-fre
 start, so existing tests are unaffected). The injection loads correctly (snl=−4, ice 75.7,
 depth 3.21 verified at init).
 
-Running it exposed two faults in the explicit snow-layer subsystem, which is normally
+Running it exposed three faults in the explicit snow-layer subsystem, which is normally
 **dormant** (`PhysicsAdapters` `shouldCreateLayer = False`, line ~1504 — the pipeline only
 ever runs bulk snow, snl=0):
 
@@ -170,18 +170,34 @@ ever runs bulk snow, snl=0):
    slots, saw ice=0, and deleted the entire pack in step 1. Fixed by pack/unpack at the
    `snowLayerCombineStep` adapter boundary (snow now survives, mass-conserving).
 
-2. **Layered-snow thermal solve is broken (not fixed — large).** Even with the snow
-   surviving, the matched-IC run drifts catastrophically: ground temperature collapses
-   258 → 199 K over 10 days (Fortran: stable 258–265), SH −85 vs Fortran −3. Snow depth
-   also collapses 3.21 → 0.72 m in one step (mass held), implying snowCompaction/Divide
-   carry the same top/bottom-packing fault, and the soil-temperature conduction through
-   injected snow layers is not functional.
+2. **snowCompaction / snowLayerDivide carry the same top/bottom-packing fault
+   (localized, not fixed).** Isolation test (no-op'ing both): with them disabled the snow
+   depth holds at 3.21 m, so they are what collapses it 3.21 → 0.72 m in one step.
+   The fix is the same pack/unpack as combine.
+
+3. **Layered-snow thermal solve uses the wrong matrix structure (the deep blocker).**
+   Even with snow mass conserved and depth stable, the matched-IC run drifts: the snow
+   layers (stable ~261 K) and deep soil (~266 K) are fine, but the **exposed top-soil
+   layer** crashes (258 → 205 K), propagating a cooling wave down the soil column. Probed
+   values: `hs_soil ≈ −59 W/m²`, `dhsdT ≈ −8`, `frac_sno_eff = 0.114`. Root cause: with
+   `frac_sno < 1` (patchy snow — here only 11.4 % snow-covered, depth 3.21 m on that
+   fraction, grid-mean SNOWDP 0.37 m), the bare-soil fraction radiatively cools and our
+   **single inline tridiagonal** with inline fse-weighting (SoilTemperature.hs ~430–518,
+   the `j==1 && snl<0` rows) can't hold it. **Fortran does not use a single tridiagonal
+   here.** It builds a *block matrix* (SoilTemperatureMod.F90 `SetMatrix`, ~2337–2557):
+   separate `bmatrix_snow`, `bmatrix_soil`, `bmatrix_ssw` (standing surface water) blocks
+   plus explicit off-diagonal coupling blocks `bmatrix_snow_soil`(−1) and
+   `bmatrix_soil_snow`(1). Matching it requires reimplementing the soil-temp solve with
+   that block structure and the frac_sno_eff / frac_h2osfc fractional coupling — a real
+   numerical rewrite, validated against the Fortran h0 winter history.
 
 **Conclusion:** the port runs bulk-snow-only by design because the explicit multi-layer
-snow physics (promotion, layered conduction, compaction, divide) is incomplete. The
-matched-IC gold-standard adjudication therefore needs that subsystem completed and
-validated — a scoped implementation task, not a one-liner. The snl-injection plumbing and
-the combine-indexing fix are committed as the foundation for it.
+snow physics is incomplete — and the hardest missing piece is the **block-matrix soil-temp
+solve** for patchy snow, not just the layer-management packing. The matched-IC gold-standard
+adjudication needs that solve reimplemented + validated. Committed foundation:
+snl-injection plumbing, `scripts/build_fortran_ic.py`, and the combine-indexing fix.
+Reference for the rewrite: SoilTemperatureMod.F90 `SetMatrix`/`SetMatrixSoil`/
+`SetMatrixSnow`, and CLM.jl `soil_temperature.jl` (block band solve).
 
 ## Important framing: which port is right is not established
 
