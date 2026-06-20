@@ -203,15 +203,33 @@ ever runs bulk snow, snl=0):
    fluxes already exist (`bgo_eflx_sh_snow/soil`, `bgo_qflx_ev_snow/soil` in
    BaregroundFluxes.hs:491–499) — they just aren't wired into the soil-temp heat source.
 
-**Conclusion (re-scoped):** the explicit multi-layer snow physics needs (a) the same
-pack/unpack fix in snowCompaction/Divide as in combine, and (b) the **patchy-snow surface
-heat-source split** (hs_top_snow / hs_soil with fraction-specific SH/evap/LW) wired into
-`soilTemperatureFullStep` — **not** a soil-temp matrix rewrite (the matrix already matches
-Fortran). That is a much smaller, more tractable fix than previously thought. Committed
-foundation: snl-injection plumbing, `scripts/build_fortran_ic.py`, combine-indexing fix.
-Validate any fix against the Fortran h0 2003 winter history.
-Reference for the rewrite: SoilTemperatureMod.F90 `SetMatrix`/`SetMatrixSoil`/
-`SetMatrixSnow`, and CLM.jl `soil_temperature.jl` (block band solve).
+**Patchy-snow surface heat-source split — wired (does not fix the crash; root is the
+canopy).** Wired the fraction-specific split into `soilTemperatureFullStep`: the top snow
+layer now receives `hs_top_snow` (snow-surface emission + snow-specific SH via the SH
+conductance `cgrnds`) and `hs_soil` uses the soil-surface temperature, matching Fortran's
+`SetRHSVec`. The snow-free path is byte-identical (when `snl=0`, `t_top_snow=t_top_soil`
+and the SH correction is zero), so no regression. **But the matched-IC soil crash persists**
+— confirming that at `fse=0.114` the snow/soil flux differences are too small to matter.
+
+Probed the actual `hs_soil` breakdown (matched-IC, step 1): per-patch ground net flux
+under each canopy = `dlrad − emit_soil − sh`: tree (60 %) `219 − 249 − 9 = −40`, grass
+(35 %) `186 − 249 − 23 = −88`, bare (5 %) `157 − 249 = −99`. **The soil (258 K) is warmer
+than the canopy above it (tVeg ≈ 253 K), so it radiates to the cooler canopy faster than
+the canopy returns LW down** (`dlrad` 219/186 < `emit` 249). As the soil cools the canopy
+cools with it (`tVeg` 253→252→251), `dlrad` drops further, and the canopy-soil system
+spirals down. **Fortran's canopy sits at TV ≈ 257 K** (h0), warm enough to hold the soil.
+
+**Unifying conclusion: every winter residual traces to one root — the canopy converging
+to a too-cold / weak-exchange fixed point.** Same mechanism as the daytime SH deficit
+(tree patch ustar 0.14 vs 0.30; §"Tall-canopy turbulence closure"): the coupled canopy
+turbulence ↔ leaf-energy-balance solve lands in a colder basin than Fortran/Julia. The
+snow subsystem fixes (combine packing ✓, compaction/Divide packing, the surface-flux split
+✓) are **necessary but not sufficient** — the soil-temp matrix already matches Fortran, and
+the patchy-snow forcing is now split, yet the soil still drains because it is fed too little
+downward LW from the too-cold canopy. **The canopy leaf-energy/turbulence fixed point is the
+single remaining blocker for the whole winter regime** (matched-IC crash and trajectory SH
+alike). That is the genuinely deep problem flagged earlier; closing it needs per-iteration
+canopy-solve parity (rb / wta0 / wtg0 / wtl0 / leaf-temp Newton step) against Fortran/Julia.
 
 ## Important framing: which port is right is not established
 

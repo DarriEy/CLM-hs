@@ -1272,22 +1272,41 @@ soilTemperatureFullStep _cfg ctx st =
       lwrad_emit = emg * sb * t_grnd ** 4
       dlwrad_emit = 4.0 * emg * sb * t_grnd ** 3
       t_top_soil = safeIdx (t_soisno_col temp) nlevsno
+      -- Top active snow layer temperature (bottom-packed: nlevsno+snl). When
+      -- snow-free this equals the top soil layer, so hs_top_snow == hs_top.
+      t_top_snow = if snl < 0 then safeIdx (t_soisno_col temp) (nlevsno + snl)
+                   else t_top_soil
       lwrad_emit_soil = emg * sb * t_top_soil ** 4
+      lwrad_emit_snow = emg * sb * t_top_snow ** 4
       lwrad_emit_h2osfc = emg * sb * t_h2osfc ** 4
       finiteClamp x
         | isNaN x || isInfinite x = 0.0
         | otherwise = max (-500.0) (min 500.0 x)
-      heatFor emit p =
+      -- Fraction-specific sensible heat: the bareground/canopy step returns the
+      -- bulk eflx_sh_grnd evaluated at t_grnd; the snow- and soil-fraction values
+      -- differ only by the surface-temperature term, recovered via the SH
+      -- conductance cgrnds (= d(SH)/d(Tsurf)). Mirrors Fortran eflx_sh_snow/soil.
+      shAt tSurf p =
+        let shP = safeVec shGrndVec (eflx_sh_grnd_patch ef) p
+            cgrndsP = safeVec cgrndsVec (cgrnds_patch ef) p
+        in shP + cgrndsP * (tSurf - t_grnd)
+      heatForT emit tSurf p =
         let atmLw = if fracVeg p == 0 then emg * forc_lwrad else 0.0
             sabgP = safeVec sabgVec (sabg_patch ef) p
             dlradP = safeVec dlradVec (dlrad_patch ef) p
-            shP = safeVec shGrndVec (eflx_sh_grnd_patch ef) p
             evapP = safeVec evapGrndVec (qflx_evap_grnd_col wf) p
-        in sabgP + dlradP + atmLw - emit - (shP + evapP * htvp)
+        in sabgP + dlradP + atmLw - emit - (shAt tSurf p + evapP * htvp)
+      heatFor emit p = heatForT emit t_grnd p
       hs_top_raw =
         sum [ patchWt p * heatFor lwrad_emit p | p <- [0 .. patchCount - 1] ]
+      -- Top snow-layer surface flux (snow surface temperature, snow-specific SH);
+      -- fed to the top active layer of the solve when snl<0.
+      hs_top_snow_raw =
+        sum [ patchWt p * heatForT lwrad_emit_snow t_top_snow p
+            | p <- [0 .. patchCount - 1] ]
       hs_soil_raw =
-        sum [ patchWt p * heatFor lwrad_emit_soil p | p <- [0 .. patchCount - 1] ]
+        sum [ patchWt p * heatForT lwrad_emit_soil t_top_soil p
+            | p <- [0 .. patchCount - 1] ]
       hs_h2osfc_raw =
         sum [ patchWt p * heatFor lwrad_emit_h2osfc p | p <- [0 .. patchCount - 1] ]
       dhsdT_raw =
@@ -1301,7 +1320,11 @@ soilTemperatureFullStep _cfg ctx st =
       -- Per-patch net ground heat flux (our EFLX_GNET) for parity diff vs the
       -- dumped EFLX_GNET_P (localizes the high-flux T_GRND residual).
       eflxGnetVec = VU.generate patchCount (\p -> heatFor lwrad_emit p)
-      hs_top = finiteClamp hs_top_raw
+      -- The top active layer of the solve is the top snow layer when snl<0, so
+      -- it must receive the snow-surface flux (hs_top_snow); when snow-free it is
+      -- the soil surface and gets the general hs_top. Matches Fortran SetRHSVec
+      -- (top snow layer uses hs_top_snow, soil layer 1 uses hs_soil).
+      hs_top = finiteClamp (if snl < 0 then hs_top_snow_raw else hs_top_raw)
       hs_soil = finiteClamp hs_soil_raw
       hs_h2osfc = finiteClamp hs_h2osfc_raw
       dhsdT = if isNaN dhsdT_raw || isInfinite dhsdT_raw then -4.0 else dhsdT_raw
