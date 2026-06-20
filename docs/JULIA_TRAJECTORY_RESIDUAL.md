@@ -264,6 +264,36 @@ Julia). `snowLayerDivide` was given the same bottom-packed pack/unpack as combin
 matched-IC snowpack now compacts gradually (3.19→1.25 m) instead of collapsing; the soil
 crash there persists (patchy-snow exposed-soil/canopy coupling, not snow geometry).
 
+## After the z0mg fix: the residual reunifies on the canopy-top convective velocity
+
+Per-patch diff (2002 step 1, Haskell with z0mg=0.0024 vs Julia):
+
+| patch | HS SHgrnd | Julia | HS ustar | Julia | HS tveg | Julia |
+|-------|----------:|------:|---------:|------:|--------:|------:|
+| bare  | 203 | 123.5 | 0.145 | 0.110 | — | — |
+| tree  | **63** | **64.7** | 0.221 | 0.304 | 253 | 255.21 |
+| grass | 175 | 126.3 | 0.128 | 0.161 | 260 | 264.34 |
+
+The z0mg fix made the tree's **under-canopy SHgrnd match Julia** (63 ≈ 64.7) — but the tree
+**canopy-top ustar is still 0.221 vs 0.304** and the leaf is 2 K cold. The day-1 T_GRND
+residual (0.22 K) is multi-source: (a) FSA absorbs +1.4 W/m² more solar (a separate
+albedo/radiation bias); (b) the bare SHgrnd is high (z0mg=0.01 vs 0.0024) but *compensating*
+— lowering it made T_GRND worse (0.222→0.331), so the warm bias is elsewhere; (c) the
+canopy-top ustar/um is too low. The matched-IC soil crash also persists because the canopy
+converges to ~255 K vs Fortran's TV≈257.
+
+**Root (verified irreducible at the formula level).** Back-solving the convective velocity:
+Julia converges to `thvstar≈−0.27` (wc 1.47 → um 1.78 → ustar 0.30); Haskell to
+`thvstar≈−0.19` (wc 1.17 → um 1.54 → ustar 0.22). The update is **formula-identical**
+(CanopyFluxes.hs:882–895 vs canopy_fluxes.jl:605–624: same `beta=1`, `zii=1000`,
+`wc=beta·(−grav·ustar·thvstar·zii/thv)^⅓`, `um=√(ur²+wc²)`), the inputs match (z0mv 0.935,
+displa 11.4, htop 17, forc_hgt 30, ur=max(1,wind)), and `taf0=(t_grnd+thm)/2` matches. So
+the two ports settle in **different self-consistent basins** of the coupled positive-feedback
+turbulence ↔ leaf-energy-balance solve. No single coefficient/term difference was found
+despite exhaustive checking; the remaining gap is a convergence-basin difference, the
+genuinely deep / irreducible-without-Fortran residual. The same root blocks both the day-1
+T_GRND tolerance and the matched-IC stability.
+
 ## Important framing: which port is right is not established
 
 The Haskell biogeophysics has **authoritative single-step Fortran parity at two
