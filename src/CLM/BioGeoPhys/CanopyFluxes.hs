@@ -623,10 +623,14 @@ canopyFluxesIteration params ctrl inp tl_ini _ts_ini
       -- ---------------------------------------------------------------
       z0hv  = z0mv   -- z0h = z0m for vegetation (CLM convention)
       z0qv  = z0mv
-      -- Adjust forcing heights by z0 + displa
-      fhgt_u = forc_hgt_u + z0mv + displa
-      fhgt_t = forc_hgt_t + z0hv + displa
-      fhgt_q = forc_hgt_q + z0qv + displa
+      -- forc_hgt_{u,t,q} arrive already adjusted by (z0 + displa) from the
+      -- canopyFluxes initialiser (forc_hgt_u' = raw + z0mv + displa, matching
+      -- Julia's forc_hgt_u_patch). Re-adding here double-counted z0mv+displa,
+      -- inflating zldis (43.26 vs Julia 30.94) -> log(zldis/z0m) too large ->
+      -- ustar too low -> the whole cold-canopy/weak-exchange basin.
+      fhgt_u = forc_hgt_u
+      fhgt_t = forc_hgt_t
+      fhgt_q = forc_hgt_q
 
       (ustar_new, temp1_new, temp2_new, temp12m_new, temp22m_new, fm_new)
         = frictionVelocityProfile displa z0mv z0hv z0qv
