@@ -917,7 +917,12 @@ canopyFluxesStep _cfg ctx st =
                   , cfi_htop           = htop
                   , cfi_displa         = displa'
                   , cfi_z0mv           = z0mv
-                  , cfi_z0mg           = 0.01
+                  -- Ground momentum roughness for the under-canopy drag (csoilb):
+                  -- Fortran/Julia use zsno (0.00085) when snow-covered, else zlnd
+                  -- (0.000775). The prior hardcoded 0.01 was ~12x too large, which
+                  -- inflated rah_below (under-canopy resistance ~308 vs Julia 164),
+                  -- starving the canopy of ground heat and biasing the leaf cold.
+                  , cfi_z0mg           = if frac_sno_eff > 0.0 then 0.00085 else 0.000775
                   , cfi_frac_veg_nosno = fracVeg p
                   , cfi_emv            = emv
                   , cfi_emg            = emg
