@@ -249,13 +249,20 @@ Result (tree patch, step 1): `rah_below` 308→105, `ustar` 0.244→0.332, **tve
 Fortran parity unchanged; no regression. This is the **root fix for the whole winter
 regime** identified above (cold canopy → low dlrad → soil over-cool).
 
-**Residual (z0 method).** The fix uses ZengWang2007 (`zsno=0.00085`, matching Fortran's
-declared value). The Fortran restart is **ctsm5.3, whose default is Meier2022**, and Julia
-uses it — its effective z0mg ≈ 0.0023 (Meier snowmelt branch, `b1=1.4, b4=−0.31`,
-`snomelt_accum≈0.7 mm`). So `rah_below` lands at 105 vs Julia's 164, leaving a slight warm
-overshoot (tveg 255.57 vs 255.21) — actually *closer* to Fortran's TV≈257. Closing the
-last ~0.06 K of the day-1 T_GRND tolerance would need the full Meier2022 z0mg with
-snowmelt-accumulation tracking; the principled 12× fix already captures the bulk.
+**Correct z0mg value (commit 20a85ce).** Dumped Julia's actual `z0mg_col = 0.0024`. The
+authoritative values are in **clm5_params.nc: `zlnd=0.01`, `zsno=0.0024`** — these override
+the Fortran *code* defaults (0.000775/0.00085). So it is NOT Meier2022 (z0method here is
+ZengWang2007); z0mg is just `zsno` from the params file. The old flat 0.01 was correct for
+bare soil (zlnd) but wrong under snow; my first fix used 0.00085 (the code default, not the
+params value). Corrected `cfi_z0mg` to `zsno=0.0024 / zlnd=0.01`, keyed on frac_sno —
+matching Julia's canopy `rah_below=164` exactly. Day-1 T_GRND vs Julia: old 0.01 → 0.61 K;
+corrected 0.0024 → **0.222 K** (the wrong 0.00085 gave 0.157 K only by accidentally
+cancelling a separate downstream bias). Making the *bareground* z0mg snow-aware made the
+trajectory worse (0.222→0.331), so the residual lives in the bare-patch surface
+aerodynamics — a separate compensating bias, not the canopy (whose rah_below now matches
+Julia). `snowLayerDivide` was given the same bottom-packed pack/unpack as combine: the
+matched-IC snowpack now compacts gradually (3.19→1.25 m) instead of collapsing; the soil
+crash there persists (patchy-snow exposed-soil/canopy coupling, not snow geometry).
 
 ## Important framing: which port is right is not established
 
