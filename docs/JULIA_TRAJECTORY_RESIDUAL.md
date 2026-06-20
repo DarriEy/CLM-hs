@@ -282,6 +282,20 @@ albedo/radiation bias); (b) the bare SHgrnd is high (z0mg=0.01 vs 0.0024) but *c
 canopy-top ustar/um is too low. The matched-IC soil crash also persists because the canopy
 converges to ~255 K vs Fortran's TV≈257.
 
+## DAY-1 T_GRND TEST NOW PASSES: solar-zenith fix (commit 17ee8ee)
+
+The day-1 residual that survived the canopy fix was the **FSA / solar zenith**. The
+surface-radiation step computes the proper `shr_orb_cosz` only when `tcNextswCday > 1.0`;
+`buildTimestepContext` left it at the sentinel 1.0, so the offline pipeline fell back to
+`cos(declin) ≈ 0.92` at Bow in January when the true coszen is ~0.27 — a near-overhead
+sun → too-low direct-beam albedo → +1.4 W/m² too much absorbed solar → warm ground. Fix:
+set `tcNextswCday = calday + dtime/86400`. coszen now 0.268 (Julia 0.258). **Day-1
+T_GRND now within 0.10 K — the "Day 1 T_GRND matches Julia reference" test PASSES**
+(suite 3→2 failures). Fortran parity unchanged (it already supplies a real tcNextswCday).
+The remaining "core trajectory fields" failures are isolated to snow accumulation
+(H2OSNO/SNOW_DEPTH/FRAC_SNO), the winter LH residual, and the bare-vs-weighted SH
+diagnostic mismatch — separate subsystems.
+
 ## SOLVER GAP CLOSED: the zldis double-adjustment (commit dcc55c2)
 
 The "irreducible convergence-basin" framing below was **wrong** — a per-iteration diff of
