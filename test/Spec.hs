@@ -1456,13 +1456,29 @@ main = hspec $ do
         then pendingWith "Fortran reference dumps not present on this machine"
         else do
           rows <- driftReport "test/data"
-          -- Measurement only: assert the harness produced drift series and that
-          -- every reported drift value is finite (no NaN/Inf blow-up). We do NOT
-          -- assert bounded vs diverging here — the printed table is the signal.
+          -- Assert the harness produced drift series and that every reported
+          -- value is finite (no NaN/Inf blow-up).
           not (null rows) `shouldBe` True
           let allVals = concatMap (\(_,_,ser) -> ser) rows
           all (\x -> not (isNaN x) && not (isInfinite x)) allVals
             `shouldBe` True
+          -- HARD guard: over the 28-step free-run (state injected ONCE, then
+          -- carried), every CN/BGC state POOL tracks Fortran to < 1% relative
+          -- drift. Two documented exclusions:
+          --   * xsmrpool — HARNESS artifact (GPP=0 on injection -> availc=0 -> the
+          --     excess-MR-storage recovery is correctly capped to 0 while Fortran,
+          --     with real GPP, recovers). The allocation/recovery physics matches
+          --     Fortran exactly; see memory soil-solver-and-pipeline-parity.
+          --   * the per-layer N-transformation FLUX probes (*_VR_P, e.g.
+          --     GROSS_NMIN_VR_P) — diagnostic fluxes with a 100% registry tol,
+          --     inherently noisy in this near-equilibrium window.
+          -- Biophysical drift fields are guarded separately (generality test).
+          let cnDrift = [ (nm, maximum (0 : map abs ser))
+                        | (nm, isCN, ser) <- rows
+                        , isCN, nm /= "xsmrpool"
+                        , not ("_VR_P" `isInfixOf` nm) ]
+              cnFails = [ nm ++ "=" ++ show d | (nm, d) <- cnDrift, d > 1.0e-2 ]
+          cnFails `shouldBe` []
 
   -- =====================================================================
   -- Generality: a SECOND, independent case (clm_parity_run, 2003 forcing,
