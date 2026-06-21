@@ -152,7 +152,8 @@ import CLM.BioGeoPhys.SoilFluxes
 import CLM.BioGeoPhys.SnowSNICAR
   ( SnicarParams(..), defaultSnicarParams
   , SnowageGrainInput(..), SnowageGrainResult(..)
-  , snowageGrainLayer )
+  , snowageGrainLayer
+  , SnicarOptics(..), emptySnicarOptics, snicarSnowAlbedo )
 import CLM.BioGeoPhys.SurfaceResistance
   ( BetaInput(..), BetaResult(..)
   , calcBetaLeePielke1992 )
@@ -199,8 +200,8 @@ import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 -- ============================================================================
 
 -- | Physics pipeline with ALL slots wired. No idStep remaining.
-wiredPhysicsPipeline :: SurfaceAlbedoConstants -> CanopyHydrologyParams -> PhysicsPipeline
-wiredPhysicsPipeline albConst chParams = defaultPhysicsPipeline
+wiredPhysicsPipeline :: SurfaceAlbedoConstants -> CanopyHydrologyParams -> SnicarOptics -> PhysicsPipeline
+wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
   { ppDayLength          = dayLengthStep
   , ppPhenology          = phenologyStep
   , ppActiveLayer        = activeLayerStep
@@ -208,7 +209,7 @@ wiredPhysicsPipeline albConst chParams = defaultPhysicsPipeline
   , ppCanopyInterception = canopyHydrologyStepP chParams
   , ppHandleNewSnow      = snowWaterStep
   , ppFracH2oSfc         = fracH2oSfcStep
-  , ppSurfaceRadiation   = surfaceRadiationStepWithAlbedo albConst
+  , ppSurfaceRadiation   = surfaceRadiationStepWithAlbedo albConst snicarOpt
   , ppPreFluxCalcs       = preFluxCalcsStep
   , ppSoilEvapResistance = soilEvapResistanceStep
   , ppSurfaceHumidity    = surfaceHumidityStep
@@ -232,7 +233,7 @@ wiredPhysicsPipeline albConst chParams = defaultPhysicsPipeline
   , ppHydrologyDrainage  = hydrologyDrainageStep
   , ppWaterBalance       = waterBalanceStep
   , ppEnergyBalance      = energyBalanceStep
-  , ppSurfaceAlbedo      = surfaceAlbedoStep albConst
+  , ppSurfaceAlbedo      = surfaceAlbedoStep albConst snicarOpt
   }
 
 -- ============================================================================
@@ -1803,10 +1804,10 @@ preFluxCalcsStep _cfg ctx st =
 -- ============================================================================
 
 surfaceRadiationStep :: PhysicsStep
-surfaceRadiationStep = surfaceRadiationStepWithAlbedo defaultSurfAlbConstants
+surfaceRadiationStep = surfaceRadiationStepWithAlbedo defaultSurfAlbConstants emptySnicarOptics
 
-surfaceRadiationStepWithAlbedo :: SurfaceAlbedoConstants -> PhysicsStep
-surfaceRadiationStepWithAlbedo albConst _cfg ctx st =
+surfaceRadiationStepWithAlbedo :: SurfaceAlbedoConstants -> SnicarOptics -> PhysicsStep
+surfaceRadiationStepWithAlbedo albConst snicarOpt _cfg ctx st =
   let snl = clmSnl st
       wdiag = clmWaterDiagBulk st
       cs = clmCanopyState st
@@ -1875,10 +1876,27 @@ surfaceRadiationStepWithAlbedo albConst _cfg ctx st =
 
       useAlbDriver = not (VU.null (albsat albConst)) && mxsoilColor albConst > 0
 
-      -- SNICAR snow albedo (column-level, same for all patches). Placeholder
-      -- until the SNICAR optics + RT are wired (Stage D); Nothing => the driver
-      -- uses its age-based snowAlbedoFallback, preserving current behavior.
-      snicarSnowAlb = Nothing :: Maybe (VU.Vector Double, VU.Vector Double)
+      -- SNICAR snow albedo (column-level, same for all patches). Runs the full
+      -- adding-doubling RT with real 5-band optics when present and there is
+      -- illuminated snow; Nothing => the driver uses its age-based fallback.
+      snicarSnowAlb =
+        if frac_sno > 0.0
+        then let snlS     = clmSnl st
+                 explicit = if snlS < 0
+                            then sum [ safeIdx (h2osoi_ice_col ws) j + safeIdx (h2osoi_liq_col ws) j
+                                     | j <- [nlevsno + snlS .. nlevsno - 1] ]
+                            else 0.0
+                 h2oTot   = max 0.0 (h2osno_col ws + explicit)
+                 rdsTop   = let r = safeIdx (wdiag_snw_rds_top_col wdiag) 0
+                            in if r >= 30.0 then round r else 54
+                 rdsVec   = VU.replicate nlevsno rdsTop
+                 zeroSnow = VU.replicate nlevsno 0.0
+                 -- snl=0 => snicarRTColumn uses its virtual-layer path with the
+                 -- total SWE (fresh grain radius), avoiding the bottom-packed vs
+                 -- top-packed snow-layer indexing mismatch for deep packs.
+             in snicarSnowAlbedo snicarOpt coszen albsod_vis albsod_nir
+                                 0 zeroSnow zeroSnow rdsVec h2oTot
+        else Nothing
 
       albsod_vis = 0.18
       albsod_nir = 0.29
@@ -2303,8 +2321,8 @@ soilHydrologyStep _cfg ctx st =
 -- Surface Albedo adapter (two-stream via surfaceAlbedoDriver)
 -- ============================================================================
 
-surfaceAlbedoStep :: SurfaceAlbedoConstants -> PhysicsStep
-surfaceAlbedoStep albConst _cfg ctx st =
+surfaceAlbedoStep :: SurfaceAlbedoConstants -> SnicarOptics -> PhysicsStep
+surfaceAlbedoStep albConst snicarOpt _cfg ctx st =
   let wdiag = clmWaterDiagBulk st
       cs = clmCanopyState st
       temp = clmTemp st
@@ -2336,6 +2354,23 @@ surfaceAlbedoStep albConst _cfg ctx st =
              , sai_lakeIcefrac2 = 0.0
              }
 
+           ws = clmWaterState st
+           snicarSnowAlb =
+             if frac_sno > 0.0
+             then let snlS     = clmSnl st
+                      explicit = if snlS < 0
+                                 then sum [ safeIdx (h2osoi_ice_col ws) j + safeIdx (h2osoi_liq_col ws) j
+                                          | j <- [nlevsno + snlS .. nlevsno - 1] ]
+                                 else 0.0
+                      h2oTot   = max 0.0 (h2osno_col ws + explicit)
+                      rdsTop   = let r = safeIdx (wdiag_snw_rds_top_col wdiag) 0
+                                 in if r >= 30.0 then round r else 54
+                      rdsVec   = VU.replicate nlevsno rdsTop
+                      zeroSnow = VU.replicate nlevsno 0.0
+                  in snicarSnowAlbedo snicarOpt coszen 0.18 0.29
+                                      0 zeroSnow zeroSnow rdsVec h2oTot
+             else Nothing
+
            albInp = SurfAlbDriverInput
              { sadi_coszen      = coszen
              , sadi_soilAlbIn   = soilInp
@@ -2353,7 +2388,7 @@ surfaceAlbedoStep albConst _cfg ctx st =
              , sadi_taul        = VU.fromList [0.05, 0.25]
              , sadi_taus        = VU.fromList [0.001, 0.001]
              , sadi_xl          = 0.01
-             , sadi_snowAlbOverride = Nothing
+             , sadi_snowAlbOverride = snicarSnowAlb
              }
 
            albResult = surfaceAlbedoDriver albConst albInp

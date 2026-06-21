@@ -51,6 +51,7 @@ import CLM.Driver.CLMDriver
   ( CLMState(..), CLMDriverState(..), TimestepContext(..)
   , defaultDriverState, clmDrv )
 import CLM.Driver.PhysicsAdapters (wiredPhysicsPipeline)
+import CLM.BioGeoPhys.SnowSNICAR (emptySnicarOptics)
 import CLM.BioGeoPhys.CanopyHydrology (defaultCanopyHydroParams)
 import CLM.Constants.PhysicalConstants (nlevgrnd, nlevsoi)
 import CLM.Constants.ControlFlags (defaultDriverConfig)
@@ -289,7 +290,7 @@ runCLMAndRoute site params st0 forcing albConst totalSteps =
       !stInjected = injectParams params st0
 
       -- Run CLM pipeline, collect hourly QRUNOFF
-      !pipeline = wiredPhysicsPipeline albConst defaultCanopyHydroParams
+      !pipeline = wiredPhysicsPipeline albConst defaultCanopyHydroParams emptySnicarOptics
       !drvCfg = defaultDriverConfig
 
       runSteps !st !drvSt !step !qAcc

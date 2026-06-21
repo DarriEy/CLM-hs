@@ -65,8 +65,24 @@ import CLM.Infrastructure.Orbital
   ( computeOrbital, defaultOrbitalParams )
 import CLM.BioGeoPhys.SurfaceAlbedo
   ( SurfaceAlbedoConstants(..), initSoilAlbedoTables )
+import CLM.BioGeoPhys.SnowSNICAR
+  ( SnicarOptics(..), emptySnicarOptics )
 import CLM.BioGeoPhys.RootBioPhys
   ( RootFrInput(..), RootingProfileMethod(..), computeRootFr )
+
+-- | Load the 5-band SNICAR Mie optics + flux weights from @<dir>/snicar@.
+-- Returns 'emptySnicarOptics' if absent (SNICAR then falls back to the
+-- age-based snow albedo, preserving prior behavior).
+readSnicarOptics :: FilePath -> IO SnicarOptics
+readSnicarOptics dir = do
+  let sd = dir </> "snicar"
+      rd nm = do let p = sd </> (nm ++ ".bin")
+                 e <- doesFileExist p
+                 if e then readFloat64Vector p else return VU.empty
+  ssD <- rd "ss_alb_dir"; exD <- rd "ext_cff_dir"; asD <- rd "asm_dir"; fwD <- rd "flx_wgt_dir"
+  ssI <- rd "ss_alb_dif"; exI <- rd "ext_cff_dif"; asI <- rd "asm_dif"; fwI <- rd "flx_wgt_dif"
+  if VU.null ssD then return emptySnicarOptics
+                 else return (SnicarOptics ssD exD asD fwD ssI exI asI fwI)
 
 -- ============================================================================
 -- Configuration
@@ -553,6 +569,7 @@ runPipeline cfg = do
 
   (st0_, forcing, albConst) <- initCLMStateFromDir dir
   chParams <- readCanopyHydroParamsFromDir dir
+  snicarOpt <- readSnicarOptics dir
 
   let st0 = if pcUseCN cfg
             then st0_ { clmCNActive = True
@@ -577,7 +594,7 @@ runPipeline cfg = do
               ++ ", soilOrgC=" ++ show (clmSoilOrgC st0) ++ " gC/m2)"
 
   let drvCfg = defaultDriverConfig
-      pipeline = wiredPhysicsPipeline albConst chParams
+      pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
   go st0 defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
@@ -656,6 +673,7 @@ runCLMForQrunoff cfg = do
 
   (st0_, forcing, albConst) <- initCLMStateFromDir dir
   chParams <- readCanopyHydroParamsFromDir dir
+  snicarOpt <- readSnicarOptics dir
 
   let st0 = if pcUseCN cfg
             then st0_ { clmCNActive = True
@@ -667,7 +685,7 @@ runCLMForQrunoff cfg = do
             else st0_
 
   let drvCfg = defaultDriverConfig
-      pipeline = wiredPhysicsPipeline albConst chParams
+      pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
   goQ st0 defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
   where

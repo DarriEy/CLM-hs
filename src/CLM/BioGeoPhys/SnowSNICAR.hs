@@ -39,6 +39,11 @@ module CLM.BioGeoPhys.SnowSNICAR
   , SnicarMultiBandInput(..)
   , SnicarMultiBandResult(..)
   , snicarRTMultiBand
+    -- * Optics tables + column snow albedo
+  , SnicarOptics(..)
+  , emptySnicarOptics
+  , snicarOpticsPresent
+  , snicarSnowAlbedo
     -- * Delta-Eddington layer properties
   , deltaEddingtonLayer
   , DeltaEddingtonProps(..)
@@ -728,3 +733,71 @@ snicarRTMultiBand !inp =
 isFiniteDouble :: Double -> Bool
 isFiniteDouble x = not (isNaN x) && not (isInfinite x)
 {-# INLINE isFiniteDouble #-}
+
+-- ========================================================================
+-- SNICAR optics tables (band-major [nbands*nRadii]) loaded once per run
+-- ========================================================================
+
+-- | The 5-band SNICAR Mie optics + spectral flux weights for direct and
+-- diffuse beams (pic16 ice model, mid-latitude-winter profile). Band-major
+-- layout: band b occupies slice [b*idxMieSnwMx .. ]. Empty vectors => absent.
+data SnicarOptics = SnicarOptics
+  { sno_ss_alb_dir  :: !(VU.Vector Double)
+  , sno_ext_cff_dir :: !(VU.Vector Double)
+  , sno_asm_dir     :: !(VU.Vector Double)
+  , sno_flx_wgt_dir :: !(VU.Vector Double)
+  , sno_ss_alb_dif  :: !(VU.Vector Double)
+  , sno_ext_cff_dif :: !(VU.Vector Double)
+  , sno_asm_dif     :: !(VU.Vector Double)
+  , sno_flx_wgt_dif :: !(VU.Vector Double)
+  } deriving (Show)
+
+-- | Empty optics (=> SNICAR disabled, callers fall back to age-based albedo).
+emptySnicarOptics :: SnicarOptics
+emptySnicarOptics = SnicarOptics e e e e e e e e where e = VU.empty
+
+-- | True when the optics tables are populated.
+snicarOpticsPresent :: SnicarOptics -> Bool
+snicarOpticsPresent o =
+  VU.length (sno_ss_alb_dir o) >= defaultNumberBands * idxMieSnwMx
+
+-- | Compute SNICAR direct+diffuse snow albedo (albsnd, albsni) per 2-band
+-- waveband [vis, nir] for one column, given the optics, the under-snow soil
+-- albedo (vis,nir), and the snow column state. Returns Nothing when optics are
+-- absent or there is no illuminated snow.
+snicarSnowAlbedo
+  :: SnicarOptics
+  -> Double            -- ^ coszen
+  -> Double            -- ^ albsod_vis (under-snow soil, direct)
+  -> Double            -- ^ albsod_nir
+  -> Int               -- ^ snl (<=0)
+  -> VU.Vector Double  -- ^ h2osno_ice per layer (nlevsno)
+  -> VU.Vector Double  -- ^ h2osno_liq per layer (nlevsno)
+  -> VU.Vector Int     -- ^ snw_rds per layer (nlevsno) [microns]
+  -> Double            -- ^ h2osno_total
+  -> Maybe (VU.Vector Double, VU.Vector Double)
+snicarSnowAlbedo o coszen albsodVis albsodNir snl ice liq rds h2oTot
+  | not (snicarOpticsPresent o) = Nothing
+  | coszen <= 0.0 || h2oTot <= minSnw = Nothing
+  | otherwise =
+      let albsfc = VU.fromList [albsodVis, albsodNir, albsodNir, albsodNir, albsodNir]
+          nAer = defaultNumberBands * snoNbrAer
+          mkInp dir ssAlb extCff asm flxWgt = SnicarMultiBandInput
+            { smbi_nbands = defaultNumberBands, smbi_nir_bnd_bgn = 1
+            , smbi_coszen = coszen, smbi_flg_direct = dir, smbi_snl = snl
+            , smbi_ss_alb_snw = ssAlb, smbi_ext_cff_mss = extCff, smbi_asm_prm_snw = asm
+            , smbi_ss_alb_aer  = VU.replicate nAer 0.0
+            , smbi_ext_cff_aer = VU.replicate nAer 0.0
+            , smbi_asm_prm_aer = VU.replicate nAer 0.0
+            , smbi_flx_wgt = flxWgt
+            , smbi_albsfc = albsfc
+            , smbi_h2osno_ice = ice, smbi_h2osno_liq = liq
+            , smbi_snw_rds = rds
+            , smbi_mss_cnc_aer = VU.replicate (nlevsno * snoNbrAer) 0.0
+            , smbi_h2osno_total = h2oTot
+            }
+          rDir = snicarRTMultiBand (mkInp True  (sno_ss_alb_dir o) (sno_ext_cff_dir o) (sno_asm_dir o) (sno_flx_wgt_dir o))
+          rDif = snicarRTMultiBand (mkInp False (sno_ss_alb_dif o) (sno_ext_cff_dif o) (sno_asm_dif o) (sno_flx_wgt_dif o))
+          albsnd = VU.fromList [smbr_albout_vis rDir, smbr_albout_nir rDir]
+          albsni = VU.fromList [smbr_albout_vis rDif, smbr_albout_nir rDif]
+      in Just (albsnd, albsni)
