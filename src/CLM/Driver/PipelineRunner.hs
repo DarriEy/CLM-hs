@@ -37,6 +37,8 @@ import CLM.Driver.CLMDriver
   , defaultCLMState, defaultDriverState, defaultTimestepContext
   , clmDrv )
 import CLM.Driver.PhysicsAdapters (wiredPhysicsPipeline)
+import CLM.BioGeoPhys.CanopyHydrology
+  ( CanopyHydrologyParams(..), defaultCanopyHydroParams )
 
 import CLM.Types.ColumnData (ColumnData(..))
 import CLM.Types.TemperatureData (TemperatureData(..))
@@ -50,7 +52,7 @@ import CLM.Types.GridcellData (GridcellData(..))
 import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 
 import CLM.Infrastructure.BinaryIO
-  ( readFloat64Vector, readInt64Vector
+  ( readFloat64Vector, readInt64Vector, readFloat64Scalar
   , readManifestDims, ManifestDims(..) )
 import CLM.Infrastructure.ReadParams
   ( readParametersBinary, AllParams(..), PFTConstants(..) )
@@ -88,6 +90,37 @@ defaultPipelineConfig = PipelineConfig
   , pcOutputCSV = ""
   , pcUseCN = False
   }
+
+-- ============================================================================
+-- Canopy-hydrology parameters from the CLM parameter file
+-- ============================================================================
+
+-- | Read canopy-hydrology scalar parameters from @<dir>/params/chyd_*.bin@,
+-- falling back to 'defaultCanopyHydroParams' field-by-field when a file is
+-- absent. This is how the param-file's maximum_leaf_wetted_fraction (etc.)
+-- reaches the canopy hydrology step instead of a hard-coded default.
+readCanopyHydroParamsFromDir :: FilePath -> IO CanopyHydrologyParams
+readCanopyHydroParamsFromDir dir = do
+  let pdir = dir </> "params"
+      rdOr deflt name = do
+        let f = pdir </> ("chyd_" ++ name ++ ".bin")
+        ex <- doesFileExist f
+        if ex then readFloat64Scalar f else return deflt
+      d = defaultCanopyHydroParams
+  mlwf  <- rdOr (chp_maximum_leaf_wetted_fraction d) "maximum_leaf_wetted_fraction"
+  liqs  <- rdOr (chp_liq_canopy_storage_scalar d)    "liq_canopy_storage_scalar"
+  snos  <- rdOr (chp_snow_canopy_storage_scalar d)   "snow_canopy_storage_scalar"
+  intf  <- rdOr (chp_interception_fraction d)        "interception_fraction"
+  uwind <- rdOr (chp_snowcan_unload_wind_fact d)     "snowcan_unload_wind_fact"
+  utemp <- rdOr (chp_snowcan_unload_temp_fact d)     "snowcan_unload_temp_fact"
+  return d
+    { chp_maximum_leaf_wetted_fraction = mlwf
+    , chp_liq_canopy_storage_scalar    = liqs
+    , chp_snow_canopy_storage_scalar   = snos
+    , chp_interception_fraction        = intf
+    , chp_snowcan_unload_wind_fact     = uwind
+    , chp_snowcan_unload_temp_fact     = utemp
+    }
 
 -- ============================================================================
 -- CLMState initialization from binary test data
@@ -519,6 +552,7 @@ runPipeline cfg = do
       totalSteps = ndays * stepsPerDay
 
   (st0_, forcing, albConst) <- initCLMStateFromDir dir
+  chParams <- readCanopyHydroParamsFromDir dir
 
   let st0 = if pcUseCN cfg
             then st0_ { clmCNActive = True
@@ -543,7 +577,7 @@ runPipeline cfg = do
               ++ ", soilOrgC=" ++ show (clmSoilOrgC st0) ++ " gC/m2)"
 
   let drvCfg = defaultDriverConfig
-      pipeline = wiredPhysicsPipeline albConst
+      pipeline = wiredPhysicsPipeline albConst chParams
 
   go st0 defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
@@ -621,6 +655,7 @@ runCLMForQrunoff cfg = do
       totalSteps = ndays * stepsPerDay
 
   (st0_, forcing, albConst) <- initCLMStateFromDir dir
+  chParams <- readCanopyHydroParamsFromDir dir
 
   let st0 = if pcUseCN cfg
             then st0_ { clmCNActive = True
@@ -632,7 +667,7 @@ runCLMForQrunoff cfg = do
             else st0_
 
   let drvCfg = defaultDriverConfig
-      pipeline = wiredPhysicsPipeline albConst
+      pipeline = wiredPhysicsPipeline albConst chParams
 
   goQ st0 defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
   where

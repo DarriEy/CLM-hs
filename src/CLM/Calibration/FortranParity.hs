@@ -70,6 +70,7 @@ import CLM.Driver.CLMDriver
   , BoundarySnapshots(..)
   , defaultDriverState, defaultTimestepContext, clmDrvBoundaries )
 import CLM.Driver.PhysicsAdapters (wiredPhysicsPipeline)
+import CLM.BioGeoPhys.CanopyHydrology (defaultCanopyHydroParams)
 import CLM.Driver.PipelineRunner
   ( initCLMStateFromDir, SurfaceAlbedoConstants )
 import CLM.Infrastructure.ForcingReader
@@ -668,7 +669,8 @@ contextForStep h path = do
 -- | Inject → one 'clmDrvBoundaries' step → boundary snapshots.
 runOneStepBoundaries :: ParityHarness -> (CLMState, TimestepContext) -> BoundarySnapshots
 runOneStepBoundaries h (st, ctx) =
-  snd (clmDrvBoundaries defaultDriverConfig (wiredPhysicsPipeline (phAlb h))
+  snd (clmDrvBoundaries defaultDriverConfig
+                        (wiredPhysicsPipeline (phAlb h) defaultCanopyHydroParams)
                         ctx defaultDriverState st)
 
 -- ============================================================================

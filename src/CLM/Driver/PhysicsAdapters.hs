@@ -199,13 +199,13 @@ import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 -- ============================================================================
 
 -- | Physics pipeline with ALL slots wired. No idStep remaining.
-wiredPhysicsPipeline :: SurfaceAlbedoConstants -> PhysicsPipeline
-wiredPhysicsPipeline albConst = defaultPhysicsPipeline
+wiredPhysicsPipeline :: SurfaceAlbedoConstants -> CanopyHydrologyParams -> PhysicsPipeline
+wiredPhysicsPipeline albConst chParams = defaultPhysicsPipeline
   { ppDayLength          = dayLengthStep
   , ppPhenology          = phenologyStep
   , ppActiveLayer        = activeLayerStep
   , ppDrvInit            = drvInitStep
-  , ppCanopyInterception = canopyHydrologyStep
+  , ppCanopyInterception = canopyHydrologyStepP chParams
   , ppHandleNewSnow      = snowWaterStep
   , ppFracH2oSfc         = fracH2oSfcStep
   , ppSurfaceRadiation   = surfaceRadiationStepWithAlbedo albConst
@@ -324,8 +324,16 @@ surfaceHumidityStep _cfg _ctx st =
 -- Canopy Hydrology adapter
 -- ============================================================================
 
+-- | Default-parameter canopy hydrology step (kept for unit tests / callers that
+-- don't thread a parameter set). Production runs use 'canopyHydrologyStepP' with
+-- parameters read from the CLM parameter file.
 canopyHydrologyStep :: PhysicsStep
-canopyHydrologyStep _cfg ctx st =
+canopyHydrologyStep = canopyHydrologyStepP defaultCanopyHydroParams
+
+-- | Canopy hydrology step parameterized by the canopy-hydrology parameter set
+-- (so maximum_leaf_wetted_fraction etc. come from the param file, not a default).
+canopyHydrologyStepP :: CanopyHydrologyParams -> PhysicsStep
+canopyHydrologyStepP chParams _cfg ctx st =
   let dtime = tcDtime ctx
       forc_rain = if VU.null (tcForcRain ctx) then 0.0
                   else tcForcRain ctx VU.! 0
@@ -369,7 +377,7 @@ canopyHydrologyStep _cfg ctx st =
 
       resultForPatch p =
         canopyInterceptionAndThroughfall CanopyHydrologyInput
-          { chi_params               = defaultCanopyHydroParams
+          { chi_params               = chParams
           , chi_dtime                = dtime
           , chi_frac_veg_nosno       = patchFracVeg p
           , chi_elai                 = safeIdx (cstate_elai_patch cs) p
