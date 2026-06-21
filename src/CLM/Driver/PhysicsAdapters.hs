@@ -1875,6 +1875,11 @@ surfaceRadiationStepWithAlbedo albConst _cfg ctx st =
 
       useAlbDriver = not (VU.null (albsat albConst)) && mxsoilColor albConst > 0
 
+      -- SNICAR snow albedo (column-level, same for all patches). Placeholder
+      -- until the SNICAR optics + RT are wired (Stage D); Nothing => the driver
+      -- uses its age-based snowAlbedoFallback, preserving current behavior.
+      snicarSnowAlb = Nothing :: Maybe (VU.Vector Double, VU.Vector Double)
+
       albsod_vis = 0.18
       albsod_nir = 0.29
       albsoi_vis = 0.18
@@ -1953,6 +1958,7 @@ surfaceRadiationStepWithAlbedo albConst _cfg ctx st =
                 , sadi_taul = taul
                 , sadi_taus = taus
                 , sadi_xl = xl
+                , sadi_snowAlbOverride = snicarSnowAlb
                 }
               else Nothing
             albsod =
@@ -2347,6 +2353,7 @@ surfaceAlbedoStep albConst _cfg ctx st =
              , sadi_taul        = VU.fromList [0.05, 0.25]
              , sadi_taus        = VU.fromList [0.001, 0.001]
              , sadi_xl          = 0.01
+             , sadi_snowAlbOverride = Nothing
              }
 
            albResult = surfaceAlbedoDriver albConst albInp

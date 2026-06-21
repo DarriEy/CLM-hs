@@ -664,53 +664,59 @@ snicarRTMultiBand :: SnicarMultiBandInput -> SnicarMultiBandResult
 snicarRTMultiBand !inp =
   let !nbands = smbi_nbands inp
       !nirBgn = smbi_nir_bnd_bgn inp
+      !nRadii = idxMieSnwMx
       !nlyr = nlevsno + 1
 
-      -- Per-band RT: for each band, get albedo and absorbed flux
-      bandResult bnd =
-        let -- Look up Mie properties for this band (simplified: use first radius entry)
-            !rdsIdx = 0  -- placeholder; actual implementation indexes by snw_rds
-            !ssAlb = if bnd < VU.length (smbi_ss_alb_snw inp)
-                     then smbi_ss_alb_snw inp VU.! bnd else 0.99
-            !extCff = if bnd < VU.length (smbi_ext_cff_mss inp)
-                      then smbi_ext_cff_mss inp VU.! bnd else 1.0
-            !asmPrm = if bnd < VU.length (smbi_asm_prm_snw inp)
-                      then smbi_asm_prm_snw inp VU.! bnd else 0.86
-            !albsfc = if bnd < VU.length (smbi_albsfc inp)
-                      then smbi_albsfc inp VU.! bnd else 0.3
-            -- Compute bulk layer optical properties
-            !totalMass = smbi_h2osno_total inp
-            !tau = totalMass * extCff
-            !omega = ssAlb
-            !g = asmPrm
-            !muNot = max 0.01 (smbi_coszen inp)
-            -- Delta-Eddington for this band
-            !deProps = deltaEddingtonLayer tau omega g muNot
-            !albedo = if smbi_flg_direct inp then dep_rdir deProps else dep_rdif_a deProps
-            !wgt = if bnd < VU.length (smbi_flx_wgt inp)
-                   then smbi_flx_wgt inp VU.! bnd else 1.0 / fromIntegral nbands
-        in (albedo, wgt, 1.0 - albedo)
+      -- Optics are stored band-major (band b occupies slice [b*nRadii ..]);
+      -- snicarRTColumn indexes each band's slice by grain-radius offset.
+      sliceBand b v = if VU.length v >= (b + 1) * nRadii
+                      then VU.slice (b * nRadii) nRadii v else v
+      sliceAer  b v = if VU.length v >= (b + 1) * snoNbrAer
+                      then VU.slice (b * snoNbrAer) snoNbrAer v
+                      else VU.replicate snoNbrAer 0.0
 
-      !bandResults = map bandResult [0 .. nbands - 1]
+      -- Full adding-doubling RT per band via 'snicarRTColumn'.
+      bandRT b =
+        let !albsfcB = if b < VU.length (smbi_albsfc inp)
+                       then smbi_albsfc inp VU.! b else 0.3
+        in snicarRTColumn SnicarRTInput
+             { srt_coszen       = smbi_coszen inp
+             , srt_flg_slr_in   = if smbi_flg_direct inp then 1 else 2
+             , srt_h2osno_liq   = smbi_h2osno_liq inp
+             , srt_h2osno_ice   = smbi_h2osno_ice inp
+             , srt_h2osno_total = smbi_h2osno_total inp
+             , srt_snw_rds      = smbi_snw_rds inp
+             , srt_snl          = smbi_snl inp
+             , srt_frac_sno     = 1.0
+             , srt_albsfc_vis   = albsfcB
+             , srt_albsfc_nir   = albsfcB
+             , srt_mss_cnc_aer  = smbi_mss_cnc_aer inp
+             , srt_ss_alb_snw   = sliceBand b (smbi_ss_alb_snw inp)
+             , srt_ext_cff_mss  = sliceBand b (smbi_ext_cff_mss inp)
+             , srt_asm_prm_snw  = sliceBand b (smbi_asm_prm_snw inp)
+             , srt_ss_alb_aer   = sliceAer b (smbi_ss_alb_aer inp)
+             , srt_ext_cff_aer  = sliceAer b (smbi_ext_cff_aer inp)
+             , srt_asm_prm_aer  = sliceAer b (smbi_asm_prm_aer inp)
+             }
 
-      -- Aggregate into VIS and NIR
-      !visResults = take nirBgn bandResults
-      !nirResults = drop nirBgn bandResults
+      !bandRes = map bandRT [0 .. nbands - 1]
+      bandAlb b = srr_albedo (bandRes !! b)
+      wgtAt b   = if b < VU.length (smbi_flx_wgt inp) then smbi_flx_wgt inp VU.! b else 0.0
 
-      weightedAlbedo results =
-        let !totalWgt = sum [w | (_, w, _) <- results]
-            !weightedSum = sum [a * w | (a, w, _) <- results]
-        in if totalWgt > 0.0 then weightedSum / totalWgt else 0.0
+      -- VIS = band 0; NIR = flux-weighted average over bands [nirBgn ..].
+      !albVis  = bandAlb 0
+      !nirIdx  = [nirBgn .. nbands - 1]
+      !nirWsum = sum [wgtAt b | b <- nirIdx]
+      !albNir  = if nirWsum > 0.0
+                 then sum [wgtAt b * bandAlb b | b <- nirIdx] / nirWsum else 0.0
 
-      !albVis = weightedAlbedo visResults
-      !albNir = weightedAlbedo nirResults
-
-      -- Total absorbed flux (simplified: distribute by absorption fraction)
-      !totalAbs = 1.0 - (albVis + albNir) / 2.0
+      -- Per-layer absorbed flux: VIS(band 0) + flux-weighted NIR (broadband sum).
       !flxAbs = VU.generate nlyr $ \j ->
-        if j == 0 then totalAbs * 0.5       -- top snow layer
-        else if j == nlyr - 1 then totalAbs * 0.3  -- ground
-        else totalAbs * 0.2 / max 1.0 (fromIntegral (nlyr - 2))
+        let visA = srr_flx_abs (bandRes !! 0) VU.! j
+            nirA = if nirWsum > 0.0
+                   then sum [wgtAt b * (srr_flx_abs (bandRes !! b) VU.! j) | b <- nirIdx] / nirWsum
+                   else 0.0
+        in visA + nirA
 
   in SnicarMultiBandResult
      { smbr_albout_vis = max 0.0 (min 1.0 albVis)

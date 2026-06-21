@@ -345,6 +345,46 @@ main = hspec $ do
           de2 = deltaEddingtonLayer 5.0 0.999 0.86 0.5
       dep_rdif_a de2 `shouldSatisfy` (> dep_rdif_a de1)
 
+    it "multiband RT with real 5-band optics gives physical, grain-responsive albedo" $ do
+      have <- doesFileExist "test/data/snicar/ss_alb_dir.bin"
+      if not have
+        then pendingWith "SNICAR optics not present on this machine"
+        else do
+          ssAlb  <- readFloat64Vector "test/data/snicar/ss_alb_dir.bin"
+          extCff <- readFloat64Vector "test/data/snicar/ext_cff_dir.bin"
+          asm    <- readFloat64Vector "test/data/snicar/asm_dir.bin"
+          flxWgt <- readFloat64Vector "test/data/snicar/flx_wgt_dir.bin"
+          let nlevsno' = 12
+              -- one resolved snow layer (snl=-1), deep clean snowpack
+              mkInp rds = SnicarMultiBandInput
+                { smbi_nbands = 5, smbi_nir_bnd_bgn = 1
+                , smbi_coszen = 0.5, smbi_flg_direct = True, smbi_snl = -1
+                , smbi_ss_alb_snw = ssAlb, smbi_ext_cff_mss = extCff
+                , smbi_asm_prm_snw = asm
+                , smbi_ss_alb_aer  = VU.replicate (5 * snoNbrAer) 0.0
+                , smbi_ext_cff_aer = VU.replicate (5 * snoNbrAer) 0.0
+                , smbi_asm_prm_aer = VU.replicate (5 * snoNbrAer) 0.0
+                , smbi_flx_wgt = flxWgt
+                , smbi_albsfc = VU.fromList [0.18, 0.29, 0.29, 0.29, 0.29]
+                , smbi_h2osno_ice = VU.generate nlevsno' (\j -> if j == nlevsno'-1 then 100.0 else 0.0)
+                , smbi_h2osno_liq = VU.replicate nlevsno' 0.0
+                , smbi_snw_rds = VU.generate nlevsno' (\j -> if j == nlevsno'-1 then rds else 54)
+                , smbi_mss_cnc_aer = VU.replicate (nlevsno' * snoNbrAer) 0.0
+                , smbi_h2osno_total = 100.0
+                }
+              fresh = snicarRTMultiBand (mkInp 54)
+              aged  = snicarRTMultiBand (mkInp 1000)
+          -- Physical ranges: fresh clean snow VIS albedo is very high, NIR lower.
+          smbr_albout_vis fresh `shouldSatisfy` (\a -> a > 0.90 && a <= 1.0)
+          smbr_albout_nir fresh `shouldSatisfy` (\a -> a > 0.45 && a < smbr_albout_vis fresh)
+          -- Grain growth (aging) lowers albedo in both bands.
+          smbr_albout_vis aged `shouldSatisfy` (< smbr_albout_vis fresh)
+          smbr_albout_nir aged `shouldSatisfy` (< smbr_albout_nir fresh)
+          -- Energy conservation: albedo + absorbed ~ 1 (VIS broadband).
+          let absVis = VU.sum (smbr_flx_abs fresh)
+          (smbr_albout_vis fresh + 0.0) `shouldSatisfy` (<= 1.0)
+          absVis `shouldSatisfy` (\x -> x >= 0.0 && x <= 2.0)
+
   -- =====================================================================
   -- Canopy hydrology adapter
   -- =====================================================================

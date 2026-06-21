@@ -772,6 +772,10 @@ data SurfAlbDriverInput = SurfAlbDriverInput
   , sadi_taul        :: !(VU.Vector Double) -- ^ Leaf transmittance per waveband
   , sadi_taus        :: !(VU.Vector Double) -- ^ Stem transmittance per waveband
   , sadi_xl          :: !Double             -- ^ Leaf angle departure from spherical
+  -- Optional SNICAR snow albedo override (albsnd, albsni) per waveband. When
+  -- present it replaces the age-based 'snowAlbedoFallback'; Nothing keeps the
+  -- fallback (so snow-free / SNICAR-absent callers are unchanged).
+  , sadi_snowAlbOverride :: !(Maybe (VU.Vector Double, VU.Vector Double))
   } deriving (Show)
 
 -- | Output of the surface albedo driver (one column, one patch).
@@ -815,8 +819,10 @@ surfaceAlbedoDriver con inp =
       -- Step 1: Soil albedo
       soilRes = soilAlbedo con (sadi_soilAlbIn inp)
 
-      -- Step 2: Snow albedo (age-based fallback, no SNICAR optics)
-      (albsnd, albsni) = snowAlbedoFallback coszen (sadi_fracSno inp) (sadi_snowPersist inp)
+      -- Step 2: Snow albedo — SNICAR override when supplied, else age-based fallback
+      (albsnd, albsni) = case sadi_snowAlbOverride inp of
+        Just (d, i) -> (d, i)
+        Nothing     -> snowAlbedoFallback coszen (sadi_fracSno inp) (sadi_snowPersist inp)
 
       -- Step 3: Ground albedo (snow-fraction weighted)
       groundRes = groundAlbedo coszen (sadi_fracSno inp)

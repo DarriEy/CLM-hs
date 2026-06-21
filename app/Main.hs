@@ -591,6 +591,7 @@ radTestMode dir = do
           , sadi_taul        = VU.fromList [getTaul 0, getTaul 1]
           , sadi_taus        = VU.fromList [getTaus 0, getTaus 1]
           , sadi_xl          = getXl
+          , sadi_snowAlbOverride = Nothing
           }
 
         result = surfaceAlbedoDriver albCon driverInp
