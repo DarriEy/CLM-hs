@@ -1346,6 +1346,32 @@ main = hspec $ do
           -- Pools should not blow up (< 2x initial)
           all (\d -> dd_leafc d < 400.0 && dd_soilorgc d < 16000.0) dailies `shouldBe` True
 
+    it "CN mode: vectorized CENTURY cascade stays bounded for 30 days" $ do
+      -- The runtime now evolves the full vectorized CENTURY decomposition
+      -- cascade (initCNDecompPools + runVectorizedNCycle pool advancement),
+      -- not the scalar Q10 path. Validate STABILITY (no correctness reference
+      -- exists for free-running pools): soil organic C stays positive and
+      -- bounded near its 8000 gC/m2 initialization over a 30-day free run, and
+      -- all CN diagnostics remain finite.
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      if not hasData
+        then pendingWith "test/data not available"
+        else do
+          dailies <- runPipeline defaultPipelineConfig
+            { pcDataDir = "test/data", pcNdays = 30, pcVerbose = False
+            , pcUseCN = True }
+          length dailies `shouldBe` 30
+          -- Soil C (now derived from the vectorized soil1/2/3 pools) stays
+          -- within 20% of init — soil pools turn over slowly, so a multi-day
+          -- free run barely moves them; a blow-up or collapse would fail here.
+          all (\d -> dd_soilorgc d > 6400.0 && dd_soilorgc d < 9600.0) dailies
+            `shouldBe` True
+          -- Leaf C bounded; NEE/HR finite throughout.
+          all (\d -> dd_leafc d > 50.0 && dd_leafc d < 400.0) dailies `shouldBe` True
+          all (\d -> not (isNaN (dd_nee d)) && not (isInfinite (dd_nee d))
+                  && not (isNaN (dd_hr d)) && not (isInfinite (dd_hr d))) dailies
+            `shouldBe` True
+
     it "T_GRND stays in physical range (200-320K) for 30 days" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"
       if not hasData

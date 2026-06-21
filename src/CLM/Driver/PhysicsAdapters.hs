@@ -9,6 +9,7 @@
 module CLM.Driver.PhysicsAdapters
   ( -- * Wired pipeline
     wiredPhysicsPipeline
+  , initCNDecompPools
     -- * Individual adapters (PhysicsStep signature)
   , dayLengthStep
   , activeLayerStep
@@ -3799,6 +3800,58 @@ poolMajorToLevelMajor nlev npools flat =
         src  = pool * nlev + lev
     in if src < VU.length flat then flat VU.! src else 0.0
 
+-- | Inverse of 'poolMajorToLevelMajor': level-major [lev*npools+pool] ->
+-- pool-major [pool*nlev+lev].
+levelMajorToPoolMajor :: Int -> Int -> VU.Vector Double -> VU.Vector Double
+levelMajorToPoolMajor nlev npools flat =
+  VU.generate (nlev * npools) $ \idx ->
+    let pool = idx `div` nlev
+        lev  = idx `mod` nlev
+        src  = lev * npools + pool
+    in if src < VU.length flat then flat VU.! src else 0.0
+
+-- | CENTURY decomp pool order: litr1,litr2,litr3, soil1,soil2,soil3, cwd.
+cnDecompPoolCN :: [Double]
+cnDecompPoolCN = [20, 20, 20, 12, 12, 12, 200]
+
+-- | Initialize the vectorized CENTURY decomp pools (pool-major, gC/m3) from the
+-- scalar soil-organic-C and litter-C totals (gC/m2), with an exponential
+-- vertical profile and standard CENTURY pool fractions. Sets
+-- clmNlevDecomp/clmNDecompPools so the free-running vectorized cascade
+-- ('runVectorizedNCycle') engages. Idempotent guard: no-op if already set.
+initCNDecompPools :: CLMState -> CLMState
+initCNDecompPools st
+  | not (VU.null (sbgccs_decomp_cpools_vr_col (clmSoilBGCCState st))) = st
+  | otherwise =
+      let nlev  = nlevsoi
+          npool = 7
+          somC  = clmSoilOrgC st
+          litC  = clmLitterC st
+          sminn = clmSMINN st
+          dzAt j = max 0.01 (soilLayer (colDz (clmColumn st)) j)
+          zAt  j = max 0.0  (soilLayer (colZ  (clmColumn st)) j)
+          wRaw  = [ exp (negate (zAt j) / 0.5) | j <- [0 .. nlev - 1] ]
+          wSum  = max 1.0e-12 (sum wRaw)
+          vf j  = (wRaw !! j) / wSum
+          litFrac p = [0.4, 0.4, 0.2, 0, 0, 0, 0]    !! p
+          somFrac p = [0, 0, 0, 0.10, 0.30, 0.55, 0.05] !! p
+          -- volumetric concentration [gC/m3] = areal [gC/m2] / dz [m]
+          cAt p j = (litC * litFrac p + somC * somFrac p) * vf j / dzAt j
+          cpoolsPM = VU.generate (npool * nlev) $ \idx ->
+            let p = idx `div` nlev; j = idx `mod` nlev in cAt p j
+          npoolsPM = VU.generate (npool * nlev) $ \idx ->
+            let p = idx `div` nlev in (cpoolsPM VU.! idx) / (cnDecompPoolCN !! p)
+          sminnVr = VU.generate nlev $ \j -> max 0.0 (sminn * vf j / dzAt j)
+      in st { clmNlevDecomp   = nlev
+            , clmNDecompPools = npool
+            , clmSoilBGCCState = (clmSoilBGCCState st)
+                { sbgccs_decomp_cpools_vr_col = cpoolsPM }
+            , clmSoilBGCNState = (clmSoilBGCNState st)
+                { sbgcns_decomp_npools_vr_col = npoolsPM
+                , sbgcns_sminn_vr_col         = sminnVr
+                , sbgcns_smin_no3_vr_col      = VU.map (* 0.5) sminnVr
+                , sbgcns_smin_nh4_vr_col      = VU.map (* 0.5) sminnVr } }
+
 -- | Compute the per-layer soil water matric potential @soilpsi@ (MPa) from the
 -- injected liquid water + soil texture, faithful to
 -- HydrologyNoDrainageMod::update_soilpsi! (Julia hydrology_no_drainage.jl):
@@ -4045,10 +4098,52 @@ runVectorizedNCycle dt st =
       !immobNh4 = VU.map (\g -> max 0.0 (negate g)) netNminVr
       !nh4ToPlant = VU.replicate nlev 0.0
 
+      -- ---- Free-running pool state update ---------------------------------
+      -- Advance the C pools from the cascade fluxes (each donor pool loses
+      -- hr+ctransfer, each receiver gains ctransfer) plus vertically-distributed
+      -- litterfall inputs to the litter pools. Soil pools turn over over years,
+      -- so over a multi-day run they stay near-constant; litter pools are
+      -- replenished by litterfall, keeping the column bounded.
+      !ctransferVr = cdr_decomp_cascade_ctransfer cnRes  -- [j*ntrans+k]
+      atV v i = if i >= 0 && i < VU.length v then v VU.! i else 0.0
+      (!leafLit, !frootLit) = Phen.backgroundLitterfall 2.0 (clmLeafC st) (clmFrootC st) dt
+      !litterFlux = if dt > 0.0 then max 0.0 ((leafLit + frootLit) / dt) else 0.0
+      !winRaw = VU.generate nlev (\j -> exp (negate (atV zsoi j) / 0.1))
+      !winSum = max 1.0e-12 (VU.sum winRaw)
+      litInAt j p =
+        let frac = case p of { 0 -> 0.4; 1 -> 0.4; 2 -> 0.2; _ -> 0.0 }
+            dz   = atV dzsoi j
+        in if dz > 0.0 then litterFlux * frac * (winRaw VU.! j / winSum) / dz else 0.0
+      !cpoolsLM' = VU.generate (nlev * npools) $ \idx ->
+        let lev  = idx `div` npools
+            pool = idx `mod` npools
+            cur  = atV cpoolsLM idx
+            loss = sum [ let hr = atV hrVrTrans (lev*ntrans+k)
+                             ct = atV ctransferVr (lev*ntrans+k)
+                         in if donor0 VU.! k == pool then hr + ct else 0.0
+                       | k <- [0 .. ntrans-1] ]
+            gain = sum [ let ct = atV ctransferVr (lev*ntrans+k)
+                         in if recv0 VU.! k == pool then ct else 0.0
+                       | k <- [0 .. ntrans-1] ]
+            litIn = if pool <= 2 then litInAt lev pool else 0.0
+        in max 0.0 (cur + (gain - loss + litIn) * dt)
+      !cpoolsPM' = levelMajorToPoolMajor nlev npools cpoolsLM'
+      !npoolsPM' = VU.generate (npools * nlev) $ \idx ->
+        let pool = idx `div` nlev in (cpoolsPM' VU.! idx) / (cnDecompPoolCN !! pool)
+      !sminnVr' = VU.generate nlev $ \j -> max 0.0 (atV sminnVr j + atV netNminVr j * dt)
+      -- Derived scalar diagnostics (areal gC/m2): soil pools 3..5, litter 0..2.
+      !soilCAreal = sum [ (cpoolsLM' VU.! (j*npools+pool)) * atV dzsoi j
+                        | j <- [0 .. nlev-1], pool <- [3,4,5] ]
+      !litCAreal  = sum [ (cpoolsLM' VU.! (j*npools+pool)) * atV dzsoi j
+                        | j <- [0 .. nlev-1], pool <- [0,1,2] ]
+
       !cflux0 = defaultSoilBGCCarbonFluxData
       !nflux0 = defaultSoilBGCNitrogenFluxData
       !sbgc0  = defaultSoilBGCStateData
-  in st { clmSoilBGCCFlux = cflux0
+      -- Flux diagnostics (always; the matched-state parity harness compares
+      -- these against Fortran's dumped per-step fluxes).
+      !fluxSt = st
+        { clmSoilBGCCFlux = cflux0
             { sbgccf_decomp_cascade_hr_vr_col = hrVrTrans
             , sbgccf_hr_vr_col                = hrVrLayer
             , sbgccf_phr_vr_col               = phrVr
@@ -4066,9 +4161,22 @@ runVectorizedNCycle dt st =
             , sbgcnf_actual_immob_vr_col      = immobNh4
             , sbgcnf_smin_nh4_to_plant_vr_col = nh4ToPlant
             }
-        , clmSoilBGCState = sbgc0
-            { sbgcs_fpi_vr_col = fpiVr }
+        , clmSoilBGCState = sbgc0 { sbgcs_fpi_vr_col = fpiVr }
         }
+  -- Pool state is advanced ONLY in free-running runtime (clmCNActive). The
+  -- matched-state harness (clmCNActive=False) re-injects/carries the Fortran
+  -- pools and compares fluxes, so it must NOT have pools overwritten here.
+  in if not (clmCNActive st)
+     then fluxSt
+     else fluxSt
+       { clmSoilBGCCState = (clmSoilBGCCState fluxSt)
+           { sbgccs_decomp_cpools_vr_col = cpoolsPM' }
+       , clmSoilBGCNState = (clmSoilBGCNState fluxSt)
+           { sbgcns_decomp_npools_vr_col = npoolsPM'
+           , sbgcns_sminn_vr_col         = sminnVr' }
+       , clmSoilOrgC = soilCAreal
+       , clmLitterC  = litCAreal
+       }
 
 -- | Vectorized N leaching (post-drainage). qflx_drain_vr is ~0 in this window,
 -- so the leaching flux is ~0; we compute it faithfully and record it.

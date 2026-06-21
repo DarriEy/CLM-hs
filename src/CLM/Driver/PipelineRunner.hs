@@ -36,7 +36,7 @@ import CLM.Driver.CLMDriver
   , PhysicsPipeline(..)
   , defaultCLMState, defaultDriverState, defaultTimestepContext
   , clmDrv )
-import CLM.Driver.PhysicsAdapters (wiredPhysicsPipeline)
+import CLM.Driver.PhysicsAdapters (wiredPhysicsPipeline, initCNDecompPools)
 import CLM.BioGeoPhys.CanopyHydrology
   ( CanopyHydrologyParams(..), defaultCanopyHydroParams )
 
@@ -573,7 +573,7 @@ runPipeline cfg = do
   snicarOpt <- readSnicarOptics dir
 
   let st0 = if pcUseCN cfg
-            then st0_ { clmCNActive = True
+            then initCNDecompPools (st0_ { clmCNActive = True
                        , clmLeafC = 200.0
                        , clmFrootC = 150.0
                        , clmLiveStemC = 500.0
@@ -584,7 +584,7 @@ runPipeline cfg = do
                        , clmSMINN = 5.0
                        , clmLeafN = 8.0
                        , clmFPG = 1.0
-                       }
+                       })
             else st0_
 
   when (pcVerbose cfg) $ do
@@ -677,12 +677,12 @@ runCLMForQrunoff cfg = do
   snicarOpt <- readSnicarOptics dir
 
   let st0 = if pcUseCN cfg
-            then st0_ { clmCNActive = True
+            then initCNDecompPools (st0_ { clmCNActive = True
                        , clmLeafC = 200.0, clmFrootC = 150.0
                        , clmLiveStemC = 500.0, clmDeadStemC = 5000.0
                        , clmSoilOrgC = 8000.0, clmLitterC = 300.0
                        , clmSMINN = 5.0, clmLeafN = 8.0, clmFPG = 1.0
-                       }
+                       })
             else st0_
 
   let drvCfg = defaultDriverConfig
