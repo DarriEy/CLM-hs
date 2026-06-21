@@ -159,9 +159,13 @@ soilThermProp inp = ThermPropOutput
     -- Override lookup for slot @jj@ (same 0-based slot ordering: snow first,
     -- then soil). Returns the injected value if an override vector is present
     -- and the slot is in range.
+    -- Use the injected value only when present, finite, and not a dump fill
+    -- (>=1e30) — inactive snow slots are written as fill (mirrors cvOverrideAt).
     thkOverrideAt jj = case thkOvr of
-      Just v | jj >= 0 && jj < VU.length v -> Just (v VU.! jj)
-      _                                    -> Nothing
+      Just v | jj >= 0 && jj < VU.length v
+             , let o = v VU.! jj
+             , not (isNaN o) && o < 1.0e30 && o > 0.0 -> Just o
+      _                                               -> Nothing
 
     cvOvr = tpi_cv_override inp  -- optional injected per-layer heat capacity
     -- Use the injected value only when present, finite, and not a dump fill
