@@ -73,12 +73,17 @@ data CanopyHydrologyParams = CanopyHydrologyParams
 -- | Default parameters
 defaultCanopyHydroParams :: CanopyHydrologyParams
 defaultCanopyHydroParams = CanopyHydrologyParams
-  { chp_liq_canopy_storage_scalar   = 0.04
+  -- Values from the CLM parameter file the Fortran/Julia references use
+  -- (clm5_params.nc for Bow-at-Banff). maximum_leaf_wetted_fraction caps fwet,
+  -- which scales canopy (snow) evaporation; the prior placeholder 1.0 let an
+  -- all-snow canopy reach fwet=1 and sublimate ~14x too fast vs Fortran (whose
+  -- canopy QVEGE is ~0 and sheds snow by unloading, not sublimation).
+  { chp_liq_canopy_storage_scalar   = 0.1
   , chp_snow_canopy_storage_scalar  = 6.0
   , chp_snowcan_unload_temp_fact    = 1.87e5
   , chp_snowcan_unload_wind_fact    = 1.56e5
   , chp_interception_fraction       = 1.0
-  , chp_maximum_leaf_wetted_fraction = 1.0
+  , chp_maximum_leaf_wetted_fraction = 0.0726608300855325
   , chp_use_clm5_fpi                = False
   }
 
