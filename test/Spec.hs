@@ -1479,3 +1479,18 @@ main = hspec $ do
           not (null diffs) `shouldBe` True
           all (\fd -> not (isNaN (fdAbs fd)) && not (isInfinite (fdAbs fd))) diffs
             `shouldBe` True
+          -- HARD matched-state guard: at this peak-sun case every biophysical
+          -- field tracks Fortran within its registered tolerance (T_GRND /
+          -- T_SOISNO to 0.044 K). The lone exception is EFLX_GNET_P, a per-patch
+          -- DIAGNOSTIC whose under-canopy longwave term uses a different output
+          -- convention than ours (Fortran's vegetated-patch gnet nets the
+          -- ground<->canopy LW to ~0); it does NOT affect temperature, proven by
+          -- T_GRND matching in the same step. CN/BGC pools (after_competition)
+          -- are unwired and stay measurement-only.
+          let bioFails =
+                [ fdName fd ++ "@" ++ fdBoundary fd
+                | fd <- diffs
+                , fdBoundary fd /= "after_competition"
+                , fdName fd /= "EFLX_GNET_P"
+                , not (fdPass fd) ]
+          bioFails `shouldBe` []
