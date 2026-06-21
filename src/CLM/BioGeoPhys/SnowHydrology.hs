@@ -677,16 +677,37 @@ checkCollapseToNoLayer
 checkCollapseToNoLayer bounds st msno snow_depth h2osno_total
   frac_sno frac_sno_eff int_snow h2osno_no_layers lun_itype _urbpoi =
   let dzmin1 = VU.unsafeIndex (snowDzmin bounds) 0
+      -- Bulk density of the whole snow pack (over the snow-covered fraction).
+      -- A physically real snowpack has density >= bifall_min (~50 kg/m3). When
+      -- frac_sno_eff is tiny, the SL2012 in-patch snow_depth (= grid-mean/frac_sno_eff)
+      -- inflates to tens of metres, so an explicit layer can be created with an
+      -- absurdly low bulk density (<< 50). Fortran sheds such snow via the mass<0.01
+      -- removeThinLayers path before it ever reaches this state; our layer survives
+      -- (mass>0.01) and a single such layer is never combined (needs >=2 layers).
+      -- Collapse it back to the no-layer state, resetting snow_depth to the physical
+      -- density floor so the next step re-forms a real (density-floor) layer instead
+      -- of persisting a 70 m massless slab that crashes T_GRND. Threshold 50 kg/m3
+      -- matches Fortran CombineSnowLayers' low-density combine criterion.
+      packDz = snow_depth  -- = sum(dz) over snow layers when snl<0
+      bulkDensity
+        | frac_sno_eff > 0.0 && packDz > 0.0 = h2osno_total / (frac_sno_eff * packDz)
+        | otherwise = 1.0e30
+      shouldCollapse = h2osno_total > 0.0 && bulkDensity < 50.0
   in
-    if False  -- NEVER collapse snow layers; let them persist until SWE melts to zero naturally
+    if shouldCollapse
     then
-      -- Collapse: sum ice -> h2osno_no_layers, liquid -> soil
-      let sumIce j acc
+      -- Collapse: sum ice+liq -> h2osno_no_layers; reset snow_depth to the density
+      -- floor (h2osno/denice)/frac_sno_eff (minimum physical in-patch depth).
+      let sumWat j acc
             | j >= msno = acc
-            | otherwise = sumIce (j+1)
-                (acc + VU.unsafeIndex (slH2osoiIce st) j)
-          h2osno_no_layers' = sumIce 0 0.0
-          snow_depth' = if h2osno_no_layers' <= 0.0 then 0.0 else snow_depth
+            | otherwise = sumWat (j+1)
+                (acc + VU.unsafeIndex (slH2osoiIce st) j
+                     + VU.unsafeIndex (slH2osoiLiq st) j)
+          h2osno_no_layers' = sumWat 0 0.0
+          snow_depth'
+            | h2osno_no_layers' <= 0.0 = 0.0
+            | frac_sno_eff > 0.0       = (h2osno_no_layers' / denice) / frac_sno_eff
+            | otherwise                = 0.0
           st' = emptySnowLayerState
       in (st', 0, snow_depth', frac_sno, frac_sno_eff, int_snow, h2osno_no_layers')
     else if h2osno_total <= 0.0
