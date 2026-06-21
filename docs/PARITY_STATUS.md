@@ -71,9 +71,16 @@ Suite: 115 examples, 0 failures, 2 pending (the tight aspirational Julia-parity 
 
 ## Genuinely remaining work (all optional / tooling — none is "the fix")
 
-- **Full SNICAR snow albedo.** Currently the age-based `snowAlbedoFallback` is used (wired and
-  reasonable). SNICAR's RT core is implemented but its per-layer flux absorption is stubbed
-  (60/40 split) + linear multi-band. Marginal payoff: winter FSA is already at/above Julia.
+- **Full SNICAR snow albedo — WIRED (commits 5f219ed, fc3dd34), marginally regressive.** The
+  real 5-band optics (pic16/mlw) are ingested; `snicarRTMultiBand` runs the full per-band
+  adding-doubling (`snicarRTColumn`) and feeds `albsnd`/`albsni` into `surfaceAlbedoDriver`
+  (via `sadi_snowAlbOverride`). Validated: physical, grain-responsive albedo (test in Spec.hs).
+  BUT it runs ~0.2 K COLDER than the age-based fallback (T_GRND day10 260.04 vs 260.22; Julia
+  262.22) — marginally worse, because the bulk-snow pipeline does NOT age snow grains
+  (`snowAgingStep` is a no-op for snl>=0), so SNICAR uses fresh ~54um grains and over-estimates
+  albedo. **Prerequisite to make SNICAR beneficial: implement bulk-snow grain aging** (track +
+  evolve `snw_rds` via `snowageGrainLayer`, reset on snowfall). Parity harness/calibration keep
+  `emptySnicarOptics` (age-based), so matched-state guards are unchanged.
 - **Unify the CN decomposition paths.** Free-running runtime uses a simplified scalar Q10
   decay; the full vectorized CENTURY cascade only runs in the matched-state harness path.
   Real completeness gain, large job, no matched-state winter reference to validate against.
