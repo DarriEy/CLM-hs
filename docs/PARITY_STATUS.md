@@ -71,16 +71,19 @@ Suite: 115 examples, 0 failures, 2 pending (the tight aspirational Julia-parity 
 
 ## Genuinely remaining work (all optional / tooling — none is "the fix")
 
-- **Full SNICAR snow albedo — WIRED (commits 5f219ed, fc3dd34), marginally regressive.** The
-  real 5-band optics (pic16/mlw) are ingested; `snicarRTMultiBand` runs the full per-band
-  adding-doubling (`snicarRTColumn`) and feeds `albsnd`/`albsni` into `surfaceAlbedoDriver`
-  (via `sadi_snowAlbOverride`). Validated: physical, grain-responsive albedo (test in Spec.hs).
-  BUT it runs ~0.2 K COLDER than the age-based fallback (T_GRND day10 260.04 vs 260.22; Julia
-  262.22) — marginally worse, because the bulk-snow pipeline does NOT age snow grains
-  (`snowAgingStep` is a no-op for snl>=0), so SNICAR uses fresh ~54um grains and over-estimates
-  albedo. **Prerequisite to make SNICAR beneficial: implement bulk-snow grain aging** (track +
-  evolve `snw_rds` via `snowageGrainLayer`, reset on snowfall). Parity harness/calibration keep
-  `emptySnicarOptics` (age-based), so matched-state guards are unchanged.
+- **Full SNICAR snow albedo + grain aging — DONE (commits 5f219ed, fc3dd34, feec3c1).** The
+  real 5-band optics (pic16/mlw) and the snow-aging best-fit tables (snicar_drdt_bst_fit_60)
+  are ingested to `test/data/snicar`. `snicarRTMultiBand` runs the full per-band adding-doubling
+  (`snicarRTColumn`); `snowAgingStep` evolves the bulk snow grain radius each step via
+  `snowageGrainLayer` with the real best-fit params (dry+wet metamorphism, fresh-snow reset);
+  `albsnd`/`albsni` feed `surfaceAlbedoDriver` via `sadi_snowAlbOverride`. Validated: physical
+  grain-responsive albedo + grain growth (2 tests in Spec.hs). OUTCOME: aging recovered the
+  ~0.2 K cold regression from fresh-grain SNICAR; SNICAR+aging now tracks Julia about as well as
+  the age-based fallback (T_GRND day10 260.13 vs fallback 260.22; Julia 262.22) with the full
+  physical machinery — no longer regressive, roughly neutral. Parity harness/calibration keep
+  `emptySnicarOptics` (age-based fallback), so the matched-state guards are unchanged. Without a
+  winter/snow-covered reference, SNICAR cannot be proven *better* than the fallback — but it is
+  now the complete, physically-grounded scheme and not a regression.
 - **Unify the CN decomposition paths.** Free-running runtime uses a simplified scalar Q10
   decay; the full vectorized CENTURY cascade only runs in the matched-state harness path.
   Real completeness gain, large job, no matched-state winter reference to validate against.
