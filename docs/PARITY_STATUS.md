@@ -84,9 +84,15 @@ Suite: 115 examples, 0 failures, 2 pending (the tight aspirational Julia-parity 
   `emptySnicarOptics` (age-based fallback), so the matched-state guards are unchanged. Without a
   winter/snow-covered reference, SNICAR cannot be proven *better* than the fallback — but it is
   now the complete, physically-grounded scheme and not a regression.
-- **Unify the CN decomposition paths.** Free-running runtime uses a simplified scalar Q10
-  decay; the full vectorized CENTURY cascade only runs in the matched-state harness path.
-  Real completeness gain, large job, no matched-state winter reference to validate against.
+- **Unify the CN decomposition paths — DONE (commit cbfdc0e).** The free-running runtime now
+  evolves the full vectorized CENTURY cascade instead of scalar Q10. `initCNDecompPools` seeds
+  the 7-pool × nlevsoi decomp pools (gC/m3, vertical profile) from the scalar totals;
+  `runVectorizedNCycle` advances them (donor loses hr+ctransfer, receiver gains ctransfer,
+  litter pools fed by background litterfall, sminn by net N-min); `clmSoilOrgC`/`clmLitterC`
+  derived from the evolved pools. Gated on `clmCNActive` so the matched-state harness
+  (inject-and-carry, flux-only) and its CN drift guard are unchanged. Validated for STABILITY
+  (soil C bounded within 20% of init over 30 days; new test) — NOT correctness, since no
+  free-running CN reference exists (same caveat as SNICAR/winter).
 - **Regenerate winter Fortran pdumps.** Needed for matched-state winter verification; the
   pdump instrumentation is no longer in the installed Fortran source tree.
 - **Stronger CN test window.** The bgc parity window is summer near-equilibrium (single-step
