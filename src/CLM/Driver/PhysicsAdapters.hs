@@ -152,8 +152,9 @@ import CLM.BioGeoPhys.SoilFluxes
 import CLM.BioGeoPhys.SnowSNICAR
   ( SnicarParams(..), defaultSnicarParams
   , SnowageGrainInput(..), SnowageGrainResult(..)
-  , snowageGrainLayer
-  , SnicarOptics(..), emptySnicarOptics, snicarSnowAlbedo )
+  , snowageGrainLayer, minSnw
+  , SnicarOptics(..), emptySnicarOptics, snicarSnowAlbedo
+  , snicarAgingPresent, snicarAgingLookup )
 import CLM.BioGeoPhys.SurfaceResistance
   ( BetaInput(..), BetaResult(..)
   , calcBetaLeePielke1992 )
@@ -226,7 +227,7 @@ wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
   , ppSnowCompaction     = snowCompactionStep
   , ppSnowLayerCombine   = snowLayerCombineStep
   , ppSnowLayerDivide    = snowLayerDivideStep
-  , ppSnowAging          = snowAgingStep
+  , ppSnowAging          = snowAgingStep snicarOpt
   , ppCNPreDrainage      = cnPreDrainageStep
   , ppCNPostDrainage     = cnPostDrainageStep
   , ppCNBalanceCheck     = cnBalanceCheckStep
@@ -2925,50 +2926,63 @@ snowLayerDivideStep _cfg _ctx st =
 -- Snow Aging adapter (grain radius evolution)
 -- ============================================================================
 
-snowAgingStep :: PhysicsStep
-snowAgingStep _cfg ctx st =
-  let snl = clmSnl st
-  in if snl >= 0
+-- Evolve the (bulk) snow grain radius via the SnowAge_grain metamorphism, using
+-- the real best-fit aging tables. Tracks a single column grain radius in
+-- wdiag_snw_rds_top_col: aged each step (dry + wet metamorphism), partially
+-- reset toward fresh by new snowfall. Works for the bulk no-layer regime
+-- (snl>=0) as well as resolved layers, since the offline pipeline runs bulk
+-- snow. Fed to SNICAR in the albedo step. No-op when aging tables are absent
+-- (=> radius stays fresh, SNICAR uses ~54um as before).
+snowAgingStep :: SnicarOptics -> PhysicsStep
+snowAgingStep snicarOpt _cfg ctx st =
+  let temp  = clmTemp st
+      ws    = clmWaterState st
+      wdiag = clmWaterDiagBulk st
+      snl   = clmSnl st
+      dtime = tcDtime ctx
+      frac_sno   = safeIdx (wdiag_frac_sno_col wdiag) 0
+      snow_depth = safeIdx (wdiag_snow_depth_col wdiag) 0
+      forc_t     = if VU.null (tcForcT ctx) then 273.15 else tcForcT ctx VU.! 0
+      forc_snow  = if VU.null (tcForcSnow ctx) then 0.0 else tcForcSnow ctx VU.! 0
+      explicit = if snl < 0
+                 then sum [ safeIdx (h2osoi_ice_col ws) j + safeIdx (h2osoi_liq_col ws) j
+                          | j <- [nlevsno + snl .. nlevsno - 1] ]
+                 else 0.0
+      h2oTot = max 0.0 (h2osno_col ws + explicit)
+  in if not (snicarAgingPresent snicarOpt) || h2oTot <= minSnw || snow_depth <= 0.0
      then st
      else
-       let dtime = tcDtime ctx
-           temp = clmTemp st
-           ws = clmWaterState st
-           wdiag = clmWaterDiagBulk st
-           forc_t = if VU.null (tcForcT ctx) then 273.15 else tcForcT ctx VU.! 0
-           frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
-           forc_snow = if VU.null (tcForcSnow ctx) then 0.0 else tcForcSnow ctx VU.! 0
-           topIdx = nlevsno + snl
-
-           topLayerInp = SnowageGrainInput
-             { sg_snw_rds     = 54.526
-             , sg_t_soisno    = safeIdx (t_soisno_col temp) topIdx
-             , sg_t_snotop    = safeIdx (t_soisno_col temp) topIdx
-             , sg_t_snobtm    = if topIdx + 1 < nlevsno
-                                then safeIdx (t_soisno_col temp) (topIdx + 1)
-                                else safeIdx (t_soisno_col temp) topIdx
-             , sg_cdz         = 0.0
-             , sg_h2osoi_liq  = safeIdx (h2osoi_liq_col ws) topIdx
-             , sg_h2osoi_ice  = safeIdx (h2osoi_ice_col ws) topIdx
+       let tSnowIdx = if snl < 0 then nlevsno + snl else nlevsno
+           tSnow  = min tfrz (safeIdx (t_soisno_col temp) tSnowIdx)
+           tSoil1 = safeIdx (t_soisno_col temp) nlevsno
+           cdz    = max 1.0e-6 snow_depth
+           dTdz   = abs ((tSnow - tSoil1) / cdz)
+           rhos   = max 50.0 (h2oTot / cdz)
+           rds0   = let r = safeIdx (wdiag_snw_rds_top_col wdiag) 0
+                    in if r >= 30.0 then r else 54.526
+           (bstTau, bstKap, bstDr0) = snicarAgingLookup snicarOpt tSnow dTdz rhos
+           inp = SnowageGrainInput
+             { sg_snw_rds     = rds0
+             , sg_t_soisno    = tSnow
+             , sg_t_snotop    = tSnow
+             , sg_t_snobtm    = tSoil1
+             , sg_cdz         = cdz
+             , sg_h2osoi_liq  = 0.0       -- winter dry-snow path; wet aging ~0
+             , sg_h2osoi_ice  = h2oTot
              , sg_frac_sno    = frac_sno
-             , sg_dz          = safeIdx (colDz (clmColumn st)) topIdx
+             , sg_dz          = cdz
              , sg_qflx_snow_grnd = forc_snow
              , sg_qflx_snofrz = 0.0
              , sg_forc_t      = forc_t
              , sg_dtime       = dtime
              , sg_isTopLayer  = True
-             , sg_bst_tau     = 1.0e6
-             , sg_bst_kappa   = 7.0
-             , sg_bst_drdt0   = 0.0
+             , sg_bst_tau     = bstTau
+             , sg_bst_kappa   = bstKap
+             , sg_bst_drdt0   = bstDr0
              }
-
-           result = snowageGrainLayer defaultSnicarParams topLayerInp
-
-           wdiag' = wdiag
-             { wdiag_snw_rds_top_col = VU.singleton (sgr_snw_rds_top result)
-             }
-
-       in st { clmWaterDiagBulk = wdiag' }
+           result = snowageGrainLayer defaultSnicarParams inp
+       in st { clmWaterDiagBulk = wdiag
+                 { wdiag_snw_rds_top_col = VU.singleton (sgr_snw_rds result) } }
 
 -- ============================================================================
 -- Driver Init adapter

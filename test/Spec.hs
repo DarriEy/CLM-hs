@@ -385,6 +385,31 @@ main = hspec $ do
           (smbr_albout_vis fresh + 0.0) `shouldSatisfy` (<= 1.0)
           absVis `shouldSatisfy` (\x -> x >= 0.0 && x <= 2.0)
 
+    it "grain aging grows the snow radius and lowers albedo (real best-fit tables)" $ do
+      have <- doesFileExist "test/data/snicar/age_drdt0.bin"
+      hasOpt <- doesFileExist "test/data/snicar/ss_alb_dir.bin"
+      if not (have && hasOpt)
+        then pendingWith "SNICAR aging tables not present on this machine"
+        else do
+          aTau <- readFloat64Vector "test/data/snicar/age_tau.bin"
+          aKap <- readFloat64Vector "test/data/snicar/age_kappa.bin"
+          aDr  <- readFloat64Vector "test/data/snicar/age_drdt0.bin"
+          let opt = emptySnicarOptics { sno_age_tau = aTau, sno_age_kappa = aKap, sno_age_drdt0 = aDr }
+          snicarAgingPresent opt `shouldBe` True
+          -- Best-fit dry-aging rate at a typical dry-snow state is physical.
+          let (_, _, drdt0) = snicarAgingLookup opt 263.0 0.0 150.0
+          drdt0 `shouldSatisfy` (\d -> d > 0.1 && d < 25.0)
+          -- One hour of dry metamorphism grows fresh grains beyond the minimum.
+          let (tau, kap, dr0) = snicarAgingLookup opt 263.0 5.0 150.0
+              agedHr = snowageGrainLayer defaultSnicarParams SnowageGrainInput
+                { sg_snw_rds = 54.526, sg_t_soisno = 263.0, sg_t_snotop = 263.0
+                , sg_t_snobtm = 264.0, sg_cdz = 0.2, sg_h2osoi_liq = 0.0
+                , sg_h2osoi_ice = 50.0, sg_frac_sno = 1.0, sg_dz = 0.2
+                , sg_qflx_snow_grnd = 0.0, sg_qflx_snofrz = 0.0, sg_forc_t = 263.0
+                , sg_dtime = 3600.0, sg_isTopLayer = True
+                , sg_bst_tau = tau, sg_bst_kappa = kap, sg_bst_drdt0 = dr0 }
+          sgr_snw_rds agedHr `shouldSatisfy` (> 54.526)
+
   -- =====================================================================
   -- Canopy hydrology adapter
   -- =====================================================================

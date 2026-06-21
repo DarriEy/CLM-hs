@@ -44,6 +44,8 @@ module CLM.BioGeoPhys.SnowSNICAR
   , emptySnicarOptics
   , snicarOpticsPresent
   , snicarSnowAlbedo
+  , snicarAgingPresent
+  , snicarAgingLookup
     -- * Delta-Eddington layer properties
   , deltaEddingtonLayer
   , DeltaEddingtonProps(..)
@@ -271,7 +273,12 @@ snicarRTColumn inp
                    then 0.0
                    else srt_h2osno_liq inp VU.! (j - 1)
         getRds j = if flgNosnl && j == joff
-                   then round (sp_snw_rds_min defaultSnicarParams)
+                   then -- virtual layer: use the tracked (aged) bulk grain radius
+                        -- when supplied, else fall back to the fresh minimum.
+                        if VU.null (srt_snw_rds inp)
+                        then round (sp_snw_rds_min defaultSnicarParams)
+                        else max (round (sp_snw_rds_min defaultSnicarParams))
+                                 (srt_snw_rds inp VU.! 0)
                    else srt_snw_rds inp VU.! (j - 1)
 
         -- Layer optical properties
@@ -750,11 +757,32 @@ data SnicarOptics = SnicarOptics
   , sno_ext_cff_dif :: !(VU.Vector Double)
   , sno_asm_dif     :: !(VU.Vector Double)
   , sno_flx_wgt_dif :: !(VU.Vector Double)
+  -- Grain-aging best-fit tables, flattened C-order (T=11, dTdz=31, dns=8).
+  , sno_age_tau     :: !(VU.Vector Double)
+  , sno_age_kappa   :: !(VU.Vector Double)
+  , sno_age_drdt0   :: !(VU.Vector Double)
   } deriving (Show)
 
 -- | Empty optics (=> SNICAR disabled, callers fall back to age-based albedo).
 emptySnicarOptics :: SnicarOptics
-emptySnicarOptics = SnicarOptics e e e e e e e e where e = VU.empty
+emptySnicarOptics = SnicarOptics e e e e e e e e e e e where e = VU.empty
+
+-- | True when the grain-aging best-fit tables are populated.
+snicarAgingPresent :: SnicarOptics -> Bool
+snicarAgingPresent o = VU.length (sno_age_drdt0 o) >= 11 * 31 * 8
+
+-- | Look up the snow-aging best-fit parameters (tau, kappa, drdt0) for a layer
+-- temperature [K], temperature gradient [K/m], and snow density [kg/m3].
+-- Mirrors the binning in SnowSnicarMod.F90 (T_idx, Tgrd_idx, rhos_idx).
+snicarAgingLookup :: SnicarOptics -> Double -> Double -> Double -> (Double, Double, Double)
+snicarAgingLookup o tK dTdz rhos =
+  let tIdx    = clampI 0 10 (round ((tK - 223.0) / 5.0))
+      tgrdIdx = clampI 0 30 (round (dTdz / 10.0))
+      rhosIdx = clampI 0 7  (round ((max 50.0 rhos - 50.0) / 50.0))
+      flat    = (tIdx * 31 + tgrdIdx) * 8 + rhosIdx
+      at v    = if flat < VU.length v then v VU.! flat else 0.0
+      clampI lo hi x = max lo (min hi x)
+  in (at (sno_age_tau o), at (sno_age_kappa o), at (sno_age_drdt0 o))
 
 -- | True when the optics tables are populated.
 snicarOpticsPresent :: SnicarOptics -> Bool

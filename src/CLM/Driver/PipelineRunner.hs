@@ -81,8 +81,9 @@ readSnicarOptics dir = do
                  if e then readFloat64Vector p else return VU.empty
   ssD <- rd "ss_alb_dir"; exD <- rd "ext_cff_dir"; asD <- rd "asm_dir"; fwD <- rd "flx_wgt_dir"
   ssI <- rd "ss_alb_dif"; exI <- rd "ext_cff_dif"; asI <- rd "asm_dif"; fwI <- rd "flx_wgt_dif"
+  aTau <- rd "age_tau"; aKap <- rd "age_kappa"; aDr <- rd "age_drdt0"
   if VU.null ssD then return emptySnicarOptics
-                 else return (SnicarOptics ssD exD asD fwD ssI exI asI fwI)
+                 else return (SnicarOptics ssD exD asD fwD ssI exI asI fwI aTau aKap aDr)
 
 -- ============================================================================
 -- Configuration
