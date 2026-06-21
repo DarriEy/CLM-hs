@@ -11,7 +11,55 @@ Run:
 stack --install-ghc test --test-arguments '--match "Port completion audit"'
 ```
 
-## Open Source-Debt Audit
+> **The keyword-marker audit below UNDERSTATES the real gap.** It only catches
+> files that *say* "stub/simplified". It does NOT catch (a) whole Fortran
+> subsystems with no Haskell file, (b) Haskell modules that exist but are never
+> called from the driver (dead code), or (c) pipeline steps wired to a no-op
+> body. The audit-level section below (2026-06 Fortran-vs-Haskell comparison) is
+> the authoritative gap list; see `PARITY_STATUS.md` and `ROADMAP.md`.
+
+## Audit-Level Gaps (2026-06) — the real list
+
+### Whole subsystems missing (no Haskell file, or types-only)
+- [ ] `dyn_subgrid` — transient land use, dynamic landunits/PFTs/columns, harvest,
+  conservation-on-area-change. **0% ported** (19 Fortran modules). Root cause of the
+  single-column ceiling.
+- [ ] FATES — cohort/patch demography, PARTEH, ED radiation, plant hydraulics, fire.
+  **~0%**: `FATESInterface.hs` is boundary types + `= id` no-ops.
+- [ ] Restart I/O — real model-state save/restore (NetCDF + subgrid pointers). Current
+  `RestartIO.hs` writes only a registry descriptor → **cold-start only**.
+- [ ] NetCDF history (`histFileMod`/`clmCgrid`) — multi-tape, subgrid-aggregated.
+  Current output is CSV daily-average, single gridcell.
+- [ ] Multi-landunit subgrid driver (urban/glacier/lake/crop/wetland actually run).
+  Code paths exist but the run is 100% soil; driver is single-column/single-patch.
+- [ ] atm→lnd downscaling (`atm2lndMod`) and lnd→atm coupling (`lnd2atmMod`).
+- [ ] External data streams: N-deposition, LAI, crop calendar, urban time-varying.
+- [ ] MPI/OpenMP domain decomposition (`decompMod`/`spmdMod`).
+- [ ] `GlacierSurfaceMassBalanceMod` (962 lines), standalone `FrictionVelocityMod`,
+  `HumanIndexMod`, `CNSoilMatrixMod`, `SoilBiogeochemNitrogenUptakeMod`, `TillageMod`.
+
+### Live-pipeline steps wired to a no-op (verified)
+- [ ] `snowPercolationStep` (`ppSnowWater`) = `st` — snow meltwater percolation absent.
+- [ ] `lakeTemperatureStep` — computes thermal props then returns `st` unchanged.
+- [ ] `urbanFluxesStep` — returns `st`; also tests the wrong landunit type (`it /= 6`).
+- [ ] `cnBalanceCheckStep` / CN precision control — no conservation enforcement.
+
+### CN/BGC modules that exist but are NEVER CALLED from the driver (dead code)
+- [ ] Fire (`FireBase`/`FireLi2014`), growth respiration (`GrowthResp`), gap mortality
+  (`GapMortality`), dynamic vegetation (`CNDV`), carbon isotopes (`CIsoFlux`/
+  `CarbonIsotopes`), wood products/harvest (`CNProducts`), `CNAnnualUpdate`, `Methane`,
+  dust/VOC emissions. (0 references in `src/CLM/Driver/`.)
+- [ ] Crop allocation path — none (crops run as grass).
+- [ ] Phenology onset/offset (seasonal & stress deciduous) — only background litterfall
+  runs; effectively evergreen.
+- [ ] N fixation and N deposition — N budget is sinks-only.
+
+### Corrections to "cleared" items below
+The `[x]` markers on `RestartIO.hs`, `CLMRun.hs`, and `HistoryWriter.hs` mean only that
+the *keyword wording* was removed — the underlying functionality is still a stub
+(registry-only restart; CSV-only history). Treat them as open per the audit above.
+
+## Open Source-Debt Audit (keyword markers — incomplete by construction)
 
 The current audit covers every Haskell file under `src/` and `app/`. Each item
 below must be resolved by replacing the marked implementation with a faithful

@@ -1,105 +1,92 @@
-# CLM-hs Parity Status (consolidated)
+# CLM-hs Parity & Completeness Status
 
-This is the consolidated, evidence-based state of the CLM-hs port's parity with the
-Fortran CTSM reference and the Julia reference port. It supersedes the "dead end /
-unwired" framing in earlier notes: every major biogeophysical and biogeochemical
-subsystem investigated under that premise turned out **implemented, wired, and at or
-near parity**. The residuals are compounding sensitivity and harness input-completeness
-limits — not missing subsystems or fixable physics bugs.
+## SCOPE — read this first
 
-## The live driver (read this first)
+CLM-hs is a **single-column, single-landunit (natural-vegetation soil), cold-start,
+reduced-physics** research port. It integrates one soil column under prescribed forcing
+and emits CSV. **It is NOT a drop-in CTSM replacement and cannot reproduce CTSM runs.**
 
-The canonical pipeline is:
+A Fortran-vs-Haskell audit (2026-06) over `installs/clm/src` — biogeophys 87, biogeochem
+70, soilbiogeochem 20, dyn_subgrid 19, main 48, utils 17, FATES ~62 modules — found the
+port covers the core biophysical kernels of one soil column but is missing whole
+subsystems, contains stubs in the live timestep path, and carries large bodies of
+never-called (dead) code. Any earlier "complete / faithful / done" wording in this repo
+applied only to a **narrow slice** (a few biophysical fields, one summer column, ~28
+timesteps, plus ~2 K trajectory tracking vs the Julia port) and overstated the whole.
 
-```
-PipelineRunner.runPipeline -> clmDrv (CLMDriver.hs) -> wiredPhysicsPipeline (PhysicsAdapters.hs)
-```
+## What genuinely runs (single soil column, cold start)
 
-`src/CLM/Driver/Simulation.hs` is the **old monolithic driver that `runPipeline` replaced**
-— it is dead code (imported only by legacy `app/Main.hs` modes `--run`/`--test-data`, not by
-`runPipeline` or the test suite). Do not read `Simulation.hs` to understand pipeline behavior;
-read `PhysicsAdapters.hs` + `CLMDriver.hs`. Two analyses were misled by reading `Simulation.hs`
-(its hardcoded albedo/Beer's-law) and by the stale `test/data/haskell_daily_avg.csv` (a legacy
-`--run` crash trajectory, not the canonical pipeline).
+Core biophysics kernels, ported and exercised on the one soil column:
+Photosynthesis (Farquhar/Collatz, Ball-Berry/Medlyn), CanopyFluxes, BaregroundFluxes,
+SoilTemperature (implicit, phase change), SoilWaterMovement (Richards), SoilHydrology
+(infiltration/runoff/water table), SnowHydrology (accumulation/compaction/layer
+combine-divide), SurfaceAlbedo + SurfaceRadiation (two-stream) + SNICAR (with grain
+aging), SnowCoverFraction, QSat, DayLength, Aerosol, Irrigation-demand. Plus a partial
+CN path (allocation + maintenance respiration + N-competition + a free-running CENTURY
+decomposition cascade).
 
-## Subsystem verdicts
+## What is validated (and only this)
 
-| Subsystem | State | Evidence |
-|-----------|-------|----------|
-| Boundary layer / canopy turbulence | Faithful | per-step ustar/rah/taf/t_veg match Fortran (BL per-step study) |
-| Soil temperature solver | **Bit-exact** | reproduces Fortran column solve to < 0.01 K (max 5.7e-14) given Fortran inputs |
-| Soil thermal props (cv, thk) | Correct | computed cv matches Fortran CV_C to ~0.002%; n13461 hits 0.046 K with NO property injection |
-| Two-stream radiation + albedo | **Already wired** | `surfaceAlbedoDriver` runs every step (`useAlbDriver=True`); `--rad-test` matches Julia exactly |
-| Snow-cover fraction | Tracks Julia | frac_sno climbs to ~0.88 in both; pipeline FSA within ~10% of Julia |
-| CN/BGC (40+ modules) | **Already wired** | all 3 CN steps active in `clmDrv`; matched-state pools sub-1%, bounded free-run drift |
-| Matched-state biophysics (n13461) | At parity | T_GRND/T_SOISNO 0.044 K; all biophysical fields within tolerance |
+Hard regression guards (gated on fixtures), all within the narrow slice above:
+1. Soil-temp solver bit-exact vs Fortran single-step fixture (< 0.01 K).
+2. Pipeline T_GRND within 2.5 K of the Julia 10-day daily trajectory; snow mass within 15%.
+3. Matched-state Fortran biophysics at one peak-sun step (n13461): biophysical fields
+   within tolerance (T_GRND 0.044 K); `EFLX_GNET_P` excluded (diagnostic LW convention).
+4. CN free-running pool drift < 1% over 28 steps (xsmrpool + flux probes excluded);
+   CENTURY cascade soil-C bounded over 30 days (stability, NOT correctness).
 
-## Regression guards (hard assertions in test/Spec.hs)
+These do not validate: any non-soil landunit, multi-day winter, restart, multi-column,
+fire/mortality/crop/dynamic-veg, or anything in the "missing" lists below.
 
-These lock in the achieved parity so it cannot silently regress:
+## What is NOT implemented
 
-1. **Soil-temp solver bit-exactness** — `solveSoilTemperature` vs the Fortran `soiltemp/`
-   fixture, < 0.01 K. (gated on fixture presence)
-2. **Pipeline-vs-Julia trajectory** — `runPipeline` tracks Julia daily-mean T_GRND within
-   2.5 K for 10 days and snow mass within 15%. Guards against the legacy cold crash.
-3. **Matched-state Fortran biophysics (n13461 peak-sun)** — every biophysical field within
-   its registered tolerance; `EFLX_GNET_P` excluded (documented diagnostic LW-convention
-   difference, not temperature-affecting).
-4. **CN free-running drift** — every CN/BGC state pool < 1% relative drift over the 28-step
-   free-run; `xsmrpool` and the `*_VR_P` flux probes excluded (documented).
+### Whole subsystems absent or stubbed
+| Subsystem | State | Note |
+|-----------|-------|------|
+| dyn_subgrid (transient land use, dynamic landunits, harvest, conservation) | **0%** | 19 modules, ~6,700 lines — structurally locks the port to single column |
+| FATES (cohort/patch demography, PARTEH, ED radiation, hydraulics, fire) | **~0%** | 570-line type+no-op stub vs ~75,800 Fortran lines; `fatesDynamics` returns input |
+| Restart I/O (read/write full model state) | **stub** | Cold-start only; cannot resume or bootstrap from a Fortran restart |
+| History output (NetCDF, multi-tape, subgrid) | **CSV only** | Single gridcell, daily-average only |
+| Multi-landunit subgrid (urban / glacier / lake / crop / wetland) | code exists, **never run** | The run is 100% soil (`wt_lunit = (1,0,0,…)`) |
+| atm→lnd downscaling + lnd→atm coupling | **stub** | No topographic forcing downscaling; no coupling fluxes |
+| External data streams (N-deposition, LAI, crop calendar, urban-tv) | **missing** | N budget has no atmospheric/biological inputs |
+| MPI / OpenMP parallelism | **missing** | Single process, single column |
 
-Suite: 115 examples, 0 failures, 2 pending (the tight aspirational Julia-parity test at
-0.1 K / 1e-3 bounds; the port-debt marker audit).
+### Stubs in the LIVE timestep path (verified in code)
+- `snowPercolationStep` (`ppSnowWater`) = `st` — no-op; snow meltwater percolation absent.
+- `lakeTemperatureStep` — computes thermal props then returns `st` unchanged.
+- `urbanFluxesStep` — returns `st`; also checks the wrong landunit type (`it /= 6`).
+- `cnBalanceCheckStep` / CN precision control — no conservation enforcement.
 
-## Characterized residuals (NOT bugs)
+### CN/BGC: modules exist but are NEVER CALLED (dead code; 0 driver references)
+fire (CNFireLi2014/2016/2021), growth respiration, gap mortality, dynamic vegetation
+(CNDV), carbon isotopes (C13/C14), wood products / harvest, annual updates, methane,
+dust & VOC emissions. Also missing: crop allocation path; seasonal/stress phenology
+onset & offset (only background litterfall runs → evergreen-like); N fixation & N
+deposition (N budget is sinks-only).
 
-- **~2 K free-running T_GRND vs Julia/Fortran over days 4-10.** Survives every subsystem
-  being correct (BL, solver, cv/thk, radiation, CN). It is compounding IC/regime sensitivity.
-  Note radiation is *not* the driver: in winter the pipeline absorbs slightly *more* solar
-  than Julia yet runs colder. Full free-running trajectory parity to Fortran is ill-posed —
-  Julia (the "fully working" port) does not achieve it either.
-- **`EFLX_GNET_P` ~47 W/m2 at matched state.** Diagnostic-only: Fortran's vegetated-patch
-  gnet nets the under-canopy ground<->canopy longwave to ~0 (gnet ~= sabg - shg - ev*htvp);
-  T_GRND in the same step matches at 0.044 K, so the physics `hs_top` is correct.
-- **bgc-window matched-state T_GRND 0.5-0.7 K.** Harness input-completeness: the bgc spinup
-  column's `tkmg`/`tkdry`/`csol` are not injectable from the available dumps (only
-  `watsat`/`bsw`/`sucsat` are), so our thermal props mix bgc-injected + test/data base.
-- **`xsmrpool` 1.4% free-run drift.** Harness input-completeness: GPP=0 on state injection
-  (photosynthesis carriers not produced for the injected patches) -> `availc=0` -> the
-  excess-MR-storage recovery is correctly capped to 0, while Fortran (real GPP) recovers.
-  The allocation/recovery physics matches Fortran exactly.
+### soilbiogeochem missing
+`CNSoilMatrixMod` (implicit matrix C/N solver), `SoilBiogeochemNitrogenUptake` (plant N
+uptake), `TillageMod`.
 
-## Genuinely remaining work (all optional / tooling — none is "the fix")
+### biogeophys missing / partial
+`GlacierSurfaceMassBalanceMod` (962 lines, missing), standalone `FrictionVelocityMod`
+(u* is embedded in the flux modules, not independently validated), ozone stress on
+photosynthesis, `HumanIndexMod`, detailed urban building-temperature (Oleson 2015).
+Several "ported" modules are ~⅓ the Fortran line count (Photosynthesis 1,006 vs 5,209;
+SoilTemperature 998 vs 2,974) — core algorithm without full option/edge-case coverage.
 
-- **Full SNICAR snow albedo + grain aging — DONE (commits 5f219ed, fc3dd34, feec3c1).** The
-  real 5-band optics (pic16/mlw) and the snow-aging best-fit tables (snicar_drdt_bst_fit_60)
-  are ingested to `test/data/snicar`. `snicarRTMultiBand` runs the full per-band adding-doubling
-  (`snicarRTColumn`); `snowAgingStep` evolves the bulk snow grain radius each step via
-  `snowageGrainLayer` with the real best-fit params (dry+wet metamorphism, fresh-snow reset);
-  `albsnd`/`albsni` feed `surfaceAlbedoDriver` via `sadi_snowAlbOverride`. Validated: physical
-  grain-responsive albedo + grain growth (2 tests in Spec.hs). OUTCOME: aging recovered the
-  ~0.2 K cold regression from fresh-grain SNICAR; SNICAR+aging now tracks Julia about as well as
-  the age-based fallback (T_GRND day10 260.13 vs fallback 260.22; Julia 262.22) with the full
-  physical machinery — no longer regressive, roughly neutral. Parity harness/calibration keep
-  `emptySnicarOptics` (age-based fallback), so the matched-state guards are unchanged. Without a
-  winter/snow-covered reference, SNICAR cannot be proven *better* than the fallback — but it is
-  now the complete, physically-grounded scheme and not a regression.
-- **Unify the CN decomposition paths — DONE (commit cbfdc0e).** The free-running runtime now
-  evolves the full vectorized CENTURY cascade instead of scalar Q10. `initCNDecompPools` seeds
-  the 7-pool × nlevsoi decomp pools (gC/m3, vertical profile) from the scalar totals;
-  `runVectorizedNCycle` advances them (donor loses hr+ctransfer, receiver gains ctransfer,
-  litter pools fed by background litterfall, sminn by net N-min); `clmSoilOrgC`/`clmLitterC`
-  derived from the evolved pools. Gated on `clmCNActive` so the matched-state harness
-  (inject-and-carry, flux-only) and its CN drift guard are unchanged. Validated for STABILITY
-  (soil C bounded within 20% of init over 30 days; new test) — NOT correctness, since no
-  free-running CN reference exists (same caveat as SNICAR/winter).
-- **Regenerate winter Fortran pdumps.** Needed for matched-state winter verification; the
-  pdump instrumentation is no longer in the installed Fortran source tree.
-- **Stronger CN test window.** The bgc parity window is summer near-equilibrium (single-step
-  CN change ~0); a growing-season window would stress CN harder.
+## Honest scorecard
 
-## Bottom line
+| Area | Real status |
+|------|-------------|
+| Biogeophys core kernels (1 soil column) | mostly real (~40 modules) |
+| CN/BGC | ~⅓ wired (alloc/MR/Ncomp/decomp); fire/mortality/CNDV/isotopes/products/crop/phenology-onset NOT wired |
+| soilbiogeochem | ~60–70%; missing matrix solver + N uptake |
+| dyn_subgrid | 0% |
+| Restart / History / Coupling / Streams | stub (~5–20%) |
+| Multi-landunit (urban/glacier/lake/crop) | code present, not exercised |
+| FATES | ~0% |
 
-The biogeophysical + biogeochemical core is substantially complete and validated against
-Fortran (matched-state) and Julia (trajectory), with hard regression guards in place. The
-recurring residuals are sensitivity and test-harness limits, not missing physics.
+See `ROADMAP.md` for the prioritized path to closing these gaps, and
+`PORT_COMPLETION_CHECKLIST.md` for the per-item debt list.
