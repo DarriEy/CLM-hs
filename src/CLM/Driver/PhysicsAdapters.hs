@@ -95,6 +95,7 @@ import qualified CLM.BioGeoChem.Phenology as Phen
 import qualified CLM.BioGeoChem.NutrientCompetition as NComp
 import qualified CLM.BioGeoChem.MaintResp as MR
 import qualified CLM.Types.CNVegNitrogenStateData as NState
+import qualified CLM.Types.CNVegStateData as VState
 import CLM.Types.CNVegCarbonStateData
   ( cnvcs_leafc_patch, cnvcs_frootc_patch, cnvcs_livestemc_patch
   , cnvcs_cpool_patch, cnvcs_xsmrpool_patch
@@ -3071,8 +3072,9 @@ waterTableStep _cfg ctx st =
 -- ============================================================================
 
 phenologyStep :: PhysicsStep
-phenologyStep _cfg _ctx st =
-  let cs = clmCanopyState st
+phenologyStep _cfg ctx st0 =
+  let st = if hasVectorizedVeg st0 then cnPhenologyAdvance ctx st0 else st0
+      cs = clmCanopyState st
       wdiag = clmWaterDiagBulk st
 
       frac_sno = safeIdx (wdiag_frac_sno_col wdiag) 0
@@ -3088,6 +3090,175 @@ phenologyStep _cfg _ctx st =
       cs' = cs { cstate_frac_veg_nosno_alb_patch = frac_veg }
 
   in st { clmCanopyState = cs' }
+
+-- | Real CN phenology: classify each patch (evergreen / seasonal-deciduous /
+-- stress-deciduous) and advance its leaf/froot carbon and nitrogen pools
+-- through the storage -> transfer -> display -> litter chain, conserving mass.
+-- Ported from CNPhenologyMod.F90; driven by 'Phen.phenologyAdvancePools'.
+--
+-- Onset for seasonal-deciduous patches is gated on growing-degree-days and
+-- daylength; for stress-deciduous patches on soil temperature and soil-water
+-- availability. Offset is gated on daylength/GDD (seasonal) or soil
+-- temperature/water (stress). Onset moves a fraction of storage C/N into the
+-- transfer pools then feeds the displayed leaf/froot pools; offset sheds the
+-- displayed pools to litter. Evergreen patches lose only background litterfall.
+--
+-- The per-patch phenology carrier state (onset/offset counters, GDD/FDD/SWI
+-- accumulators, dormancy flag, previous daylength) persists across timesteps on
+-- 'clmCNVegState'; it is cold-started (dormant, zeroed) on the first step the
+-- per-patch veg pools are present.
+cnPhenologyAdvance :: TimestepContext -> CLMState -> CLMState
+cnPhenologyAdvance ctx st =
+  let dt   = tcDtime ctx
+      cst  = clmCNVegCState st
+      nst  = clmCNVegNState st
+      vstIn = clmCNVegState st
+      np   = VU.length (cnvcs_leafc_patch cst)
+
+      -- Environment (read from the previous step's diagnostics, as in CLM
+      -- where phenology runs at the top of the timestep).
+      grc  = clmGridcell st
+      temp = clmTemp st
+      ss   = clmSoilState st
+      wdiag = clmWaterDiagBulk st
+
+      dayl     = safeIdx (grc_dayl grc) 0
+      prevDayl = let pd = grc_prev_dayl grc
+                 in if VU.null pd then dayl else pd VU.! 0
+      latDeg   = let l = grc_latdeg grc
+                 in if VU.null l then 45.0 else l VU.! 0
+      -- 5-day snow proxy: current fractional snow cover (no 5-day accumulator
+      -- is carried; FRAC_SNO is the closest available snow-presence signal and
+      -- gates onset exactly as snow_5day does in CNPhenologyMod).
+      snow5d   = safeIdx (wdiag_frac_sno_col wdiag) 0
+      -- Soil water potential of the phenology reference layer (MPa). The
+      -- module reference layer index (1-based) maps to soil layer (idx-1).
+      psiLayer = max 0 (Phen.ps_phenology_soil_layer phState - 1)
+      soilpsi  = let v = sstate_soilpsi_col ss
+                 in if VU.null v then -0.5
+                    else if psiLayer < VU.length v then v VU.! psiLayer else v VU.! 0
+
+      tRefVec  = t_ref2m_patch_vec temp
+      tRefScal = t_ref2m_patch temp
+      tRefAt p = if p < VU.length tRefVec then tRefVec VU.! p else tRefScal
+
+      ivt = clmPatchIvt st
+
+      -- Module-level phenology state (timestep, fractions, critical thresholds).
+      phState = Phen.phenologyInit Phen.defaultPhenologyParams dt
+
+      -- PFT phenology constants. CLM PFT indices (0-based here, matching the
+      -- harness pfts1d_itypveg): needleleaf-evergreen 1,2; broadleaf-evergreen
+      -- tree 4,5; broadleaf-evergreen shrub 9 -> evergreen. Broadleaf-decid
+      -- tree/shrub 6,8 and the arctic shrub 10 -> seasonal deciduous. Grasses
+      -- (12,13,14) and broadleaf-decid tropical/temperate that drop on stress,
+      -- plus crops, fall through to stress deciduous. This table is indexed by
+      -- PFT and built to span the largest ivt present.
+      maxIvt = if VU.null ivt then 0 else max 0 (VU.maximum ivt)
+      tabLen = maxIvt + 1
+      mkTab pred = VU.generate tabLen $ \i -> if pred i then 1.0 else 0.0
+      isEvergreen i = i == 1 || i == 2 || i == 4 || i == 5 || i == 9
+      isSeasonal  i = i == 6 || i == 8 || i == 10
+      pfc = Phen.PftConPhenology
+        { Phen.pfp_evergreen    = mkTab isEvergreen
+        , Phen.pfp_season_decid = mkTab isSeasonal
+        , Phen.pfp_stress_decid = mkTab (\i -> not (isEvergreen i) && not (isSeasonal i))
+        , Phen.pfp_woody        = VU.replicate tabLen 0.0
+        -- Leaf longevity (years): evergreen long-lived; deciduous ~1 yr.
+        , Phen.pfp_leaf_long    = VU.generate tabLen $ \i ->
+                                    if isEvergreen i then 2.0 else 1.0
+        , Phen.pfp_leafcn       = VU.replicate tabLen 25.0
+        , Phen.pfp_frootcn      = VU.replicate tabLen 42.0
+        , Phen.pfp_ndays_on     = VU.replicate tabLen 30.0
+        , Phen.pfp_crit_onset_gdd_sf = VU.replicate tabLen 1.0
+        }
+
+      -- Read the per-patch phenology carrier; cold-start if absent/short.
+      have v = not (VU.null v) && VU.length v >= np
+      getD v def p = if have v then v VU.! p else def
+      ppAt p = Phen.defaultPatchPhenology
+        { Phen.pph_dormant_flag    = getD (VState.cnvs_dormant_flag_patch vstIn) 1.0 p > 0.5
+        , Phen.pph_onset_flag      = getD (VState.cnvs_onset_flag_patch vstIn) 0.0 p > 0.5
+        , Phen.pph_onset_counter   = getD (VState.cnvs_onset_counter_patch vstIn) 0.0 p
+        , Phen.pph_onset_gddflag   = getD (VState.cnvs_onset_gddflag_patch vstIn) 0.0 p > 0.5
+        , Phen.pph_onset_gdd       = getD (VState.cnvs_onset_gdd_patch vstIn) 0.0 p
+        , Phen.pph_onset_fdd_count = getD (VState.cnvs_onset_fdd_patch vstIn) 0.0 p
+        , Phen.pph_onset_swi_count = getD (VState.cnvs_onset_swi_patch vstIn) 0.0 p
+        , Phen.pph_offset_flag     = getD (VState.cnvs_offset_flag_patch vstIn) 0.0 p > 0.5
+        , Phen.pph_offset_counter  = getD (VState.cnvs_offset_counter_patch vstIn) 0.0 p
+        , Phen.pph_offset_fdd_count = getD (VState.cnvs_offset_fdd_patch vstIn) 0.0 p
+        , Phen.pph_offset_swi_count = getD (VState.cnvs_offset_swi_patch vstIn) 0.0 p
+        , Phen.pph_gdd020          = getD (VState.cnvs_onset_gdd_patch vstIn) 0.0 p
+        , Phen.pph_days_active     = getD (VState.cnvs_days_active_patch vstIn) 0.0 p
+        }
+
+      poolAt p = Phen.VegPools
+        { Phen.vp_leafc          = getD (cnvcs_leafc_patch cst) 0.0 p
+        , Phen.vp_leafc_storage  = getD (cnvcs_leafc_storage_patch cst) 0.0 p
+        , Phen.vp_leafc_xfer     = getD (cnvcs_leafc_xfer_patch cst) 0.0 p
+        , Phen.vp_frootc         = getD (cnvcs_frootc_patch cst) 0.0 p
+        , Phen.vp_frootc_storage = getD (cnvcs_frootc_storage_patch cst) 0.0 p
+        , Phen.vp_frootc_xfer    = getD (cnvcs_frootc_xfer_patch cst) 0.0 p
+        , Phen.vp_leafn          = getD (cnvns_leafn_patch nst) 0.0 p
+        , Phen.vp_leafn_storage  = getD (cnvns_leafn_storage_patch nst) 0.0 p
+        , Phen.vp_leafn_xfer     = getD (cnvns_leafn_xfer_patch nst) 0.0 p
+        , Phen.vp_frootn         = getD (cnvns_frootn_patch nst) 0.0 p
+        , Phen.vp_frootn_storage = getD (cnvns_frootn_storage_patch nst) 0.0 p
+        , Phen.vp_frootn_xfer    = getD (cnvns_frootn_xfer_patch nst) 0.0 p
+        , Phen.vp_leafc_to_litter  = 0.0
+        , Phen.vp_frootc_to_litter = 0.0
+        , Phen.vp_leafn_to_litter  = 0.0
+        , Phen.vp_frootn_to_litter = 0.0
+        }
+
+      ivtAt p = if p < VU.length ivt then ivt VU.! p else (-1)
+
+      results = [ Phen.phenologyAdvancePools phState pfc (ppAt p) (ivtAt p)
+                    dayl prevDayl (tRefAt p) soilpsi snow5d latDeg (poolAt p)
+                | p <- [0 .. np - 1] ]
+      pps   = map fst results
+      pools = map snd results
+
+      -- Pack updated pools / carrier back into SoA vectors.
+      packP f = VU.generate np $ \p -> f (pools !! p)
+      packPP f = VU.generate np $ \p -> f (pps !! p)
+      bit b = if b then 1.0 else 0.0
+
+      cst' = cst
+        { cnvcs_leafc_patch          = packP Phen.vp_leafc
+        , cnvcs_leafc_storage_patch  = packP Phen.vp_leafc_storage
+        , cnvcs_leafc_xfer_patch     = packP Phen.vp_leafc_xfer
+        , cnvcs_frootc_patch         = packP Phen.vp_frootc
+        , cnvcs_frootc_storage_patch = packP Phen.vp_frootc_storage
+        , cnvcs_frootc_xfer_patch    = packP Phen.vp_frootc_xfer
+        }
+      nst' = nst
+        { cnvns_leafn_patch          = packP Phen.vp_leafn
+        , cnvns_leafn_storage_patch  = packP Phen.vp_leafn_storage
+        , cnvns_leafn_xfer_patch     = packP Phen.vp_leafn_xfer
+        , cnvns_frootn_patch         = packP Phen.vp_frootn
+        , cnvns_frootn_storage_patch = packP Phen.vp_frootn_storage
+        , cnvns_frootn_xfer_patch    = packP Phen.vp_frootn_xfer
+        }
+      vstOut = vstIn
+        { VState.cnvs_dormant_flag_patch   = packPP (bit . Phen.pph_dormant_flag)
+        , VState.cnvs_onset_flag_patch     = packPP (bit . Phen.pph_onset_flag)
+        , VState.cnvs_onset_counter_patch  = packPP Phen.pph_onset_counter
+        , VState.cnvs_onset_gddflag_patch  = packPP (bit . Phen.pph_onset_gddflag)
+        , VState.cnvs_onset_gdd_patch      = packPP Phen.pph_onset_gdd
+        , VState.cnvs_onset_fdd_patch      = packPP Phen.pph_onset_fdd_count
+        , VState.cnvs_onset_swi_patch      = packPP Phen.pph_onset_swi_count
+        , VState.cnvs_offset_flag_patch    = packPP (bit . Phen.pph_offset_flag)
+        , VState.cnvs_offset_counter_patch = packPP Phen.pph_offset_counter
+        , VState.cnvs_offset_fdd_patch     = packPP Phen.pph_offset_fdd_count
+        , VState.cnvs_offset_swi_patch     = packPP Phen.pph_offset_swi_count
+        , VState.cnvs_days_active_patch    = packPP Phen.pph_days_active
+        }
+
+  in if np == 0
+       then st
+       else st { clmCNVegCState = cst', clmCNVegNState = nst'
+               , clmCNVegState = vstOut }
 
 -- ============================================================================
 -- Urban Fluxes adapter (skip for non-urban columns)
