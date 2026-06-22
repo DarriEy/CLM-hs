@@ -94,6 +94,11 @@ import CLM.BioGeoPhys.SoilMoistStress
 import qualified CLM.BioGeoChem.Allocation as Alloc
 import qualified CLM.BioGeoChem.Phenology as Phen
 import qualified CLM.BioGeoChem.NutrientCompetition as NComp
+import CLM.BioGeoChem.NDynamics
+  ( NDepositionInput(..), nDeposition
+  , FreeLivingFixInput(..), nFreeLivingFixation
+  , NFixationInput(..), nFixation
+  , NDynamicsParams(..), defaultNDynamicsParams )
 import qualified CLM.BioGeoChem.MaintResp as MR
 import qualified CLM.BioGeoChem.GrowthResp as GResp
 import qualified CLM.BioGeoChem.GapMortality as GapM
@@ -3626,8 +3631,31 @@ scalarVegPath dt st0 =
                   + (leafLitRate + frootLitRate) / max dt 1.0
                   - hr_litter * dt
         !somC' = clmSoilOrgC st + (litToSom - hr_som) * dt
+        -- Step 8b: N INPUTS (close the previously sinks-only N budget) via
+        -- NDynamicsMod: atmospheric deposition + free-living fixation + NPP-driven
+        -- symbiotic fixation. Rates in gN/m2/s, added to sminn.
+        !secsYr   = 365.0 * 86400.0
+        !ndepRate = 0.10 / secsYr   -- ~0.10 gN/m2/yr deposition (clean boreal site)
+        !ndep = VU.head $ nDeposition NDepositionInput
+          { ndi2_nc = 1, ndi2_forc_ndep = VU.singleton ndepRate
+          , ndi2_col_gridcell = VU.singleton 0 }
+        !ffix = VU.head $ nFreeLivingFixation FreeLivingFixInput
+          { flf_nc = 1, flf_mask = VU.singleton True
+          , flf_params = defaultNDynamicsParams
+          , flf_annET = VU.singleton 0.0, flf_dayspyr = 365.0 }
+        -- Symbiotic fixation is driven by ANNUAL NPP; a true annual accumulator
+        -- is a later item, so we annualize the current NPP as a proxy.
+        !nfix = VU.head $ nFixation NFixationInput
+          { nfi_nc = 1, nfi_mask = VU.singleton True, nfi_dayspyr = 365.0
+          , nfi_nfix_timeconst = 0.0, nfi_use_fun = False
+          , nfi_col_is_fates = VU.singleton False
+          , nfi_annsum_npp = VU.singleton (max 0.0 (npp * secsYr))
+          , nfi_lag_npp = VU.singleton 0.0 }
+        !nInputs = ndep + ffix + nfix
+
         !sminn' = clmSMINN st
                 + nMin * dt
+                + nInputs * dt
                 - NComp.nco_actual_plant_nuptake nCompOut * dt
 
         -- Step 9: Gap (background) mortality (CNGapMortalityMod.F90).
