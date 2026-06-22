@@ -50,6 +50,7 @@ library
                      , CLM.Infrastructure.SubgridAverage
                      , CLM.Infrastructure.DownscaleForcings
                      , CLM.Infrastructure.Lnd2Atm
+                     , CLM.Infrastructure.DataStream
                      , CLM.Infrastructure.BinaryIO
                      , CLM.BioGeoPhys.SoilTemperature
                      , CLM.BioGeoPhys.SoilHydrology

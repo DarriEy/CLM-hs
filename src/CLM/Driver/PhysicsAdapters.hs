@@ -32,6 +32,8 @@ module CLM.Driver.PhysicsAdapters
   , surfaceAlbedoStep
   , waterBalanceStep
   , energyBalanceStep
+    -- * Land-to-atmosphere flux aggregation (lnd2atm coupling)
+  , aggregateLnd2Atm
   , lakeFluxesStep
   , lakeTemperatureStep
   , drvInitStep
@@ -55,6 +57,7 @@ import CLM.Constants.ControlFlags
 import CLM.Driver.CLMDriver
   ( PhysicsStep, PhysicsPipeline(..), defaultPhysicsPipeline
   , CLMState(..), TimestepContext(..) )
+import CLM.Types.Lnd2AtmData (Lnd2AtmData(..))
 
 import CLM.BioGeoPhys.SurfaceHumidity
   ( SurfaceHumidityInput(..), SurfaceHumidityResult(..)
@@ -147,6 +150,10 @@ import CLM.Types.SoilBGCCarbonFluxData (SoilBGCCarbonFluxData(..), defaultSoilBG
 import CLM.Types.SoilBGCNitrogenFluxData (SoilBGCNitrogenFluxData(..), defaultSoilBGCNitrogenFluxData)
 import CLM.Types.SoilBGCStateData (SoilBGCStateData(..), defaultSoilBGCStateData)
 import CLM.Infrastructure.SmoothAD (smoothMax, smoothClamp, defaultK)
+import CLM.Infrastructure.DataStream
+  ( DataStream, constantStream, nDepRateAt )
+import CLM.BioGeoChem.NDynamics
+  ( NDepositionInput(..), nDeposition )
 import CLM.BioGeoPhys.DayLength (daylength)
 import CLM.BioGeoPhys.SurfaceRadiation
   ( SurfRadColumnInput(..), SurfRadPatchInput(..)
@@ -2595,7 +2602,57 @@ energyBalanceStep _cfg ctx st =
         }
 
       _ebResult = energyBalance inp
-  in st
+  in st { clmLnd2Atm = aggregateLnd2Atm st }
+
+-- ============================================================================
+-- Land-to-atmosphere flux aggregation (lnd2atm coupling, Phase 4 #18)
+-- ============================================================================
+--
+-- Fortran reference: src/main/lnd2atmMod.F90 (clm_lnd2atm). In the full model
+-- the surface fluxes are area-weighted from patch -> column -> landunit ->
+-- gridcell. The patch->column aggregation has ALREADY happened upstream: the
+-- scalar @eflx_*_patch@ / @fsa_patch@ fields in 'EnergyFluxData' are the
+-- patch-weighted column means (see 'weightedVec' in the canopy/bareground flux
+-- steps). On this SINGLE column / single landunit / single gridcell port the
+-- remaining column->gridcell map is the identity, so the gridcell flux equals
+-- the column flux. This function packs those already-aggregated surface fluxes
+-- into the gridcell-level @l2a_*_grc@ fields the atmosphere would see.
+--
+-- Energy convention: the assembled SH + LH + LW_out fluxes are exactly the
+-- column surface fluxes (no creation/destruction in the map), so the
+-- aggregation is conservative by construction — the unit tests assert this
+-- against a hand-built EnergyFluxData. The radiative temperature is recovered
+-- from the outgoing longwave by Stefan-Boltzmann inversion, falling back to the
+-- ground temperature when LW_out is unavailable.
+--
+-- HONESTY: no Fortran lnd2atm reference dump is available here, so this is
+-- validated by conservation/sanity (the gridcell flux equals the column flux),
+-- NOT by bit-for-bit Fortran parity. The atm->lnd downscaling direction is a
+-- topographic operation; on a single column with no sub-grid topography it is
+-- the identity (the downscaled column forcing equals the gridcell forcing) and
+-- is therefore intentionally a no-op at this scope.
+aggregateLnd2Atm :: CLMState -> Lnd2AtmData
+aggregateLnd2Atm st =
+  let !ef     = clmEnergyFlux st
+      !t_grnd = t_grnd_col (clmTemp st)
+      -- Column-level surface fluxes (already patch-weighted upstream).
+      !shTot  = eflx_sh_tot_patch ef
+      !lhTot  = eflx_lh_tot_patch ef
+      !lwOut  = eflx_lwrad_out_patch ef
+      !fsa    = fsa_patch ef
+      -- Radiative temperature from outgoing longwave (T = (LW/sigma)^0.25);
+      -- fall back to ground temperature if LW_out has not been set.
+      !tRad   = if lwOut > 0.0 then (lwOut / sb) ** 0.25 else t_grnd
+      -- Preserve any l2a fields already populated by other steps (e.g. methane).
+      !l2a0   = clmLnd2Atm st
+  in l2a0
+       { l2a_eflx_sh_tot_grc    = VU.singleton shTot
+       , l2a_eflx_lh_tot_grc    = VU.singleton lhTot
+       , l2a_eflx_lwrad_out_grc = VU.singleton lwOut
+       , l2a_fsa_grc            = VU.singleton fsa
+       , l2a_t_rad_grc          = VU.singleton tRad
+       , l2a_t_ref2m_grc        = VU.singleton t_grnd
+       }
 
 -- ============================================================================
 -- Active Layer adapter
@@ -3805,17 +3862,39 @@ cnPreDrainageStep _cfg ctx st0 =
       -- Gated on injected vectorized veg state, mirroring how the vectorized
       -- decomposition path is gated on injected decomp state — independent of
       -- clmCNActive.
-      st  | clmCNActive st0          = applyColumnFire dt (scalarVegPath dt st0)
+      st  | clmCNActive st0          = applyColumnFire dt (scalarVegPath ctx dt st0)
           | hasVectorizedVeg st0     = perPatchAllocationOverlay dt st0
           | otherwise                = st0
   in if hasVectorizedDecomp st
        then runVectorizedNCycle dt st
        else st
 
+-- | Default atmospheric N-deposition rate for the single-column boreal site,
+-- 0.10 gN/m2/yr expressed as gN/m2/s. Used as the fallback constant and as the
+-- single knot of 'defaultNDepStream'.
+defaultNDepRate :: Double
+defaultNDepRate = 0.10 / (365.0 * 86400.0)
+
+-- | Default N-deposition stream: a single-knot (constant) stream at
+-- 'defaultNDepRate'. This makes 'nDepRateAt' time-independent and bit-identical
+-- to the previous constant-rate behaviour. Replace with a multi-knot stream
+-- (e.g. built from a NetCDF time axis via 'dataStreamFromVectors') to drive a
+-- time-varying deposition rate.
+defaultNDepStream :: DataStream
+defaultNDepStream = constantStream defaultNDepRate
+
+-- | Model time [s] for stream lookups, derived from the timestep context's
+-- calendar day. With the default constant stream this value is irrelevant
+-- (the same rate is returned at every time); it becomes meaningful only when a
+-- multi-knot stream keyed on the same time axis is supplied.
+cnModelTime :: TimestepContext -> Double
+cnModelTime ctx = tcNextswCday ctx * 86400.0
+
 -- | The legacy scalar veg-pool C/N path (formerly the whole 'cnPreDrainageStep').
--- Preserved verbatim; gated on 'clmCNActive' upstream.
-scalarVegPath :: Double -> CLMState -> CLMState
-scalarVegPath dt st0 =
+-- Preserved verbatim apart from the additive N-deposition input (see 'sminn'');
+-- gated on 'clmCNActive' upstream.
+scalarVegPath :: TimestepContext -> Double -> CLMState -> CLMState
+scalarVegPath ctx dt st0 =
     let -- Per-patch allocation overlay (xsmrpool / per-patch leafc/frootc/...).
         -- When the canopy adapter has injected per-patch carriers we run the
         -- faithful per-patch GPP -> MR -> availC -> allometric-allocation path
@@ -3942,9 +4021,14 @@ scalarVegPath dt st0 =
         !somC' = clmSoilOrgC st + (litToSom - hr_som) * dt
         -- Step 8b: N INPUTS (close the previously sinks-only N budget) via
         -- NDynamicsMod: atmospheric deposition + free-living fixation + NPP-driven
-        -- symbiotic fixation. Rates in gN/m2/s, added to sminn.
+        -- symbiotic fixation. Rates in gN/m2/s, added to sminn. Deposition is now
+        -- driven through the time-interpolated DataStream utility
+        -- (CLM.Infrastructure.DataStream): the DEFAULT is a constant stream at
+        -- 'defaultNDepRate' so existing single-column CN behaviour is unchanged,
+        -- and a multi-knot stream (e.g. an annual series from NetCDF) drives a
+        -- time-varying rate.
         !secsYr   = 365.0 * 86400.0
-        !ndepRate = 0.10 / secsYr   -- ~0.10 gN/m2/yr deposition (clean boreal site)
+        !ndepRate = nDepRateAt defaultNDepStream defaultNDepRate (cnModelTime ctx)
         !ndep = VU.head $ nDeposition NDepositionInput
           { ndi2_nc = 1, ndi2_forc_ndep = VU.singleton ndepRate
           , ndi2_col_gridcell = VU.singleton 0 }

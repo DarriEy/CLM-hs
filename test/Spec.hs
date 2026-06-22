@@ -16,8 +16,13 @@ import CLM.Driver.CLMDriver
   , defaultTimestepContext, clmDrvPatch2Col )
 import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
-  , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep )
+  , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
+  , aggregateLnd2Atm )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
+import CLM.Types.Lnd2AtmData (Lnd2AtmData(..))
+import CLM.Infrastructure.DataStream
+  ( mkDataStream, interpStream, streamLength, dataStreamFromVectors
+  , constantStream, nDepRateAt )
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
@@ -236,6 +241,112 @@ main = hspec $ do
       nlevsoi `shouldSatisfy` (> 0)
       nlevgrnd `shouldSatisfy` (> nlevsoi)
       nlevsno `shouldSatisfy` (> 0)
+
+  -- =====================================================================
+  -- External data streams + linear time interpolation (Phase 4 #17)
+  -- =====================================================================
+  -- The interpolation MATH is validated exactly (deterministic unit tests):
+  -- exact at knots, exact midpoints, clamping outside the range. No external
+  -- stream dataset is bundled, so this is NOT a Fortran-parity claim.
+  describe "DataStream (time interpolation)" $ do
+    let s2 = mkDataStream [(0.0, 10.0), (10.0, 30.0)]  -- slope = 2.0
+
+    it "returns Nothing for an empty stream" $
+      interpStream (mkDataStream []) 5.0 `shouldBe` Nothing
+
+    it "is exact at each knot (no rounding error)" $ do
+      interpStream s2 0.0  `shouldBe` Just 10.0
+      interpStream s2 10.0 `shouldBe` Just 30.0
+
+    it "interpolates the midpoint exactly" $
+      interpStream s2 5.0 `shouldBe` Just 20.0
+
+    it "interpolates a non-midpoint linearly (t=2.5 -> 15.0)" $
+      interpStream s2 2.5 `shouldBe` Just 15.0
+
+    it "clamps below the range to the first knot value" $
+      interpStream s2 (-100.0) `shouldBe` Just 10.0
+
+    it "clamps above the range to the last knot value" $
+      interpStream s2 1000.0 `shouldBe` Just 30.0
+
+    it "handles a single-knot (constant) stream at any time" $ do
+      let c = constantStream 7.5
+      interpStream c (-5.0) `shouldBe` Just 7.5
+      interpStream c  0.0   `shouldBe` Just 7.5
+      interpStream c  9.9e9 `shouldBe` Just 7.5
+
+    it "sorts unordered knots and interpolates correctly" $ do
+      let su = mkDataStream [(10.0, 30.0), (0.0, 10.0), (5.0, 100.0)]
+      streamLength su `shouldBe` 3
+      -- between knot 0 (t=0,v=10) and knot 1 (t=5,v=100): midpoint t=2.5 -> 55
+      interpStream su 2.5 `shouldBe` Just 55.0
+      -- exact at the middle knot
+      interpStream su 5.0 `shouldBe` Just 100.0
+
+    it "interpolates across a three-knot stream within each segment" $ do
+      let s3 = mkDataStream [(0.0, 0.0), (10.0, 100.0), (20.0, 100.0)]
+      interpStream s3 5.0  `shouldBe` Just 50.0   -- first segment
+      interpStream s3 15.0 `shouldBe` Just 100.0  -- flat second segment
+
+    it "builds a stream from parallel time/value vectors" $ do
+      let dv = dataStreamFromVectors (VU.fromList [0.0, 4.0])
+                                     (VU.fromList [0.0, 8.0])
+      interpStream dv 2.0 `shouldBe` Just 4.0     -- midpoint
+
+    it "nDepRateAt uses the stream value when present, else the fallback" $ do
+      let strm = mkDataStream [(0.0, 1.0), (10.0, 3.0)]
+      -- non-empty stream: interpolated value wins over the fallback
+      nDepRateAt strm 99.0 5.0 `shouldBe` 2.0
+      -- empty stream: fallback constant is returned
+      nDepRateAt (mkDataStream []) 0.42 5.0 `shouldBe` 0.42
+      -- constant-stream default reproduces the constant exactly
+      nDepRateAt (constantStream 0.123) 99.0 1.0e9 `shouldBe` 0.123
+
+  -- =====================================================================
+  -- Land-to-atmosphere flux aggregation (Phase 4 #18)
+  -- =====================================================================
+  -- Validated by CONSERVATION/SANITY: the gridcell-level l2a fluxes equal the
+  -- (already patch-weighted) column surface fluxes — the column->gridcell map is
+  -- the identity on this single-column port. atm->lnd downscaling is identity at
+  -- this scope (no sub-grid topography), so it is not exercised here. This is NOT
+  -- a Fortran-parity claim (no lnd2atm reference dump is available).
+  describe "Lnd2Atm flux aggregation" $ do
+    let ef = defaultEnergyFluxData
+               { eflx_sh_tot_patch    = 42.0
+               , eflx_lh_tot_patch    = 17.0
+               , eflx_lwrad_out_patch = 300.0
+               , fsa_patch            = 250.0
+               }
+        st = defaultCLMState
+               { clmEnergyFlux = ef
+               , clmTemp = defaultTemperatureData { t_grnd_col = 285.0 }
+               }
+        l2a = aggregateLnd2Atm st
+
+    it "carries the column sensible/latent/LW/absorbed-SW fluxes to the gridcell" $ do
+      VU.toList (l2a_eflx_sh_tot_grc l2a)    `shouldBe` [42.0]
+      VU.toList (l2a_eflx_lh_tot_grc l2a)    `shouldBe` [17.0]
+      VU.toList (l2a_eflx_lwrad_out_grc l2a) `shouldBe` [300.0]
+      VU.toList (l2a_fsa_grc l2a)            `shouldBe` [250.0]
+
+    it "conserves total turbulent+radiative flux (gridcell sum == column sum)" $ do
+      let colTotal = eflx_sh_tot_patch ef + eflx_lh_tot_patch ef
+                   + eflx_lwrad_out_patch ef
+          grcTotal = VU.head (l2a_eflx_sh_tot_grc l2a)
+                   + VU.head (l2a_eflx_lh_tot_grc l2a)
+                   + VU.head (l2a_eflx_lwrad_out_grc l2a)
+      abs (grcTotal - colTotal) `shouldSatisfy` (< 1.0e-12)
+
+    it "recovers radiative temperature from outgoing LW via Stefan-Boltzmann" $ do
+      -- T_rad = (LW_out / sigma)^0.25, and inverting gives back LW_out.
+      let tRad = VU.head (l2a_t_rad_grc l2a)
+      abs (sb * tRad ** 4 - eflx_lwrad_out_patch ef) `shouldSatisfy` (< 1.0e-6)
+
+    it "falls back to ground temperature when outgoing LW is zero" $ do
+      let stNoLw = st { clmEnergyFlux = ef { eflx_lwrad_out_patch = 0.0 } }
+          l2a'   = aggregateLnd2Atm stNoLw
+      VU.head (l2a_t_rad_grc l2a') `shouldBe` 285.0
 
   -- =====================================================================
   -- Tridiagonal Solver
