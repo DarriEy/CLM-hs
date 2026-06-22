@@ -140,9 +140,18 @@ or needs writing (glacier).
     lake surface turbulent-flux / thermal coupling gap that is unresolved in CLM.jl.
     Reported as a pending parity diagnostic; the hard assertion is stability +
     physical bounds. So the lake solve is correct in the bulk; tight surface parity
-    is an open problem shared with the Julia port. URBAN still a
-    no-op stub (`urbanFluxesStep` returns input and checks the wrong landunit
-    type `it /= 6`) — separate item, not addressed here.
+    is an open problem shared with the Julia port.
+    **URBAN now wired** (2026-06): `urbanFluxesStep` was a no-op that also checked
+    the wrong landunit type (`it /= 6`; 6 is wetland). Fixed the gate to urban types
+    7/8/9 (`isturb_min..isturb_max`) and wired the ported `UrbanFluxes`
+    (`solveCanyonEnergyBalance` → canyon air temp, per-facet sensible heat, HVAC
+    waste heat) + `UrbanRadiation` (`netLongwave` multiple-reflection canyon LW),
+    writing results into the energy-flux fields and t_ref2m. Validated by 5 sanity/
+    stability tests (urban types active + bounded; soil/wetland inert — explicit
+    regression guard against the old `/= 6` bug; SH sign follows the surface–air
+    gradient). HONEST LIMITS: no urban surfdata or urban Fortran reference exists,
+    so NO Fortran parity — only sanity/conservation; and the single-column port uses
+    one t_grnd proxy for all five urban facet columns CLM proper splits out.
 14. **Glacier** — module DONE (2026-06). Ported `GlacierSurfaceMassBalanceMod` →
     `CLM.BioGeoPhys.GlacierSurfaceMassBalance` (HandleIceMelt + ComputeSurfaceMass-
     Balance + AdjustRunoffTerms as one pure single-column function), cross-checked
@@ -197,10 +206,25 @@ or needs writing (glacier).
     Output is now machine-comparable to CTSM. NOT done (out of single-column
     scope): multi-tape, subgrid aggregation, unlimited/append time, time-coordinate
     metadata, comparison against a real Fortran h0 tape (data-gap blocked).
-17. **External data streams** — N-deposition, LAI, crop calendar, urban-tv readers +
-    time interpolation. *Effort: M. Risk: L.*
-18. **atm→lnd downscaling + lnd→atm coupling** — topographic forcing downscaling and
-    coupling-flux aggregation (needed for any multi-column or coupled use). *Effort: M.*
+17. **External data streams** — time-interpolation core DONE (2026-06). New
+    `CLM.Infrastructure.DataStream`: a sorted (time,value) knot series with
+    `interpStream` (linear interpolation, clamps outside range, exact at knots),
+    `mkDataStream`/`dataStreamFromVectors`/`constantStream`/`nDepRateAt`. Wired into
+    the N-deposition path (`scalarVegPath`): the deposition rate is now
+    `nDepRateAt defaultNDepStream defaultNDepRate (cnModelTime ctx)`, defaulting to a
+    constant stream so existing CN behaviour is bit-unchanged; a multi-knot stream
+    drives a time-varying rate. **Validated** by deterministic unit tests of the
+    interpolation math (knots/midpoints/clamping/empty/fallback). NOT a Fortran
+    `shr_stream` parity claim (no stream dataset/reference here). LAI / crop-calendar
+    / urban-tv stream readers still pending (the utility is the reusable core).
+18. **atm→lnd downscaling + lnd→atm coupling** — lnd→atm aggregation DONE (2026-06).
+    `aggregateLnd2Atm` packs the patch-weighted column surface fluxes (SH/LH/LW-out/
+    FSA + an SB-inverted radiative temperature) into the gridcell `l2a_*_grc` fields,
+    wired into `energyBalanceStep`; validated by conservation/sanity (gridcell flux
+    == column flux on this single-column port; SB temperature round-trip). atm→lnd
+    topographic downscaling is the IDENTITY at single-column scope (no sub-grid
+    topography) — stated explicitly, not implemented as a separate step. No coupling
+    Fortran reference here, so not a parity claim.
 
 ## Phase 5 — Research-scale scope (likely out of scope)
 

@@ -52,8 +52,8 @@ fire/mortality/crop/dynamic-veg, or anything in the "missing" lists below.
 | Restart I/O (read/write full model state) | **real (Phase 4 #15)** | Write→read→resume is **bit-identical** to a continuous run (validated). Native per-variable binary format. Also reads a real Fortran `clm2.r.*.nc` restart into sane state (`readFortranRestart`, validated) — warm-start-and-run *parity* still needs a matched config+reference; NetCDF *write* (history) is #16 |
 | History output (NetCDF) | **real, single-tape (Phase 4 #16)** | `writeDailyNetCDF` emits a NetCDF history tape (time-dimensioned, CF-attributed vars), round-trip validated. Multi-tape / subgrid aggregation / Fortran-h0 comparison still out of scope |
 | Multi-landunit subgrid (soil + lake gridcell) | **Option A done (Phase 4 #12)** | `runMixedGridcell` loops the column kernel (soil pipeline + lake path) and aggregates by area weight; weights read directly from NetCDF surfdata. Validated by self-consistency + column independence (no mixed Fortran ref exists). Option B (CLMState array-vectorization, filters/down-pointers) unported; urban/crop/wetland columns still not run |
-| atm→lnd downscaling + lnd→atm coupling | **stub** | No topographic forcing downscaling; no coupling fluxes |
-| External data streams (N-deposition, LAI, crop calendar, urban-tv) | **missing** | N budget has no atmospheric/biological inputs |
+| atm→lnd downscaling + lnd→atm coupling | **partial (Phase 4 #18)** | lnd→atm flux aggregation (`aggregateLnd2Atm`) into `l2a_*_grc`, conservation-validated; atm→lnd downscaling is identity at single-column scope. No coupling Fortran ref |
+| External data streams (N-deposition, LAI, crop calendar, urban-tv) | **partial (Phase 4 #17)** | Time-interpolation core (`DataStream`) unit-validated + wired into N-deposition (constant default); LAI/crop/urban-tv readers pending |
 | MPI / OpenMP parallelism | **missing** | Single process, single column |
 
 ### Stubs in the LIVE timestep path
@@ -69,8 +69,13 @@ FIXED in Phase 4 (#13, lake):
   off-by-one indexing bugs in the never-exercised lake module. Validated to
   evolve a sane ice-covered profile warm-started from a Fortran lake restart.
 
-Still a stub (not exercised by the single soil column):
-- `urbanFluxesStep` — returns `st`; also checks the wrong landunit type (`it /= 6`).
+WIRED in Phase 4 (#13 urban):
+- `urbanFluxesStep` — now gated on urban landunit types 7/8/9 (was the wrong
+  `it /= 6`, which is wetland) and runs the ported UrbanFluxes (canyon energy
+  balance, per-facet sensible heat, HVAC waste heat) + UrbanRadiation
+  (multiple-reflection canyon longwave). Validated for sanity/conservation only —
+  no urban surfdata or urban Fortran reference exists, and the single-column port
+  uses one t_grnd proxy for the five urban facet columns CLM splits out.
 
 ### CN/BGC: modules exist but are NEVER CALLED (dead code; 0 driver references)
 WIRED in Phase 1 (now run free-running): growth respiration (via `GResp.cnGrowthResp`),
