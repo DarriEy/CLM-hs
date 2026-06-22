@@ -119,6 +119,10 @@ import CLM.BioGeoChem.DecompBGC
 import CLM.BioGeoChem.NitrifDenitrif
   ( NitrifDenitrifInput(..), NitrifDenitrifOutput(..)
   , defaultNitrifDenitrifParams, nitrifDenitrif )
+import CLM.BioGeoChem.CNPrecisionControl
+  ( TruncateCInput(..), TruncateCOutput(..), truncateC
+  , TruncateNInput(..), TruncateNOutput(..), truncateN
+  , cnCcritDefault, cnCnegcritDefault, cnNcritDefault, cnNnegcritDefault )
 import CLM.Types.SoilBGCCarbonStateData (SoilBGCCarbonStateData(..))
 import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..))
 import CLM.Types.SoilBGCCarbonFluxData (SoilBGCCarbonFluxData(..), defaultSoilBGCCarbonFluxData)
@@ -4021,10 +4025,33 @@ cnPostDrainageStep _cfg ctx st0 =
 
 -- | CN balance check step.
 -- Verifies C and N conservation (logs warnings if imbalanced).
+-- | CN precision control + non-negativity guardrail (CNPrecisionControlMod).
+-- Replaces the former no-op. After the runtime CN fluxes (allocation, growth
+-- respiration, gap mortality, phenology transfers, decomposition) have updated
+-- the column pools, this truncates round-off-level pools to zero (tracking the
+-- removed mass via the precision-control kernels) and enforces non-negativity,
+-- so the new fluxes cannot silently drive a pool negative. Gated on the
+-- free-running runtime (clmCNActive); the matched-state harness is untouched.
 cnBalanceCheckStep :: PhysicsStep
 cnBalanceCheckStep _cfg _ctx st
   | not (clmCNActive st) = st
-  | otherwise = st
+  | otherwise =
+      let trC c = max 0.0 $ tco_carbon $ truncateC TruncateCInput
+            { tci_carbon = c, tci_ccrit = cnCcritDefault
+            , tci_cnegcrit = cnCnegcritDefault, tci_allowneg = False }
+          trN n = max 0.0 $ tno_nitrogen $ truncateN TruncateNInput
+            { tni_nitrogen = n, tni_ncrit = cnNcritDefault
+            , tni_nnegcrit = cnNnegcritDefault }
+      in st { clmLeafC     = trC (clmLeafC st)
+            , clmFrootC    = trC (clmFrootC st)
+            , clmLiveStemC = trC (clmLiveStemC st)
+            , clmDeadStemC = trC (clmDeadStemC st)
+            , clmCPool     = trC (clmCPool st)
+            , clmLitterC   = trC (clmLitterC st)
+            , clmSoilOrgC  = trC (clmSoilOrgC st)
+            , clmLeafN     = trN (clmLeafN st)
+            , clmSMINN     = trN (clmSMINN st)
+            }
 
 -- ============================================================================
 -- Vectorized per-layer N-cycle (CN DECOMPOSITION + N-CYCLING parity group)
