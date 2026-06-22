@@ -149,7 +149,10 @@ soilThermPropLake inp = ThermPropLakeOutput
     !tkdry_= tpli_tkdry inp
     !csol_ = tpli_csol inp
 
-    joff = nlevsno
+    -- Port combined arrays place Fortran soil layer L (1-based) at 0-based
+    -- index L + (nlevsno-1): top soil (L=1) at nlevsno, bottom snow (L=0) at
+    -- nlevsno-1. So j = jj - (nlevsno-1) recovers the Fortran layer.
+    joff = nlevsno - 1
     nlev = nlevsno + nlevgrnd
 
     -- Layer-centre thermal conductivity
@@ -203,8 +206,8 @@ soilThermPropLake inp = ThermPropLakeOutput
               then thkOut VU.! jj
               else 0.0
 
-    -- Top soil layer conductivity
-    tktopsoillay_val = thkOut VU.! joff  -- soil layer 1 (j=1, jj=joff)
+    -- Top soil layer conductivity (port index nlevsno = top soil layer)
+    tktopsoillay_val = thkOut VU.! nlevsno
 
     -- Heat capacity
     cvOut = VU.generate nlev $ \jj ->
@@ -372,7 +375,7 @@ phaseChangeLake inp = PhaseChangeLakeOutput
             [snl_ + 1 .. nlevgrnd]
 
     soisnoPCStep (!tV, !liqV, !iceV, !cvV, !imV, !lh, !qsm, !qsf) j =
-      let jj = j + nlevsno
+      let jj = j + nlevsno - 1   -- Fortran layer j -> port combined index
           t_j   = tV VU.! jj
           liq_j = liqV VU.! jj
           ice_j = iceV VU.! jj
@@ -642,7 +645,10 @@ lakeTridiagSolve inp = LakeTridiagOutput
     !dt       = lti_dtime inp
     !fin_val  = lti_fin inp
 
-    joff    = nlevsno
+    -- Port combined snow+soil arrays place Fortran layer L (snow L<=0, soil
+    -- L>=1) at 0-based index L + (nlevsno-1): bottom snow (L=0) at nlevsno-1,
+    -- top soil (L=1) at nlevsno. So the offset is nlevsno-1, not nlevsno.
+    joff    = nlevsno - 1
     jtop    = snl_ + 1
     -- Extended column: indices from (jtop) to (nlevlak + nlevgrnd)
     -- We map to 0-based array of size n
@@ -785,15 +791,15 @@ lakeTridiagSolve inp = LakeTridiagOutput
 
     -- Extract t_soisno and t_lake from solution
     t_soisno_new = VU.generate (nlevsno + nlevgrnd) $ \jj ->
-      let j = jj - joff
-      in if j >= jtop && j < 1  -- snow layer
-         then solnV VU.! (j - jtop)
-         else if j >= 1 && j > nlevlak  -- soil layer under lake
-         then let jprime = j - nlevlak
-                  k = j - jtop
+      let j = jj - joff   -- Fortran layer L (snow L<=0, soil L>=1)
+      in if j >= jtop && j < 1     -- active snow layer: extended index = L
+         then let k = j - jtop
+              in if k >= 0 && k < n then solnV VU.! k else lti_t_soisno inp VU.! jj
+         else if j >= 1            -- soil layer beneath the lake
+         then let k = (j + nlevlak) - jtop  -- extended index = soil layer + nlevlak
               in if k >= 0 && k < n then solnV VU.! k
                  else lti_t_soisno inp VU.! jj
-         else lti_t_soisno inp VU.! jj
+         else lti_t_soisno inp VU.! jj   -- inactive snow above the pack
 
     t_lake_new = VU.generate nlevlak $ \j ->
       let k = (j + 1) - jtop  -- j_ext = j+1 (1-based lake layer)

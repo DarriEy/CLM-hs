@@ -98,10 +98,26 @@ or needs writing (glacier).
     columns → patches with proper weights and filters (the `decompMod`/`filterMod`/
     `subgridAve` machinery). *Effort: XL. Risk: H (touches all state). Validate:
     single-soil-column results must be unchanged (regression) before adding landunits.*
-13. **Wire urban + lake to actually run** — replace `urbanFluxesStep`/`lakeTemperatureStep`
-    no-ops with the real (already-ported) physics, exercised on urban/lake landunits.
-    *Effort: M (depends on 12). Risk: M. Validate: lake temperature evolves; urban
-    canyon energy balance closes.*
+13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
+    was a no-op (computed thermal props then returned state unchanged); it now
+    chains the full CLM LakeTemperatureMod sequence — thermal props → lake
+    density → eddy diffusivity → solar heat source → implicit tridiagonal solve
+    (snow+lake+soil) → convective mixing → phase change — updating lake
+    temperatures, lake ice fraction, and snow/soil temps + water.
+    `lakeFluxesStep` now passes the surface coupling (ws/ks) through lake state;
+    a `lake_t_lake_col` field was added (LakeStateData had no lake temperature),
+    and `readFortranRestart` now loads T_LAKE/LAKE_ICEFRAC so a lake column can
+    warm-start from a Fortran restart. **Fixed three latent indexing bugs** in
+    the never-exercised lake module (uniform off-by-one: combined snow+soil
+    arrays put Fortran layer L at index L+nlevsno-1, but `soilThermPropLake`,
+    `lakeTridiagSolve`, and `phaseChangeLake` used `+nlevsno`, overrunning the
+    bottom soil layer). **Validated**: warm-started from the Bow lake restart
+    (column 1, ityplun=5) and run a day under cold forcing, the lake evolves a
+    physically-sane ice-covered profile, bounded, ice fraction in [0,1] (test
+    "lake column temperature physics runs and evolves a sane profile"). Tight
+    Fortran parity isn't possible (single time-averaged h0 record). URBAN still a
+    no-op stub (`urbanFluxesStep` returns input and checks the wrong landunit
+    type `it /= 6`) — separate item, not addressed here.
 14. **Glacier** — write `GlacierSurfaceMassBalanceMod` (not ported) + istice column
     handling. *Effort: L. Risk: M.*
 15. **Restart I/O** — DONE (2026-06). Real full-prognostic-state save/restore

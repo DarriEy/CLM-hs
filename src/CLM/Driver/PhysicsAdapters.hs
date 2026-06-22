@@ -201,8 +201,16 @@ import CLM.BioGeoPhys.SoilHydrology
   , waterTable )
 import qualified CLM.BioGeoPhys.SoilHydrology as SH
 import CLM.BioGeoPhys.LakeTemperature
-  ( ThermPropLakeInput(..), ThermPropLakeOutput(..)
-  , soilThermPropLake )
+  ( ThermPropLakeInput(..), ThermPropLakeOutput(..), soilThermPropLake
+  , lakeDensity
+  , LakeDiffInput(..), LakeDiffOutput(..), lakeDiffusivity
+  , LakeSolarInput(..), LakeSolarOutput(..), lakeSolarHeatSource
+  , LakeTridiagInput(..), LakeTridiagOutput(..), lakeTridiagSolve
+  , LakeConvMixInput(..), LakeConvMixOutput(..), lakeConvectiveMix
+  , PhaseChangeLakeInput(..), PhaseChangeLakeOutput(..), phaseChangeLake
+  , betavisLT )
+import CLM.Infrastructure.InitVertical (lakeCoordinates)
+import CLM.Types.LakeStateData (LakeStateData(..))
 import CLM.BioGeoPhys.Photosynthesis
   ( PhotoParams(..), defaultPhotoParams
   , LeafPhotoInput(..), LeafPhotoResult(..), leafPhotosynthesis )
@@ -2695,8 +2703,17 @@ lakeFluxesStep _cfg ctx st =
 
            temp' = temp { t_grnd_col = lfo_t_grnd lOut }
 
+           -- pass the surface coupling (wind stress, extinction) to the lake
+           -- temperature solve via lake state
+           lakeS = clmLakeState st
+           lakeS' = lakeS
+             { lake_ws_col = VU.singleton (lfo_ws_col lOut)
+             , lake_ks_col = VU.singleton (lfo_ks_col lOut)
+             }
+
        in st { clmEnergyFlux = ef'
              , clmTemp = temp'
+             , clmLakeState = lakeS'
              }
 
 -- ============================================================================
@@ -3441,18 +3458,52 @@ urbanFluxesStep _cfg ctx st =
 -- Lake Temperature adapter
 -- ============================================================================
 
+-- | Lake column temperature evolution (CLM LakeTemperatureMod sequence):
+-- thermal properties -> lake density -> eddy diffusivity -> solar heat source
+-- -> implicit tridiagonal solve (snow+lake+soil) -> convective mixing
+-- -> phase change. Updates lake temperatures, lake ice fraction, snow/soil
+-- temperatures and water, and the saved top-layer eddy conductivity.
+--
+-- Only runs on lake columns (lakedepth > 0) that carry an initialized lake
+-- temperature profile ('lake_t_lake_col'); soil columns pass through unchanged.
+-- The surface coupling (ground heat flux @fin@, wind stress @ws@, extinction
+-- @ks@, absorbed solar @sabg@) is produced upstream by 'lakeFluxesStep'.
 lakeTemperatureStep :: PhysicsStep
 lakeTemperatureStep _cfg ctx st =
-  let col = clmColumn st
-  in if lakedepth col <= 0.0
+  let col   = clmColumn st
+      lakeS = clmLakeState st
+      tLake = lake_t_lake_col lakeS
+  in if lakedepth col <= 0.0 || VU.null tLake
      then st
      else
-       let temp = clmTemp st
-           ws = clmWaterState st
-           ss = clmSoilState st
+       let temp  = clmTemp st
+           ws    = clmWaterState st
+           ss    = clmSoilState st
+           ef    = clmEnergyFlux st
+           wdiag = clmWaterDiagBulk st
+           dtime = tcDtime ctx
+           snl   = clmSnl st
+           nlevlak = VU.length tLake
 
-           tpInp = ThermPropLakeInput
-             { tpli_snl        = clmSnl st
+           iceAll  = lake_lake_icefrac_col lakeS
+           iceFrac = if VU.length iceAll >= nlevlak
+                     then VU.take nlevlak iceAll
+                     else VU.replicate nlevlak 0.0
+           (zLake, dzLake) = lakeCoordinates nlevlak
+
+           tGrnd = t_grnd_col temp
+           fin   = eflx_soil_grnd_col ef
+           sabg  = sabg_patch ef
+           wsCol = safeIdx (lake_ws_col lakeS) 0
+           ksCol = safeIdx (lake_ks_col lakeS) 0
+           etal  = let e = safeIdx (lake_etal_col lakeS) 0
+                   in if e > 0.0 then e
+                      else 1.1925 * max 1.0 (lakedepth col) ** (-0.424)
+           beta  = betavisLT
+
+           -- 1. snow/soil thermal properties
+           tpOut = soilThermPropLake ThermPropLakeInput
+             { tpli_snl        = snl
              , tpli_t_soisno   = t_soisno_col temp
              , tpli_h2osoi_liq = h2osoi_liq_col ws
              , tpli_h2osoi_ice = h2osoi_ice_col ws
@@ -3466,10 +3517,78 @@ lakeTemperatureStep _cfg ctx st =
              , tpli_tkdry      = sstate_tkdry_col ss
              , tpli_csol       = sstate_csol_col ss
              }
+           tk    = tplo_tk tpOut
+           cv    = tplo_cv tpOut
+           tktop = tplo_tktopsoillay tpOut
 
-           tpOut = soilThermPropLake tpInp
+           -- 2. lake density
+           rhow = lakeDensity tLake iceFrac
+
+           -- 3. eddy diffusivity
+           ldOut = lakeDiffusivity LakeDiffInput
+             { ldi_t_grnd = tGrnd, ldi_t_lake = tLake, ldi_lake_icefrac = iceFrac
+             , ldi_z_lake = zLake, ldi_dz_lake = dzLake, ldi_snl = snl
+             , ldi_lakedepth = lakedepth col, ldi_ws = wsCol, ldi_ks = ksCol
+             , ldi_rhow = rhow, ldi_nlevlak = nlevlak }
+           tkLake     = ldo_tk_lake ldOut
+           savedtke1' = ldo_savedtke1 ldOut
+
+           -- 4. solar heat source
+           lsOut = lakeSolarHeatSource LakeSolarInput
+             { lsi_sabg = sabg, lsi_beta = beta, lsi_etal = etal
+             , lsi_lakedepth = lakedepth col, lsi_t_grnd = tGrnd
+             , lsi_t_lake1 = safeIdx tLake 0, lsi_snl = snl
+             , lsi_z_lake = zLake, lsi_dz_lake = dzLake, lsi_nlevlak = nlevlak }
+           phi     = lso_phi lsOut
+           phiSoil = lso_phi_soil lsOut
+
+           -- lake-layer heat capacity (liquid + ice weighted)
+           cvLake = VU.zipWith
+             (\dz icf -> dz * (cpliq * denh2o * (1.0 - icf) + cpice * denice * icf))
+             dzLake iceFrac
+           sabgLyr = VU.replicate nlevsno 0.0
+
+           -- 5. implicit tridiagonal solve (snow + lake + soil)
+           ltOut = lakeTridiagSolve LakeTridiagInput
+             { lti_snl = snl, lti_nlevlak = nlevlak, lti_fin = fin
+             , lti_t_soisno = t_soisno_col temp, lti_t_lake = tLake
+             , lti_z = colZ col, lti_dz = colDz col
+             , lti_z_lake = zLake, lti_dz_lake = dzLake
+             , lti_cv = cv, lti_tk = tk, lti_cv_lake = cvLake, lti_tk_lake = tkLake
+             , lti_phi = phi, lti_phi_soil = phiSoil, lti_tktopsoillay = tktop
+             , lti_sabg_lyr = sabgLyr, lti_dtime = dtime }
+           tSoisno1 = lto_t_soisno ltOut
+           tLake1   = lto_t_lake ltOut
+
+           -- 6. convective mixing
+           cmOut = lakeConvectiveMix LakeConvMixInput
+             { lcmi_t_lake = tLake1, lcmi_lake_icefrac = iceFrac
+             , lcmi_dz_lake = dzLake, lcmi_nlevlak = nlevlak }
+           tLake2 = lcmo_t_lake cmOut
+           ice2   = lcmo_lake_icefrac cmOut
+
+           -- 7. phase change (freeze/melt of lake water + snow/soil)
+           pcOut = phaseChangeLake PhaseChangeLakeInput
+             { pcli_snl = snl, pcli_t_soisno = tSoisno1
+             , pcli_h2osoi_liq = h2osoi_liq_col ws, pcli_h2osoi_ice = h2osoi_ice_col ws
+             , pcli_cv = cv, pcli_t_lake = tLake2, pcli_lake_icefrac = ice2
+             , pcli_cv_lake = cvLake, pcli_dz_lake = dzLake
+             , pcli_h2osno_no_layers = h2osno_col ws
+             , pcli_snow_depth = safeIdx (wdiag_snow_depth_col wdiag) 0
+             , pcli_nlevlak = nlevlak, pcli_dtime = dtime }
 
        in st
+          { clmTemp = temp
+              { t_soisno_col = pclo_t_soisno pcOut
+              , t_grnd_col   = safeIdx (pclo_t_lake pcOut) 0 }
+          , clmWaterState = ws
+              { h2osoi_liq_col = pclo_h2osoi_liq pcOut
+              , h2osoi_ice_col = pclo_h2osoi_ice pcOut }
+          , clmLakeState = lakeS
+              { lake_t_lake_col       = pclo_t_lake pcOut
+              , lake_lake_icefrac_col = pclo_lake_icefrac pcOut
+              , lake_savedtke1_col    = VU.singleton savedtke1' }
+          }
 
 -- ============================================================================
 -- CN biogeochemistry adapters

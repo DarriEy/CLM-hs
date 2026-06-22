@@ -62,9 +62,14 @@ FIXED in Phase 1 (now real, runtime-gated on clmCNActive):
 - `cnBalanceCheckStep` — real CN precision control (round-off truncation +
   non-negativity guardrail) instead of a no-op.
 
-Still stubs (only reached by non-soil landunits, which the single-column run never
-exercises — so harmless to the current run, but real gaps):
-- `lakeTemperatureStep` — computes thermal props then returns `st` unchanged.
+FIXED in Phase 4 (#13, lake):
+- `lakeTemperatureStep` — now chains the full lake-temperature solve (thermal
+  props → density → eddy diffusivity → solar source → implicit tridiagonal solve
+  → convective mixing → phase change) and applies it. Fixed three latent
+  off-by-one indexing bugs in the never-exercised lake module. Validated to
+  evolve a sane ice-covered profile warm-started from a Fortran lake restart.
+
+Still a stub (not exercised by the single soil column):
 - `urbanFluxesStep` — returns `st`; also checks the wrong landunit type (`it /= 6`).
 
 ### CN/BGC: modules exist but are NEVER CALLED (dead code; 0 driver references)

@@ -58,6 +58,7 @@ import CLM.Types.GridcellData (GridcellData(..))
 import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Types.WaterStateBulkData (WaterStateBulkData(..))
+import CLM.Types.LakeStateData (LakeStateData(..))
 
 import CLM.Infrastructure.BinaryIO
   ( readFloat64Vector, readInt64Vector, readFloat64Scalar
@@ -66,7 +67,8 @@ import CLM.Infrastructure.BinaryIO
 import CLM.Infrastructure.ReadParams
   ( readParametersBinary, AllParams(..), PFTConstants(..) )
 import CLM.Infrastructure.NetCDF
-  ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D, ncWriteTimeseries )
+  ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D, ncDimLen
+  , ncWriteTimeseries )
 import CLM.Infrastructure.ForcingReader
   ( ForcingReaderState(..), forcingReaderInitBinary, readForcingStepPure
   , ForcingTimestep(..)
@@ -988,6 +990,11 @@ readFortranRestart icol path base = do
       fsnoe  <- ncScal nc "frac_sno_eff" icol
       intsno <- ncScal nc "INT_SNOW"   icol
       snlD   <- ncScal nc "SNLSNO"     icol
+      -- lake state (lake columns): read T_LAKE / LAKE_ICEFRAC over levlak
+      eNlak  <- ncDimLen nc "levlak"
+      let nlak = either (const 10) id eNlak
+      tlake   <- ncSlice2 nc "T_LAKE"       icol nlak
+      lakeice <- ncSlice2 nc "LAKE_ICEFRAC" icol nlak
       ncClose nc
       case tsoi of
         Nothing -> return (Left "T_SOISNO not found / wrong shape — not a CLM restart?")
@@ -1027,6 +1034,10 @@ readFortranRestart icol path base = do
               bsh = clmSoilHydro base
               sh' = bsh { sh_zwt_col         = setCol1 zwt  (sh_zwt_col bsh)
                         , sh_zwt_perched_col = setCol1 zwtp (sh_zwt_perched_col bsh) }
+              blake = clmLakeState base
+              lake' = blake
+                { lake_t_lake_col       = maybe (lake_t_lake_col blake) id tlake
+                , lake_lake_icefrac_col = maybe (lake_lake_icefrac_col blake) id lakeice }
           return $ Right base
             { clmColumn         = col'
             , clmTemp           = tmp'
@@ -1034,6 +1045,7 @@ readFortranRestart icol path base = do
             , clmWaterDiagBulk  = wd'
             , clmWaterStateBulk = wsb'
             , clmSoilHydro      = sh'
+            , clmLakeState      = lake'
             , clmSnl            = snl'
             }
 

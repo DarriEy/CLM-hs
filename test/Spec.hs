@@ -15,12 +15,14 @@ import CLM.Driver.CLMDriver
   ( CLMState(..), TimestepContext(..), defaultCLMState
   , defaultTimestepContext, clmDrvPatch2Col )
 import CLM.Driver.PhysicsAdapters
-  ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep )
+  ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
+  , lakeFluxesStep, lakeTemperatureStep )
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
   , writeDailyNetCDF )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
+import CLM.Types.LakeStateData (LakeStateData(..))
 import CLM.Types.WaterStateData (WaterStateData(..), defaultWaterStateData)
 import CLM.Types.WaterFluxData (WaterFluxData(..), defaultWaterFluxData)
 import CLM.Types.EnergyFluxData (EnergyFluxData(..), defaultEnergyFluxData)
@@ -1382,6 +1384,47 @@ main = hspec $ do
                   checkVar "FSA"        dd_fsa
                   ncClose nc
           removeFile ncpath
+
+    it "lake column temperature physics runs and evolves a sane profile (#13)" $ do
+      -- Wire-up validation for #13: warm-start the deep-lake column (Fortran
+      -- column 1, ityplun=5) from the Bow lake restart, activate it
+      -- (lakedepth>0), and run lakeFluxes -> lakeTemperature for a day under
+      -- cold winter forcing. The solve was previously a no-op (computed thermal
+      -- props then returned state unchanged); here we require it to actually
+      -- advance a physically-sane ice-covered lake profile. Tight Fortran
+      -- parity isn't possible (single time-averaged h0 record), so this checks
+      -- the chain runs, evolves the state, and stays bounded.
+      let rpath = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_lake_run/Bow_at_Banff_lumped.clm2.r.2003-01-03-00000.nc"
+      hasBow <- doesDirectoryExist "test/data_bow/coldstart"
+      hasRst <- doesFileExist rpath
+      if not hasBow then pendingWith "test/data_bow not available"
+      else if not hasRst then pendingWith "Fortran lake restart not available on this machine"
+      else do
+        (base, _, _) <- initCLMStateFromDir "test/data_bow"
+        res <- readFortranRestart 1 rpath base   -- column 1 = deep lake
+        case res of
+          Left e -> expectationFailure ("readFortranRestart (lake col) failed: " ++ e)
+          Right st0raw -> do
+            let st0 = st0raw { clmColumn = (clmColumn st0raw) { lakedepth = 50.0 } }
+                tLake0 = lake_t_lake_col (clmLakeState st0)
+            VU.length tLake0 `shouldSatisfy` (> 0)
+            let ctx = defaultTimestepContext
+                  { tcForcT = VU.singleton 253.15, tcForcTh = VU.singleton 253.15
+                  , tcForcQ = VU.singleton 0.001, tcForcPbot = VU.singleton 85000.0
+                  , tcForcRho = VU.singleton 1.1, tcForcLwrad = VU.singleton 200.0
+                  , tcForcWind = VU.singleton 5.0, tcDtime = 1800.0 }
+                step s = lakeTemperatureStep defaultDriverConfig ctx
+                           (lakeFluxesStep defaultDriverConfig ctx s)
+                stN    = iterate step st0 !! 48   -- one day at 1800 s
+                tLakeN = lake_t_lake_col (clmLakeState stN)
+                iceN   = lake_lake_icefrac_col (clmLakeState stN)
+            -- the solve actually ran (state advanced, not the old no-op)
+            VU.toList tLakeN `shouldSatisfy` (/= VU.toList tLake0)
+            -- physically sane and bounded (no NaN / blow-up)
+            VU.all (not . isNaN) tLakeN `shouldBe` True
+            VU.all (\t -> t > 250.0 && t < 285.0) tLakeN `shouldBe` True
+            -- ice fraction stays in [0,1]
+            VU.all (\f -> f >= 0.0 && f <= 1.0) iceN `shouldBe` True
 
     it "Day 1 T_GRND matches Julia reference within 0.10K" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"

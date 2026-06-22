@@ -20,6 +20,7 @@ data LakeStateData = LakeStateData
   , lake_ust_lake_col         :: !(VU.Vector Double) -- ^ Friction velocity [m/s]
   , lake_betaprime_col        :: !(VU.Vector Double) -- ^ Effective beta
   , lake_savedtke1_col        :: !(VU.Vector Double) -- ^ Top level eddy conductivity from previous timestep [W/mK]
+  , lake_t_lake_col           :: !(VU.Vector Double) -- ^ Lake layer temperatures [K] (ncols * nlevlak, flattened)
   , lake_lake_icefrac_col     :: !(VU.Vector Double) -- ^ Mass fraction of lake layer frozen (ncols * nlevlak, flattened)
   , lake_lake_icefracsurf_col :: !(VU.Vector Double) -- ^ Mass fraction of surface lake layer frozen
   , lake_lake_icethick_col    :: !(VU.Vector Double) -- ^ Ice thickness [m]
@@ -38,6 +39,7 @@ defaultLakeStateData = LakeStateData
   , lake_ust_lake_col         = VU.empty
   , lake_betaprime_col        = VU.empty
   , lake_savedtke1_col        = VU.empty
+  , lake_t_lake_col           = VU.empty
   , lake_lake_icefrac_col     = VU.empty
   , lake_lake_icefracsurf_col = VU.empty
   , lake_lake_icethick_col    = VU.empty
