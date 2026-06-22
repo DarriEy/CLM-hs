@@ -19,6 +19,10 @@ import CLM.Driver.PhysicsAdapters
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
   , aggregateLnd2Atm )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
+import CLM.BioGeoChem.CNProducts
+  ( CNProductsState(..), CNProductsFluxes(..)
+  , ProductUpdateInput(..), ProductUpdateOutput(..)
+  , productPoolUpdate, kprod1, kprod10, kprod100 )
 import CLM.Types.Lnd2AtmData (Lnd2AtmData(..))
 import CLM.Infrastructure.DataStream
   ( mkDataStream, interpStream, streamLength, dataStreamFromVectors
@@ -1567,6 +1571,46 @@ main = hspec $ do
       let soilOut = clmWaterState (glacierSMBStep defaultDriverConfig ctx (mkCol 1 12000.0 5.0))
       h2osno_col soilOut `shouldBe` 12000.0
       h2osoi_liq_col soilOut VU.! nls `shouldBe` 5.0
+
+  describe "CNProducts (wood/crop product pools)" $ do
+    -- The ported CNProducts module is not wired into the live single-column
+    -- driver: its gain fluxes come from dynamic land-cover change (dyn_subgrid,
+    -- unported) and wood/crop harvest, none of which occur in the static run, so
+    -- wiring it would create zero-flux dead pools. Instead we lock in the
+    -- module's MATH with deterministic conservation tests.
+    let dt = 1800.0
+        zeroFlux = CNProductsFluxes 0 0 0 0 0 0 0 0
+        run fl s = productPoolUpdate (ProductUpdateInput s fl dt)
+
+    it "wood harvest grows the 10- and 100-year pools by gain*dt" $ do
+      let fl = zeroFlux { cpf_hrv_prod10_gain = 2.0e-6, cpf_hrv_prod100_gain = 1.0e-6 }
+          s  = puo_state (run fl (CNProductsState 0 0 0))
+      abs (cps_prod10 s  - 2.0e-6 * dt) `shouldSatisfy` (< 1.0e-12)
+      abs (cps_prod100 s - 1.0e-6 * dt) `shouldSatisfy` (< 1.0e-12)
+
+    it "crop harvest grows the 1-year crop product pool" $ do
+      let s = puo_state (run (zeroFlux { cpf_crop_harvest_gain = 3.0e-6 }) (CNProductsState 0 0 0))
+      abs (cps_cropprod1 s - 3.0e-6 * dt) `shouldSatisfy` (< 1.0e-12)
+
+    it "pools decay first-order: loss = pool*k, pool' = pool*(1 - k*dt)" $ do
+      let o = run zeroFlux (CNProductsState 10.0 100.0 1000.0)
+          s = puo_state o
+      abs (puo_prod10_loss o - 100.0 * kprod10) `shouldSatisfy` (< 1.0e-15)
+      abs (cps_cropprod1 s - 10.0   * (1 - kprod1   * dt)) `shouldSatisfy` (< 1.0e-9)
+      abs (cps_prod10 s    - 100.0  * (1 - kprod10  * dt)) `shouldSatisfy` (< 1.0e-9)
+      abs (cps_prod100 s   - 1000.0 * (1 - kprod100 * dt)) `shouldSatisfy` (< 1.0e-9)
+
+    it "conserves mass: pool change == (sum of gains - k*pool) * dt" $ do
+      let fl = zeroFlux { cpf_dwt_prod10_gain = 1.0e-6
+                        , cpf_gru_prod10_gain = 0.5e-6
+                        , cpf_hrv_prod10_gain = 2.0e-6 }
+          p0 = 50.0
+          gains = 1.0e-6 + 0.5e-6 + 2.0e-6
+          s = puo_state (run fl (CNProductsState 0 p0 0))
+      abs ((cps_prod10 s - p0) - (gains - kprod10 * p0) * dt) `shouldSatisfy` (< 1.0e-9)
+
+    it "the three pools have distinct lifespans (kprod1 > kprod10 > kprod100)" $
+      (kprod1 > kprod10 && kprod10 > kprod100) `shouldBe` True
 
   describe "Multi-landunit gridcell (column loop)" $ do
     let mixed = "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/clm_ports/CLM.jl/test_inputs/lake/surfdata_mixed.nc"

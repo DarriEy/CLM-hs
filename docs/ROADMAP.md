@@ -77,6 +77,22 @@ bitwise correctness.
    (pch_itype [0,1,12,0]; crops are index 15+), so crop allocation/phenology would be dead
    code. Moved to Phase 4 (multi-landunit / crop PFT) — wiring it now would only add
    unexercised code, the opposite of this effort's goal.
+   **Status check (2026-06):** crop is also *unported* — only `CLM.Types.CropData`
+   (a types stub) exists; there is no crop allocation/phenology module. Wiring crop
+   would mean writing the physics from scratch AND synthesizing a crop-PFT surfdata.
+   Not done.
+
+   **CN dead-code audit (2026-06), re crop/CNDV/products on the static single column:**
+   - **CNProducts** (wood/crop product pools) — its gain fluxes come from dynamic
+     land-cover change (dyn_subgrid #19, unported) + wood/crop harvest, NONE of which
+     occur in a static run, so a live step would carry only zero-flux dead pools.
+     Instead the module MATH is now locked in by deterministic conservation unit
+     tests (gain*dt growth, first-order decay loss = pool*k, Δpool = (gains−k·pool)·dt,
+     distinct 1/10/100-yr lifespans) — test block "CNProducts (wood/crop product pools)".
+   - **CNDV** (dynamic vegetation) — ported and *would* run on the natural-veg column
+     (annual PFT competition/establishment/mortality), but no dynamic-vegetation Fortran
+     reference exists, so it could only be sanity-validated. Not wired (offer pending).
+   - **Crop** — unported (see above).
 9. **Carbon isotopes (C13/C14)** — DONE (8e3d0d2). Wired CNCIsoFluxMod/CNC14DecayMod into
    cnBalanceCheckStep: GPP discrimination, respiration at source ratio, C14 decay. Honest
    limitation: ratio-diagnostic (conservative with bulk pools) rather than prognostic isotope
@@ -110,9 +126,19 @@ or needs writing (glacier).
     bit-identical (±1e-12) regardless of the weights — proving the loop doesn't let
     columns corrupt one another. No mixed Fortran reference run exists (the
     clm_lake_run is 100% lake), so this is self-consistency + per-column
-    equivalence, not a mixed-gridcell Fortran parity. The full CLMState
-    array-vectorization (Option B: filters/down-pointers/p2c-c2l-c2g) remains
-    unported; Option A covers the single-gridcell column loop.
+    equivalence, not a mixed-gridcell Fortran parity.
+    **Option B (full CLMState array-vectorization) feasibility (2026-06):** this is a
+    ground-up rewrite — every `_col`/`_patch` scalar across ~25 state records becomes
+    a column/patch-indexed array, and every physics adapter (thousands of lines) is
+    reindexed + filter-driven. It cannot be done as a single incremental change
+    without leaving the suite broken for an extended period. The *bounded, tractable
+    core* is to instantiate + exercise the already-ported-but-0%-used subgrid
+    machinery: `InitSubgrid` (addLandunit/Column/Patch + `clmPtrsCompdown` down-pointers
+    + `clmPtrsCheck`), `Filters` (soil/lake/urban/snow masks), and `SubgridAverage`
+    (p2c/c2l/c2g), then route the gridcell aggregation in `runMixedGridcell` through the
+    real `c2g` instead of the ad-hoc weight. That instantiation (fiddly preallocation,
+    no existing template — the machinery has zero tests today) is the recommended next
+    focused step; the per-physics array rewrite is genuinely Phase-5-scale.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake
