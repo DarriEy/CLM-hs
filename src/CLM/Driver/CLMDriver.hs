@@ -52,6 +52,7 @@ module CLM.Driver.CLMDriver
   , module CLM.Types.UrbanParamsData
   , module CLM.Types.CNVegCarbonStateData
   , module CLM.Types.CNVegNitrogenStateData
+  , module CLM.Types.CNVegStateData
   , module CLM.Types.SoilBGCCarbonStateData
   , module CLM.Types.SoilBGCNitrogenStateData
   , module CLM.Types.SoilBGCCarbonFluxData
@@ -89,6 +90,7 @@ import CLM.Types.Lnd2AtmData     (Lnd2AtmData(..), defaultLnd2AtmData)
 import CLM.Types.UrbanParamsData (UrbanParamsData(..), defaultUrbanParamsData)
 import CLM.Types.CNVegCarbonStateData (CNVegCarbonStateData(..), defaultCNVegCarbonStateData)
 import CLM.Types.CNVegNitrogenStateData (CNVegNitrogenStateData(..), defaultCNVegNitrogenStateData)
+import CLM.Types.CNVegStateData (CNVegStateData(..), defaultCNVegStateData)
 import CLM.Types.SoilBGCCarbonStateData (SoilBGCCarbonStateData(..), defaultSoilBGCCarbonStateData)
 import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..), defaultSoilBGCNitrogenStateData)
 import CLM.Types.SoilBGCCarbonFluxData (SoilBGCCarbonFluxData(..), defaultSoilBGCCarbonFluxData)
@@ -240,6 +242,7 @@ data CLMState = CLMState
     -- compares. Physics that updates them is wired in a later phase.
   , clmCNVegCState   :: !CNVegCarbonStateData    -- ^ Per-patch vegetation C pools
   , clmCNVegNState   :: !CNVegNitrogenStateData  -- ^ Per-patch vegetation N pools
+  , clmCNVegState    :: !CNVegStateData          -- ^ Per-patch phenology/allocation carrier state
   , clmSoilBGCCState :: !SoilBGCCarbonStateData  -- ^ Per-layer soil/litter C pools
   , clmSoilBGCNState :: !SoilBGCNitrogenStateData-- ^ Per-layer soil/litter + mineral N pools
     -- Vectorized CN/BGC flux state (computed by the vectorized N-cycle in
@@ -306,6 +309,7 @@ defaultCLMState = CLMState
   , clmFPG          = 1.0
   , clmCNVegCState   = defaultCNVegCarbonStateData
   , clmCNVegNState   = defaultCNVegNitrogenStateData
+  , clmCNVegState    = defaultCNVegStateData
   , clmSoilBGCCState = defaultSoilBGCCarbonStateData
   , clmSoilBGCNState = defaultSoilBGCNitrogenStateData
   , clmSoilBGCCFlux  = defaultSoilBGCCarbonFluxData

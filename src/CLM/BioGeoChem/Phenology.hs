@@ -35,6 +35,9 @@ module CLM.BioGeoChem.Phenology
   , backgroundLitterfall
     -- * Main driver
   , phenologyDriver
+    -- * Pool-conserving driver (storage -> transfer -> display -> litter)
+  , VegPools(..)
+  , phenologyAdvancePools
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -533,3 +536,173 @@ phenologyDriver !st !pfc !pp !ivt !dayl !t_ref2m !soilpsi !snow5d !lat
         }
 
   in (pp', fluxes)
+
+-- =========================================================================
+-- Pool-conserving driver: storage -> transfer -> display -> litter
+-- =========================================================================
+
+-- | Leaf and fine-root carbon and nitrogen pools for one patch, carried across
+-- the three phenological compartments. Mirrors the cnveg carbon/nitrogen
+-- storage/transfer/display triplet for leaf and froot (CNVegCarbonStateType /
+-- CNVegNitrogenStateType). Litter is the cumulative leaf/froot-to-litter sink
+-- produced by background turnover plus phenological offset.
+data VegPools = VegPools
+  { vp_leafc           :: !Double  -- ^ displayed leaf C
+  , vp_leafc_storage   :: !Double
+  , vp_leafc_xfer      :: !Double
+  , vp_frootc          :: !Double  -- ^ displayed fine-root C
+  , vp_frootc_storage  :: !Double
+  , vp_frootc_xfer     :: !Double
+  , vp_leafn           :: !Double
+  , vp_leafn_storage   :: !Double
+  , vp_leafn_xfer      :: !Double
+  , vp_frootn          :: !Double
+  , vp_frootn_storage  :: !Double
+  , vp_frootn_xfer     :: !Double
+  , vp_leafc_to_litter :: !Double  -- ^ accumulated leaf C litterfall this step
+  , vp_frootc_to_litter :: !Double
+  , vp_leafn_to_litter :: !Double
+  , vp_frootn_to_litter :: !Double
+  } deriving (Show, Eq)
+
+-- | Advance the leaf/froot C and N pools of one patch through one phenology
+-- timestep, conserving total mass.
+--
+-- The Fortran chain (CNPhenologyMod.F90 + CNCStateUpdate1 / CNNStateUpdate1):
+--
+--   * dormant patch crosses its onset trigger  ->  a @fstor2tran@ fraction of
+--     each storage pool is moved into the matching transfer (xfer) pool;
+--   * during the onset window the transfer pool feeds the displayed leaf/froot
+--     pool at rate @2 / onset_counter@;
+--   * during the offset window the displayed leaf/froot pool is shed to litter
+--     at rate @2 / offset_counter@;
+--   * outside onset/offset, evergreen and (post-onset) deciduous patches lose a
+--     small @bglfr@ background litterfall fraction of the displayed pool.
+--
+-- Every transfer removes exactly what it deposits (clamped so no pool goes
+-- negative), so leaf+froot C summed over display+storage+xfer+litter is
+-- invariant, and likewise for N.
+phenologyAdvancePools :: PhenologyState
+                      -> PftConPhenology
+                      -> PatchPhenology
+                      -> Int          -- ^ ivt (PFT index)
+                      -> Double       -- ^ dayl (daylength, s)
+                      -> Double       -- ^ prev_dayl (previous-step daylength, s)
+                      -> Double       -- ^ t_ref2m (K)
+                      -> Double       -- ^ soilpsi (MPa)
+                      -> Double       -- ^ snow5d
+                      -> Double       -- ^ lat (degrees)
+                      -> VegPools
+                      -> (PatchPhenology, VegPools)
+phenologyAdvancePools !st !pfc !ppIn !ivt !dayl !prevDayl !t_ref2m !soilpsi
+                      !snow5d !lat !pools0 =
+  let !phenType = classifyPhenology pfc ivt
+      !snow_thresh = 0.2
+      !dt = ps_dt st
+
+      !leaf_long = if ivt >= 0 && ivt < VU.length (pfp_leaf_long pfc)
+                   then pfp_leaf_long pfc VU.! ivt
+                   else 1.0
+
+      -- Detect a dormant->onset transition this step so we can fire the
+      -- one-time storage->transfer shift (Fortran sets *_storage_to_xfer only
+      -- on the step onset_flag flips to 1).
+      !wasDormant = pph_dormant_flag ppIn
+
+      -- 1. Advance the phenological state machine for this PFT.
+      (!pp1) = case phenType of
+        Evergreen ->
+          ppIn { pph_dormant_flag = False }
+        SeasonalDeciduous ->
+          let !critDayl = seasonalCriticalDaylength defaultPhenologyParams lat
+              !ppA = seasonalDecidOnset st (ppIn { pph_dayl_prev = prevDayl })
+                       dayl t_ref2m snow5d snow_thresh
+              !ppB = seasonalDecidOffset st ppA dayl critDayl
+          in ppB
+        StressDeciduous ->
+          let !daysAct = pph_days_active ppIn
+              !ppA = stressDecidOnset st ppIn t_ref2m soilpsi snow5d snow_thresh
+              !ppB = stressDecidOffset st ppA t_ref2m soilpsi daysAct
+          in ppB
+
+      !justEnteredOnset = pph_onset_flag pp1 && wasDormant
+
+      -- 2. storage -> transfer (one-time at onset trigger).
+      !fstor = ps_fstor2tran st
+      (!pAfterStor) =
+        if justEnteredOnset
+          then let move s = fstor * s
+                   !dLeafCs  = move (vp_leafc_storage pools0)
+                   !dFrootCs = move (vp_frootc_storage pools0)
+                   !dLeafNs  = move (vp_leafn_storage pools0)
+                   !dFrootNs = move (vp_frootn_storage pools0)
+               in pools0
+                    { vp_leafc_storage  = vp_leafc_storage pools0  - dLeafCs
+                    , vp_leafc_xfer     = vp_leafc_xfer pools0     + dLeafCs
+                    , vp_frootc_storage = vp_frootc_storage pools0 - dFrootCs
+                    , vp_frootc_xfer    = vp_frootc_xfer pools0    + dFrootCs
+                    , vp_leafn_storage  = vp_leafn_storage pools0  - dLeafNs
+                    , vp_leafn_xfer     = vp_leafn_xfer pools0     + dLeafNs
+                    , vp_frootn_storage = vp_frootn_storage pools0 - dFrootNs
+                    , vp_frootn_xfer    = vp_frootn_xfer pools0    + dFrootNs
+                    }
+          else pools0
+
+      -- 3. transfer -> display (during onset window).
+      !onsetActive = pph_onset_flag pp1 && pph_onset_counter pp1 > 0.0
+      !onsetCounter = pph_onset_counter pp1
+      xferToDisp xfer = if onsetActive
+                        then min xfer (onsetTransferFlux xfer onsetCounter dt)
+                        else 0.0
+      !dLeafCx  = xferToDisp (vp_leafc_xfer pAfterStor)
+      !dFrootCx = xferToDisp (vp_frootc_xfer pAfterStor)
+      !dLeafNx  = xferToDisp (vp_leafn_xfer pAfterStor)
+      !dFrootNx = xferToDisp (vp_frootn_xfer pAfterStor)
+      !pAfterXfer = pAfterStor
+        { vp_leafc_xfer  = vp_leafc_xfer pAfterStor  - dLeafCx
+        , vp_leafc       = vp_leafc pAfterStor       + dLeafCx
+        , vp_frootc_xfer = vp_frootc_xfer pAfterStor - dFrootCx
+        , vp_frootc      = vp_frootc pAfterStor      + dFrootCx
+        , vp_leafn_xfer  = vp_leafn_xfer pAfterStor  - dLeafNx
+        , vp_leafn       = vp_leafn pAfterStor       + dLeafNx
+        , vp_frootn_xfer = vp_frootn_xfer pAfterStor - dFrootNx
+        , vp_frootn      = vp_frootn pAfterStor      + dFrootNx
+        }
+
+      -- 4. display -> litter.
+      !offsetActive = pph_offset_flag pp1 && pph_offset_counter pp1 > 0.0
+      !offsetCounter = pph_offset_counter pp1
+      -- Offset litterfall (gradual shed of the displayed pool).
+      offsetLit pool = if offsetActive
+                       then min pool (offsetLitterfallFlux pool offsetCounter dt)
+                       else 0.0
+      -- Background turnover applies when NOT shedding at offset: evergreen
+      -- always, deciduous only while displaying leaves (active, post-onset).
+      !backgroundOn = not offsetActive &&
+                      (phenType == Evergreen || not (pph_dormant_flag pp1))
+      bgLit pool = if backgroundOn
+                   then let (l, _) = backgroundLitterfall leaf_long pool 0.0 dt
+                        in min pool l
+                   else 0.0
+      litLeafC  = offsetLit (vp_leafc pAfterXfer)  + bgLit (vp_leafc pAfterXfer)
+      litFrootC = offsetLit (vp_frootc pAfterXfer) + bgLit (vp_frootc pAfterXfer)
+      -- N litterfall mirrors the C litterfall fraction so leaf/froot C:N of the
+      -- litter flux matches the displayed pool (no retranslocation modelled
+      -- here; all displayed N follows C to litter, conserving N).
+      fracLeaf  = if vp_leafc pAfterXfer  > 0.0 then litLeafC  / vp_leafc pAfterXfer  else 0.0
+      fracFroot = if vp_frootc pAfterXfer > 0.0 then litFrootC / vp_frootc pAfterXfer else 0.0
+      litLeafN  = min (vp_leafn pAfterXfer)  (fracLeaf  * vp_leafn pAfterXfer)
+      litFrootN = min (vp_frootn pAfterXfer) (fracFroot * vp_frootn pAfterXfer)
+
+      !poolsOut = pAfterXfer
+        { vp_leafc  = vp_leafc pAfterXfer  - litLeafC
+        , vp_frootc = vp_frootc pAfterXfer - litFrootC
+        , vp_leafn  = vp_leafn pAfterXfer  - litLeafN
+        , vp_frootn = vp_frootn pAfterXfer - litFrootN
+        , vp_leafc_to_litter  = litLeafC
+        , vp_frootc_to_litter = litFrootC
+        , vp_leafn_to_litter  = litLeafN
+        , vp_frootn_to_litter = litFrootN
+        }
+
+  in (pp1, poolsOut)
