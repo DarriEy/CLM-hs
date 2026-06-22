@@ -72,11 +72,16 @@ Also WIRED (Phase 2): N inputs — atmospheric deposition + free-living + NPP-dr
 symbiotic fixation (via NDynamicsMod), so the N budget is no longer sinks-only (plant
 uptake sink was already present via NutrientCompetition). Symbiotic fixation uses an
 annualized-current-NPP proxy pending a true annual NPP accumulator.
-Still dead code (0 driver references): fire (CNFireLi2014/2016/2021), dynamic vegetation
-(CNDV), carbon isotopes (C13/C14), wood products / harvest, annual updates, methane,
-dust & VOC emissions. Still missing: crop allocation path. (Per-layer plant N uptake —
-SoilBiogeochemNitrogenUptakeMod — is now WIRED, Phase 2. The implicit matrix C/N solver
-CNSoilMatrixMod is deferred by decision: the explicit cascade is stable at this scope.)
+WIRED in Phase 3 (now run free-running on the soil column): fire (CNFireLi2014/CNFireBase),
+methane (ch4Mod — net surface flux on the lnd2atm diagnostic), carbon isotopes C13/C14
+(CNCIsoFluxMod/CNC14DecayMod — ratio-diagnostic conservative with bulk pools, since CLMState
+has no prognostic isotope field).
+Still dead code (0 driver references): dynamic vegetation (CNDV), wood products / harvest,
+annual updates, dust & VOC emissions. DEFERRED — crop allocation/phenology: the run has no
+crop landunit (lun_itype [1,5]) or crop PFT (pch_itype [0,1,12,0]; crops are index 15+), so
+wiring it would be dead code; deferred to Phase 4 (multi-landunit / crop PFT). (Per-layer
+plant N uptake — SoilBiogeochemNitrogenUptakeMod — WIRED in Phase 2; the implicit matrix C/N
+solver CNSoilMatrixMod is deferred by decision: explicit cascade is stable at this scope.)
 
 ### soilbiogeochem missing
 `CNSoilMatrixMod` (implicit matrix C/N solver), `SoilBiogeochemNitrogenUptake` (plant N

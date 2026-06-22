@@ -65,16 +65,29 @@ seasonal canopy.
    30-day single-column run; the matrix solve is a long-spinup accuracy optimization not
    needed at this scope. Deferred. Suite 118/0/2.
 
-## Phase 3 — Vegetation realism (still single column)
+## Phase 3 — Vegetation realism (still single column) — PARTIALLY DONE (2026-06)
 
-8. **Crop path** — crop allocation fractions + crop phenology (crops currently run as
-   grass). *Effort: M–L. Risk: M. Validate: no reference here → stability + plausibility.*
-9. **Carbon isotopes (C13/C14)** — wire `CIsoFlux`/`CarbonIsotopes` if isotope output is
-   wanted. *Effort: M. Risk: L. Validate: isotope mass tracks bulk C.*
-10. **Fire** — wire `CNFireLi2014` (the modules exist, never called). *Effort: M. Risk:
-    M. Validate: fire C/N emissions conserve; no reference → plausibility/stability.*
-11. **Methane, dust, VOC** — wire if those fluxes are needed (currently dead code).
-    *Effort: M each. Risk: L. Validate: plausibility.*
+Status: fire + methane + carbon isotopes WIRED via 3 parallel worktree agents +
+hand-integration (commits 0a2b625, ca217d4, 8e3d0d2 + merges); suite 118/0/2.
+Crop DEFERRED (not runnable on this column). All runtime-gated on clmCNActive;
+matched-state harness untouched. Validated for build/stability/conservation, not
+bitwise correctness.
+
+8. **Crop path** — DEFERRED. The run has no crop landunit (lun_itype [1,5]) or crop PFT
+   (pch_itype [0,1,12,0]; crops are index 15+), so crop allocation/phenology would be dead
+   code. Moved to Phase 4 (multi-landunit / crop PFT) — wiring it now would only add
+   unexercised code, the opposite of this effort's goal.
+9. **Carbon isotopes (C13/C14)** — DONE (8e3d0d2). Wired CNCIsoFluxMod/CNC14DecayMod into
+   cnBalanceCheckStep: GPP discrimination, respiration at source ratio, C14 decay. Honest
+   limitation: ratio-diagnostic (conservative with bulk pools) rather than prognostic isotope
+   pools, since CLMState has no isotope field.
+10. **Fire** — DONE (0a2b625). Wired CNFireLi2014/CNFireBase into cnPreDrainageStep: a
+    background burned-area fraction combusts veg+litter to atmosphere (folded into NEE) and
+    litter/CWD, conserving C and N.
+11. **Methane** — DONE (ca217d4). Wired ch4Mod into cnPostDrainageStep: CH4 production
+    (anaerobic fraction of HR), oxidation, ebullition/aerenchyma transport; net surface flux
+    on the lnd2atm diagnostic, carbon-conserving (re-routes already-respired HR carbon).
+    **Dust, VOC** — still dead code; wire if those fluxes are needed. *Effort: M each.*
 
 ## Phase 4 — Remove the single-column ceiling (architectural)
 
