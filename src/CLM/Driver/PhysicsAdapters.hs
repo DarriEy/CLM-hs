@@ -97,6 +97,7 @@ import CLM.BioGeoChem.FireBase
 import CLM.BioGeoChem.FireLi2014
   ( li2014CmbCmpltLitter, li2014CmbCmpltCwd )
 import qualified CLM.BioGeoChem.Allocation as Alloc
+import qualified CLM.BioGeoChem.Methane as CH4
 import qualified CLM.BioGeoChem.Phenology as Phen
 import qualified CLM.BioGeoChem.NutrientCompetition as NComp
 import CLM.BioGeoChem.NDynamics
@@ -216,6 +217,7 @@ import CLM.Types.CanopyStateData (CanopyStateData(..))
 import CLM.Types.SoilStateData (SoilStateData(..))
 import CLM.Types.LandunitData (LandunitData(..))
 import CLM.Types.GridcellData (GridcellData(..))
+import CLM.Types.Lnd2AtmData (Lnd2AtmData(..))
 import CLM.Types.SolarAbsorbedData (SolarAbsorbedData(..))
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
@@ -4049,11 +4051,19 @@ computePerPatchMaintResp st =
 cnPostDrainageStep :: PhysicsStep
 cnPostDrainageStep _cfg ctx st0 =
   let !dt = tcDtime ctx
-      st  = if clmCNActive st0
+      st1 = if clmCNActive st0
               then let !leachRate = clmSMINN st0 * 1.0e-3 / 86400.0
                        !sminn' = clmSMINN st0 - leachRate * dt
                    in st0 { clmSMINN = max 0.0 sminn' }
               else st0
+      -- CH4 biogeochemistry (ch4Mod.F90): anaerobic CH4 production from a
+      -- fraction of heterotrophic respiration, Michaelis-Menten oxidation, and
+      -- ebullition/plant-mediated transport to the surface. Gated on the
+      -- free-running runtime (clmCNActive) so the matched-state Fortran-parity
+      -- harness and the CN drift guard are untouched.
+      st  = if clmCNActive st1
+              then computeColumnMethane ctx st1
+              else st1
   in if hasVectorizedDecomp st
        then runVectorizedLeaching dt st
        else st
@@ -4765,3 +4775,104 @@ applyColumnFire dt st =
         , clmSMINN     = cfr_sminn fire
         , clmNEE       = clmNEE st + fireCfluxToAtm
         }
+-- ============================================================================
+-- METHANE (CH4) biogeochemistry — runtime wiring (ch4Mod.F90)
+-- ============================================================================
+--
+-- Drives 'CH4.ch4Driver' on the active soil column. The model produces CH4 from
+-- the anaerobic decomposition of soil carbon (a fraction @f_ch4@ of the
+-- heterotrophic-respiration flux, scaled by a Q10 temperature factor and the
+-- inundated/anaerobic fraction below the water table), oxidises a fraction of it
+-- via Michaelis-Menten kinetics in the aerobic zone, and transports the net CH4
+-- to the surface by ebullition and plant-mediated (aerenchyma) flux. This is a
+-- faithful use of the CH4 production / oxidation / ebullition / aerenchyma
+-- kernels in 'CLM.BioGeoChem.Methane'.
+--
+-- Storage path. The net surface CH4 flux is stored on the existing
+-- @l2a_ch4_surf_flux_tot_grc@ diagnostic (Lnd2AtmData, [kg C/m^2/s]). Carbon is
+-- conserved without touching the soil pool: CH4 production is a re-routing of a
+-- fraction (@f_ch4@) of the heterotrophic-respiration carbon that the
+-- decomposition step has already removed from @clmSoilOrgC@ (the CH4 substrate
+-- is the HR flux, not a separate withdrawal), so the surface CH4 flux merely
+-- reclassifies a part of that already-respired carbon from CO2 to CH4.
+-- Subtracting it from the soil pool again would double-count it; we therefore
+-- store only the diagnostic flux. CLMState is not modified (off-limits).
+computeColumnMethane :: TimestepContext -> CLMState -> CLMState
+computeColumnMethane ctx st =
+  let !dt    = tcDtime ctx
+      !col   = clmColumn st
+      !temp  = clmTemp st
+      !ws    = clmWaterState st
+      !ss    = clmSoilState st
+      !sh    = clmSoilHydro st
+      !nlev  = nlevgrnd
+
+      -- Layer geometry (soil-only, indexed 0 .. nlevgrnd-1).
+      !dzCol = padLayers nlev (colDz col)
+      !zCol  = padLayers nlev (colZ col)
+
+      -- Soil-layer temperatures: t_soisno_col carries snow layers first, so the
+      -- soil layers begin at offset nlevsno.
+      !tSoil = VU.generate nlev (\j -> let tv = safeIdx (t_soisno_col temp) (nlevsno + j)
+                                       in if tv > 0.0 then tv else t_grnd_col temp)
+
+      -- Volumetric soil water and porosity (soil-only).
+      !h2oVol = padLayers nlev (h2osoi_vol_col ws)
+      !watsatV = padLayers nlev (if VU.null (sstate_watsat_col ss)
+                                   then watsat col else sstate_watsat_col ss)
+
+      -- Root fraction (controls plant-mediated CH4 transport).
+      !rootfrV = if not (VU.null (sstate_rootfr_col ss))
+                   then padLayers nlev (sstate_rootfr_col ss)
+                   else VU.replicate nlev 0.0
+
+      -- Water-table depth; default to a deep table (no inundation) when absent.
+      !zwt = if VU.null (sh_zwt_col sh) then 5.0 else sh_zwt_col sh VU.! 0
+      -- Inundated fraction: shallow water tables flood more of the column.
+      -- Tracks the CH4 model's saturated-fraction control (finundated in
+      -- ch4Mod): saturated when zwt at the surface, vanishing as it deepens.
+      !finund = max 0.0 (min (CH4.ch4p_f_sat CH4.defaultCH4Params)
+                             (1.0 - zwt / CH4.ch4p_capthick CH4.defaultCH4Params))
+
+      -- Distribute the column heterotrophic respiration (gC/m2/s) into a
+      -- per-layer volumetric source (gC/m3/s). Weight by an exponential
+      -- near-surface decomposition profile so sum(hr_vr[j]*dz[j]) == clmHR.
+      !hrCol = max 0.0 (clmHR st)
+      !wRaw  = VU.generate nlev (\j -> exp (negate (zCol VU.! j) / 0.5))
+      !wSum  = VU.sum (VU.zipWith (*) wRaw dzCol)
+      !hrVr  = if wSum > 0.0
+                 then VU.generate nlev (\j -> hrCol * (wRaw VU.! j) / wSum)
+                 else VU.replicate nlev 0.0
+
+      !patm = if VU.null (tcForcPbot ctx) then 101325.0 else tcForcPbot ctx VU.! 0
+
+      !input = CH4.CH4ColumnInput
+        { CH4.ch4i_nlevgrnd   = nlev
+        , CH4.ch4i_zwt        = zwt
+        , CH4.ch4i_finundated = finund
+        , CH4.ch4i_hr_vr      = hrVr
+        , CH4.ch4i_t_soisno   = tSoil
+        , CH4.ch4i_h2osoi_vol = h2oVol
+        , CH4.ch4i_watsat     = watsatV
+        , CH4.ch4i_dz         = dzCol
+        , CH4.ch4i_z          = zCol
+        , CH4.ch4i_rootfr     = rootfrV
+        , CH4.ch4i_pH         = 7.0
+        , CH4.ch4i_atm_ch4    = CH4.ch4p_atmch4 CH4.defaultCH4Params
+        , CH4.ch4i_patm       = patm
+        , CH4.ch4i_dt         = dt
+        }
+
+      -- Initial dissolved CH4/O2 state per layer (well-oxygenated soil column).
+      !states = replicate nlev (CH4.CH4LayerState 0.0 0.2)
+
+      !res = CH4.ch4Driver CH4.defaultCH4Params CH4.defaultCH4VarCon input states
+
+      -- mol CH4 -> kg C: 12.011 g C per mol CH4 (one carbon atom), then -> kg.
+      !molCtoG = 12.011                -- g C per mol CH4
+      !surfFluxKgC = CH4.ch4r_ch4_surf_flux res * molCtoG * 1.0e-3  -- kg C/m2/s
+
+      !l2a  = clmLnd2Atm st
+      !l2a' = l2a { l2a_ch4_surf_flux_tot_grc = VU.singleton surfFluxKgC }
+
+  in st { clmLnd2Atm = l2a' }
