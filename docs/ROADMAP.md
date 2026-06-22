@@ -128,8 +128,17 @@ or needs writing (glacier).
     trajectory to Fortran history) — needs a matched forcing/surfdata config +
     reference, the same data gap that blocks #12–14; and CN-pool / NetCDF-write
     (history #16) are still separate.
-16. **NetCDF history** — multi-tape, subgrid-aggregated output. *Effort: L. Risk: L.
-    Validate: against Fortran history for the matched cases.*
+16. **NetCDF history** — DONE (2026-06, single-column scope). Added a NetCDF
+    *writer* to `CLM.Infrastructure.NetCDF` (`ncWriteTimeseries`: nc_create /
+    def_dim / def_var / put_att_text / enddef / put_var_double FFI) and
+    `writeDailyNetCDF` in `PipelineRunner` — emits a history tape with a `time`
+    dimension and one CF-attributed variable per daily field (T_GRND, FSA,
+    EFLX_LH/SH, H2OSNO, SNOW_DEPTH, FRAC_SNO, GPP/NPP/NEE/HR/LEAFC/SOILORGC).
+    **Validated by round-trip**: write the tape, read it back with the existing
+    NetCDF reader, series match to < 1e-12 (test "NetCDF history round-trips").
+    Output is now machine-comparable to CTSM. NOT done (out of single-column
+    scope): multi-tape, subgrid aggregation, unlimited/append time, time-coordinate
+    metadata, comparison against a real Fortran h0 tape (data-gap blocked).
 17. **External data streams** — N-deposition, LAI, crop calendar, urban-tv readers +
     time interpolation. *Effort: M. Risk: L.*
 18. **atm→lnd downscaling + lnd→atm coupling** — topographic forcing downscaling and

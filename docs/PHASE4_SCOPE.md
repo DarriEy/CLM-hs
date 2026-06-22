@@ -38,7 +38,7 @@ to validate the aggregated output against. Both are absent.
 | 13 | Lake + urban actually run | M (lake) / M–L (urban) | No (need lake/urban weight + reference) |
 | 14 | Glacier surface mass balance (write `GlacierSurfaceMassBalanceMod`, not ported) | L | No |
 | 15 | **Restart I/O** — **DONE**: write→read→resume **bit-identical** (validated); Fortran-NetCDF read pending | L | **Yes** ✅ |
-| 16 | **NetCDF history** (multi-tape, subgrid-aggregated) | L | **Yes** (vs Fortran history) |
+| 16 | **NetCDF history** — **DONE** (single-tape): NetCDF writer + `writeDailyNetCDF`, round-trip validated; multi-tape/subgrid + Fortran-h0 compare pending | L | **Yes** ✅ |
 | 17 | External streams (N-dep, LAI, crop calendar, urban-tv) | M | partial |
 | 18 | atm→lnd downscaling + lnd→atm coupling | M | partial |
 

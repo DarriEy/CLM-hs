@@ -19,6 +19,8 @@ module CLM.Infrastructure.NetCDF
   , ncReadDoubleScalar
   , ncDimLen
   , ncHasVar
+    -- * Writing
+  , ncWriteTimeseries
   ) where
 
 import Foreign
@@ -26,6 +28,7 @@ import Foreign.C.Types
 import Foreign.C.String
 import qualified Data.Vector.Unboxed as VU
 import Control.Exception (bracket)
+import Control.Monad (foldM)
 
 -- =========================================================================
 -- FFI bindings to libnetcdf
@@ -55,9 +58,34 @@ foreign import ccall "nc_inq_varndims"
 foreign import ccall "nc_inq_vardimid"
   c_nc_inq_vardimid :: CInt -> CInt -> Ptr CInt -> IO CInt
 
+foreign import ccall "nc_create"
+  c_nc_create :: CString -> CInt -> Ptr CInt -> IO CInt
+
+foreign import ccall "nc_def_dim"
+  c_nc_def_dim :: CInt -> CString -> CSize -> Ptr CInt -> IO CInt
+
+foreign import ccall "nc_def_var"
+  c_nc_def_var :: CInt -> CString -> CInt -> CInt -> Ptr CInt -> Ptr CInt -> IO CInt
+
+foreign import ccall "nc_put_att_text"
+  c_nc_put_att_text :: CInt -> CInt -> CString -> CSize -> CString -> IO CInt
+
+foreign import ccall "nc_enddef"
+  c_nc_enddef :: CInt -> IO CInt
+
+foreign import ccall "nc_put_var_double"
+  c_nc_put_var_double :: CInt -> CInt -> Ptr CDouble -> IO CInt
+
 -- NC_NOWRITE = 0
 ncNoWrite :: CInt
 ncNoWrite = 0
+
+-- NC_CLOBBER = 0 (overwrite), NC_DOUBLE = 6, NC_GLOBAL = -1
+ncClobber :: CInt
+ncClobber = 0
+
+ncDouble :: CInt
+ncDouble = 6
 
 -- =========================================================================
 -- Haskell API
@@ -169,3 +197,74 @@ ncReadDoubleScalar nc varname = do
     Right vec
       | VU.null vec -> return (Left $ "empty variable: " ++ varname)
       | otherwise -> return (Right (vec VU.! 0))
+
+-- =========================================================================
+-- Writing
+-- =========================================================================
+
+-- | Write a NetCDF file holding a set of time-series variables, each
+-- dimensioned @(time)@ with length @n@ and a @long_name@ attribute. Overwrites
+-- any existing file. Each variable's data vector must have length @n@.
+--
+-- This is a minimal CF-ish history writer for the single-column port: one
+-- "time" dimension, scalar-per-step variables. Returns 'Left' on any NetCDF
+-- error (file creation, definition, or write).
+ncWriteTimeseries
+  :: FilePath
+  -> Int                                   -- ^ time length (n)
+  -> [(String, String, VU.Vector Double)]  -- ^ (var name, long_name, data[n])
+  -> IO (Either String ())
+ncWriteTimeseries path n vars =
+  withCString path $ \cpath ->
+  alloca $ \ncidP -> do
+    st0 <- c_nc_create cpath ncClobber ncidP
+    if st0 /= 0 then return (Left ("nc_create failed: " ++ show st0)) else do
+      ncid <- peek ncidP
+      -- define the time dimension
+      eDim <- withCString "time" $ \cdim -> alloca $ \didP -> do
+        s <- c_nc_def_dim ncid cdim (fromIntegral n) didP
+        if s /= 0 then return (Left ("nc_def_dim failed: " ++ show s))
+                  else Right <$> peek didP
+      case eDim of
+        Left e -> c_nc_close ncid >> return (Left e)
+        Right timeDim -> do
+          -- define each variable + its long_name attribute
+          eVars <- foldM (defOne ncid timeDim) (Right []) vars
+          case eVars of
+            Left e -> c_nc_close ncid >> return (Left e)
+            Right varidsRev -> do
+              sEnd <- c_nc_enddef ncid
+              if sEnd /= 0 then c_nc_close ncid >> return (Left ("nc_enddef failed: " ++ show sEnd))
+              else do
+                -- varidsRev is in reverse definition order; pair with data in
+                -- original variable order.
+                let pairs = zip (reverse varidsRev) (map (\(_, _, d) -> d) vars)
+                ePut <- foldM (putOne ncid) (Right ()) pairs
+                _ <- c_nc_close ncid
+                return ePut
+  where
+    defOne _ _ (Left e) _ = return (Left e)
+    defOne ncid timeDim (Right acc) (name, longName, dat)
+      | VU.length dat /= n =
+          return (Left ("variable " ++ name ++ " has length "
+                        ++ show (VU.length dat) ++ ", expected " ++ show n))
+      | otherwise =
+          withCString name $ \cname ->
+          alloca $ \dimsP -> alloca $ \vidP -> do
+            poke dimsP timeDim
+            s <- c_nc_def_var ncid cname ncDouble 1 dimsP vidP
+            if s /= 0 then return (Left ("nc_def_var failed for " ++ name ++ ": " ++ show s))
+            else do
+              vid <- peek vidP
+              sa <- withCString "long_name" $ \catt ->
+                    withCStringLen longName $ \(cval, vlen) ->
+                      c_nc_put_att_text ncid vid catt (fromIntegral vlen) cval
+              if sa /= 0 then return (Left ("nc_put_att_text failed for " ++ name ++ ": " ++ show sa))
+                         else return (Right (vid : acc))
+
+    putOne _ (Left e) _ = return (Left e)
+    putOne ncid (Right ()) (vid, dat) =
+      withArray (map realToFrac (VU.toList dat)) $ \buf -> do
+        s <- c_nc_put_var_double ncid vid buf
+        if s /= 0 then return (Left ("nc_put_var_double failed: " ++ show s))
+                  else return (Right ())

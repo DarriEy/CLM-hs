@@ -4,7 +4,7 @@ import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector as V
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
 import System.FilePath ((</>), takeExtension)
 
 import CLM.Constants.PhysicalConstants
@@ -18,7 +18,8 @@ import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep )
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
-  , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart )
+  , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
+  , writeDailyNetCDF )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
 import CLM.Types.WaterStateData (WaterStateData(..), defaultWaterStateData)
 import CLM.Types.WaterFluxData (WaterFluxData(..), defaultWaterFluxData)
@@ -1349,6 +1350,38 @@ main = hspec $ do
             -- snow-layer count and SWE in valid ranges
             clmSnl st `shouldSatisfy` (\s -> s <= 0 && s >= negate nlevsno)
             h2osno_col (clmWaterState st) `shouldSatisfy` (>= 0)
+
+    it "NetCDF history round-trips (write tape -> read back == diagnostics, #16)" $ do
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      if not hasData
+        then pendingWith "test/data not available"
+        else do
+          dailies <- runPipeline defaultPipelineConfig
+            { pcDataDir = "test/data", pcNdays = 5, pcVerbose = False }
+          let ncpath = "test/data/history-roundtrip.nc"
+          wres <- writeDailyNetCDF ncpath dailies
+          case wres of
+            Left e  -> expectationFailure ("writeDailyNetCDF failed: " ++ e)
+            Right () -> do
+              ores <- ncOpen ncpath
+              case ores of
+                Left e -> expectationFailure ("ncOpen failed: " ++ e)
+                Right nc -> do
+                  let checkVar name f = do
+                        r <- ncReadDouble1D nc name
+                        case r of
+                          Left e -> expectationFailure (name ++ " read failed: " ++ e)
+                          Right v -> do
+                            VU.length v `shouldBe` length dailies
+                            let expected = map f dailies
+                                diffs = zipWith (\a b -> abs (a - b)) (VU.toList v) expected
+                            maximum diffs `shouldSatisfy` (< 1.0e-12)
+                  checkVar "T_GRND"     dd_t_grnd
+                  checkVar "H2OSNO"     dd_h2osno
+                  checkVar "SNOW_DEPTH" dd_snow_depth
+                  checkVar "FSA"        dd_fsa
+                  ncClose nc
+          removeFile ncpath
 
     it "Day 1 T_GRND matches Julia reference within 0.10K" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"

@@ -20,6 +20,8 @@ module CLM.Driver.PipelineRunner
   , zeroDailyDiag
     -- * CSV output
   , writeDailyCSV
+    -- * NetCDF history output
+  , writeDailyNetCDF
     -- * CLM forward model for calibration (extracts QRUNOFF)
   , runCLMForQrunoff
     -- * Re-exports for pipeline users
@@ -64,7 +66,7 @@ import CLM.Infrastructure.BinaryIO
 import CLM.Infrastructure.ReadParams
   ( readParametersBinary, AllParams(..), PFTConstants(..) )
 import CLM.Infrastructure.NetCDF
-  ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D )
+  ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D, ncWriteTimeseries )
 import CLM.Infrastructure.ForcingReader
   ( ForcingReaderState(..), forcingReaderInitBinary, readForcingStepPure
   , ForcingTimestep(..)
@@ -1200,6 +1202,37 @@ runPipeline cfg = do
               go base st'' drvSt' fr (step + 1) zeroDailyDiag (avg : results) total spd drvCfg dtime pl
             else
               go base st' drvSt' fr (step + 1) dayAcc' results total spd drvCfg dtime pl
+
+-- ============================================================================
+-- NetCDF history output (Phase 4 #16)
+-- ============================================================================
+
+-- | Write the daily diagnostics to a NetCDF history tape: one "time" dimension,
+-- one double variable per field, each with a @long_name@ attribute. This is the
+-- single-column analogue of a CLM history tape — machine-comparable to CTSM
+-- output instead of CSV. Returns 'Left' on any NetCDF write error.
+--
+-- Round-trips with the NetCDF reader (write then 'ncReadDouble1D' returns the
+-- same series), which is how it is validated.
+writeDailyNetCDF :: FilePath -> [DailyDiag] -> IO (Either String ())
+writeDailyNetCDF path dailies =
+  ncWriteTimeseries path (length dailies)
+    [ ("T_GRND",      "ground temperature [K]",                 col dd_t_grnd)
+    , ("FSA",         "absorbed solar radiation [W/m2]",        col dd_fsa)
+    , ("EFLX_LH_TOT", "total latent heat flux [W/m2]",          col dd_eflx_lh)
+    , ("EFLX_SH_TOT", "total sensible heat flux [W/m2]",        col dd_eflx_sh)
+    , ("H2OSNO",      "snow water equivalent [kg/m2]",          col dd_h2osno)
+    , ("SNOW_DEPTH",  "snow depth [m]",                         col dd_snow_depth)
+    , ("FRAC_SNO",    "fraction of ground covered by snow",     col dd_frac_sno)
+    , ("GPP",         "gross primary production [gC/m2/s]",     col dd_gpp)
+    , ("NPP",         "net primary production [gC/m2/s]",       col dd_npp)
+    , ("NEE",         "net ecosystem exchange [gC/m2/s]",       col dd_nee)
+    , ("HR",          "heterotrophic respiration [gC/m2/s]",    col dd_hr)
+    , ("LEAFC",       "leaf carbon [gC/m2]",                    col dd_leafc)
+    , ("SOILORGC",    "soil organic carbon [gC/m2]",            col dd_soilorgc)
+    ]
+  where
+    col f = VU.fromList (map f dailies)
 
 -- ============================================================================
 -- CSV output (matching Julia daily_avg format)
