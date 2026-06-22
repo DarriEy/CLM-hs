@@ -16,7 +16,8 @@ import CLM.Driver.CLMDriver
   , defaultTimestepContext, clmDrvPatch2Col )
 import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
-  , lakeFluxesStep, lakeTemperatureStep )
+  , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep )
+import CLM.Types.LandunitData (LandunitData(..))
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
@@ -1336,6 +1337,25 @@ main = hspec $ do
       gsmbo_qflx_glcice_melt o `shouldBe` 0.0
       gsmbo_qflx_qrgwl o `shouldBe` 0.5
       gsmbo_h2osoi_liq o VU.! 12 `shouldBe` 5.0
+
+    it "glacierSMBStep caps snow and converts meltwater to ice on glacier columns (#14 wiring)" $ do
+      let ctx = defaultTimestepContext { tcDtime = dt }
+          mkCol ity h2osno liq = defaultCLMState
+            { clmLandunit = (clmLandunit defaultCLMState) { lun_itype = VU.singleton ity }
+            , clmWaterState = (clmWaterState defaultCLMState)
+                { h2osno_col     = h2osno
+                , h2osoi_liq_col = VU.replicate ntot 0.0 VU.// [(nls, liq)]
+                , h2osoi_ice_col = VU.replicate ntot 100.0 }
+            }
+          -- glacier column (istice=4): snow above the 10000 cap + meltwater
+          glcOut = clmWaterState (glacierSMBStep defaultDriverConfig ctx (mkCol istice 12000.0 5.0))
+      abs (h2osno_col glcOut - 10000.0) `shouldSatisfy` (< 1.0e-9)   -- snow capped
+      h2osoi_liq_col glcOut VU.! nls `shouldBe` 0.0                  -- melt -> ice
+      abs (h2osoi_ice_col glcOut VU.! nls - 105.0) `shouldSatisfy` (< 1.0e-9)
+      -- non-glacier (soil, type 1) column is untouched
+      let soilOut = clmWaterState (glacierSMBStep defaultDriverConfig ctx (mkCol 1 12000.0 5.0))
+      h2osno_col soilOut `shouldBe` 12000.0
+      h2osoi_liq_col soilOut VU.! nls `shouldBe` 5.0
 
   describe "Multi-landunit gridcell (column loop)" $ do
     let mixed = "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/clm_ports/CLM.jl/test_inputs/lake/surfdata_mixed.nc"

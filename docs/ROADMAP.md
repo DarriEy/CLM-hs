@@ -150,11 +150,18 @@ or needs writing (glacier).
     unit tests**: meltwater→ice conversion + melt-flux accumulation, ice growth =
     snow-capping flux, net flux = frz−melt, standalone runoff routing (qrgwl+=melt,
     ice_runoff−=melt), glacial-inception threshold, dynamic ice-sheet routing, and
-    do_smb-filter passthrough. STILL PENDING — driver integration (istice column
-    handling): the pipeline has no glacier (istice) column and does not yet store a
-    snow-capping flux (`qflx_snwcp_ice`), so a gated pipeline step would be inert
-    and unvalidatable on current data. Wiring awaits a glacier-column dataset +
-    stored snow-capping flux — the same data prerequisite as #12/#13-urban.
+    do_smb-filter passthrough.
+    **Driver wiring DONE** (`glacierSMBStep` in PhysicsAdapters): a gated
+    PhysicsStep that, on istice columns, caps the snowpack at 10 m SWE, derives the
+    snow-capping flux from the excess, runs `glacierSurfaceMassBalance`, and applies
+    the updated water state (snow cap + meltwater→ice); non-glacier columns pass
+    through unchanged (inert on the soil/lake runs). Validated by a wiring test
+    ("glacierSMBStep caps snow and converts meltwater to ice on glacier columns"):
+    a glacier column's snow is capped and top-soil meltwater converts to ice, a soil
+    column is untouched. The glacier flux diagnostics (qflx_glcice*, adjusted runoff)
+    are computed by the module but not persisted (CLMState has no glacier-flux
+    field). A full multi-step glacier *gridcell* run still needs column-type dispatch
+    in the driver (the soil pipeline isn't glacier-aware) + a glacier reference.
 15. **Restart I/O** — DONE (2026-06). Real full-prognostic-state save/restore
     (`writeRestartState`/`readRestartState` in `PipelineRunner`): native
     per-variable little-endian Float64 binary, overlaid onto a pristine cold-start

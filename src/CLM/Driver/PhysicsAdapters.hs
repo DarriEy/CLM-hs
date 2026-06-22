@@ -39,6 +39,7 @@ module CLM.Driver.PhysicsAdapters
   , waterTableStep
   , phenologyStep
   , urbanFluxesStep
+  , glacierSMBStep
     -- * Heat source term computation (used by soil temperature)
   , HeatSourceTerms(..)
   , computeHeatSourceTerms
@@ -211,6 +212,7 @@ import CLM.BioGeoPhys.LakeTemperature
   , betavisLT )
 import CLM.Infrastructure.InitVertical (lakeCoordinates)
 import CLM.Types.LakeStateData (LakeStateData(..))
+import qualified CLM.BioGeoPhys.GlacierSurfaceMassBalance as GSMB
 import CLM.BioGeoPhys.Photosynthesis
   ( PhotoParams(..), defaultPhotoParams
   , LeafPhotoInput(..), LeafPhotoResult(..), leafPhotosynthesis )
@@ -3588,6 +3590,47 @@ lakeTemperatureStep _cfg ctx st =
               { lake_t_lake_col       = pclo_t_lake pcOut
               , lake_lake_icefrac_col = pclo_lake_icefrac pcOut
               , lake_savedtke1_col    = VU.singleton savedtke1' }
+          }
+
+-- | Glacier surface mass balance driver step (Phase 4 #14 wiring). On glacier
+-- (istice) columns, caps the snowpack at @h2osnoMaxGlc@ (10 m SWE) and routes the
+-- excess to the snow-capping flux, then runs the ported
+-- 'GSMB.glacierSurfaceMassBalance' (meltwater->ice conversion + the SMB / runoff
+-- fluxes) and applies the updated column water state. Non-glacier columns pass
+-- through unchanged, so this is inert on the soil/lake columns of the current
+-- runs. The glacier flux diagnostics (qflx_glcice*, adjusted runoff) are computed
+-- by the module but not persisted — CLMState has no glacier-flux field.
+glacierSMBStep :: PhysicsStep
+glacierSMBStep _cfg ctx st =
+  let lun = clmLandunit st
+      it  = if VU.null (lun_itype lun) then 1 else lun_itype lun VU.! 0
+  in if it /= GSMB.istice
+     then st
+     else
+       let dt  = tcDtime ctx
+           ws  = clmWaterState st
+           wsb = clmWaterStateBulk st
+           h2osnoMaxGlc = 10000.0          -- snow cap [kg/m2] (~10 m SWE)
+           h2osno0   = h2osno_col ws
+           snwcp     = max 0.0 (h2osno0 - h2osnoMaxGlc) / dt
+           h2osnoCap = min h2osno0 h2osnoMaxGlc
+           out = GSMB.glacierSurfaceMassBalance nlevsno nlevgrnd GSMB.GlacierSMBInput
+             { GSMB.gsmbi_landunit_itype         = it
+             , GSMB.gsmbi_do_smb                 = True
+             , GSMB.gsmbi_h2osoi_liq             = h2osoi_liq_col ws
+             , GSMB.gsmbi_h2osoi_ice             = h2osoi_ice_col ws
+             , GSMB.gsmbi_snow_persistence       = safeIdx (wsbulk_snow_persistence_col wsb) 0
+             , GSMB.gsmbi_qflx_snwcp_ice         = snwcp
+             , GSMB.gsmbi_qflx_qrgwl             = 0.0
+             , GSMB.gsmbi_qflx_ice_runoff_snwcp  = snwcp
+             , GSMB.gsmbi_glc_dyn_runoff_routing = 0.0
+             , GSMB.gsmbi_dtime                  = dt
+             }
+       in st
+          { clmWaterState = ws
+              { h2osoi_liq_col = GSMB.gsmbo_h2osoi_liq out
+              , h2osoi_ice_col = GSMB.gsmbo_h2osoi_ice out
+              , h2osno_col     = h2osnoCap }
           }
 
 -- ============================================================================
