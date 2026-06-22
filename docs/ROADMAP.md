@@ -118,8 +118,18 @@ or needs writing (glacier).
     Fortran parity isn't possible (single time-averaged h0 record). URBAN still a
     no-op stub (`urbanFluxesStep` returns input and checks the wrong landunit
     type `it /= 6`) — separate item, not addressed here.
-14. **Glacier** — write `GlacierSurfaceMassBalanceMod` (not ported) + istice column
-    handling. *Effort: L. Risk: M.*
+14. **Glacier** — module DONE (2026-06). Ported `GlacierSurfaceMassBalanceMod` →
+    `CLM.BioGeoPhys.GlacierSurfaceMassBalance` (HandleIceMelt + ComputeSurfaceMass-
+    Balance + AdjustRunoffTerms as one pure single-column function), cross-checked
+    against the Fortran and the CLM.jl port. **Validated by 7 precise deterministic
+    unit tests**: meltwater→ice conversion + melt-flux accumulation, ice growth =
+    snow-capping flux, net flux = frz−melt, standalone runoff routing (qrgwl+=melt,
+    ice_runoff−=melt), glacial-inception threshold, dynamic ice-sheet routing, and
+    do_smb-filter passthrough. STILL PENDING — driver integration (istice column
+    handling): the pipeline has no glacier (istice) column and does not yet store a
+    snow-capping flux (`qflx_snwcp_ice`), so a gated pipeline step would be inert
+    and unvalidatable on current data. Wiring awaits a glacier-column dataset +
+    stored snow-capping flux — the same data prerequisite as #12/#13-urban.
 15. **Restart I/O** — DONE (2026-06). Real full-prognostic-state save/restore
     (`writeRestartState`/`readRestartState` in `PipelineRunner`): native
     per-variable little-endian Float64 binary, overlaid onto a pristine cold-start

@@ -36,7 +36,7 @@ to validate the aggregated output against. Both are absent.
 |---|------|--------|------|
 | 12 | Multi-landunit / multi-column driver loop | **L–XL** | **No** (100%-soil gridcell → identical output) |
 | 13 | Lake + urban actually run — **LAKE DONE**: full lake-temperature solve wired + 3 latent index bugs fixed, validated to evolve a sane profile from a Fortran lake restart (urban still a stub) | M (lake) / M–L (urban) | lake: runs+sane (no tight parity); urban: No |
-| 14 | Glacier surface mass balance (write `GlacierSurfaceMassBalanceMod`, not ported) | L | No |
+| 14 | Glacier surface mass balance — **MODULE DONE**: `GlacierSurfaceMassBalanceMod` ported + 7 unit tests; driver integration (istice column + snow-capping flux) pending data | L | module: unit-validated; in-pipeline: No |
 | 15 | **Restart I/O** — **DONE**: write→read→resume **bit-identical** (validated); Fortran-NetCDF read pending | L | **Yes** ✅ |
 | 16 | **NetCDF history** — **DONE** (single-tape): NetCDF writer + `writeDailyNetCDF`, round-trip validated; multi-tape/subgrid + Fortran-h0 compare pending | L | **Yes** ✅ |
 | 17 | External streams (N-dep, LAI, crop calendar, urban-tv) | M | partial |

@@ -94,6 +94,7 @@ library
                      , CLM.BioGeoPhys.LakeFluxes
                      , CLM.BioGeoPhys.LakeHydrology
                      , CLM.BioGeoPhys.LakeTemperature
+                     , CLM.BioGeoPhys.GlacierSurfaceMassBalance
                      , CLM.BioGeoPhys.SnowCoverFraction
                      , CLM.BioGeoChem.VegStructUpdate
                      , CLM.BioGeoChem.VegComputeSeed

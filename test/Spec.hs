@@ -23,6 +23,9 @@ import CLM.Driver.PipelineRunner
   , writeDailyNetCDF )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
 import CLM.Types.LakeStateData (LakeStateData(..))
+import CLM.BioGeoPhys.GlacierSurfaceMassBalance
+  ( GlacierSMBInput(..), GlacierSMBOutput(..), glacierSurfaceMassBalance
+  , istice, glcSnowPersistenceMaxDays, secspday )
 import CLM.Types.WaterStateData (WaterStateData(..), defaultWaterStateData)
 import CLM.Types.WaterFluxData (WaterFluxData(..), defaultWaterFluxData)
 import CLM.Types.EnergyFluxData (EnergyFluxData(..), defaultEnergyFluxData)
@@ -1272,6 +1275,67 @@ main = hspec $ do
   -- =====================================================================
   -- Pipeline integration (vs Julia reference)
   -- =====================================================================
+  describe "Glacier surface mass balance" $ do
+    let nls = 12; nlg = 25; ntot = nls + nlg
+        dt = 1800.0
+        liq0 = VU.replicate ntot 0.0 VU.// [(12, 5.0), (15, 3.0)]
+        ice0 = VU.replicate ntot 100.0
+        melt = (5.0 + 3.0) / dt
+        baseInp = GlacierSMBInput
+          { gsmbi_landunit_itype         = istice
+          , gsmbi_do_smb                 = True
+          , gsmbi_h2osoi_liq             = liq0
+          , gsmbi_h2osoi_ice             = ice0
+          , gsmbi_snow_persistence       = 0.0
+          , gsmbi_qflx_snwcp_ice         = 2.0
+          , gsmbi_qflx_qrgwl             = 0.5
+          , gsmbi_qflx_ice_runoff_snwcp  = 4.0
+          , gsmbi_glc_dyn_runoff_routing = 0.0
+          , gsmbi_dtime                  = dt
+          }
+
+    it "converts glacier meltwater to ice and accumulates the melt flux" $ do
+      let o = glacierSurfaceMassBalance nls nlg baseInp
+      abs (gsmbo_qflx_glcice_melt o - melt) `shouldSatisfy` (< 1.0e-12)
+      gsmbo_h2osoi_liq o VU.! 12 `shouldBe` 0.0
+      gsmbo_h2osoi_liq o VU.! 15 `shouldBe` 0.0
+      abs (gsmbo_h2osoi_ice o VU.! 12 - 105.0) `shouldSatisfy` (< 1.0e-12)
+      abs (gsmbo_h2osoi_ice o VU.! 15 - 103.0) `shouldSatisfy` (< 1.0e-12)
+
+    it "sets ice growth to the snow-capping flux and net = frz - melt" $ do
+      let o = glacierSurfaceMassBalance nls nlg baseInp
+      gsmbo_qflx_glcice_frz o `shouldBe` 2.0
+      abs (gsmbo_qflx_glcice o - (2.0 - melt)) `shouldSatisfy` (< 1.0e-12)
+
+    it "routes melt to liquid runoff and removes equal ice runoff (standalone)" $ do
+      let o = glacierSurfaceMassBalance nls nlg baseInp
+      abs (gsmbo_qflx_qrgwl o - (0.5 + melt)) `shouldSatisfy` (< 1.0e-12)
+      abs (gsmbo_qflx_ice_runoff_snwcp o - (4.0 - melt)) `shouldSatisfy` (< 1.0e-12)
+      gsmbo_qflx_glcice_dyn_water_flux o `shouldBe` 0.0
+
+    it "leaves non-glacier columns without meltwater conversion" $ do
+      let o = glacierSurfaceMassBalance nls nlg baseInp { gsmbi_landunit_itype = 1 }
+      gsmbo_qflx_glcice_melt o `shouldBe` 0.0
+      gsmbo_qflx_glcice_frz o `shouldBe` 0.0
+      gsmbo_h2osoi_liq o VU.! 12 `shouldBe` 5.0
+
+    it "triggers glacial inception when snow persists past the threshold" $ do
+      let persist = fromIntegral glcSnowPersistenceMaxDays * secspday + 1.0
+          o = glacierSurfaceMassBalance nls nlg baseInp
+                { gsmbi_landunit_itype = 1, gsmbi_snow_persistence = persist }
+      gsmbo_qflx_glcice_frz o `shouldBe` 2.0
+
+    it "retains capped snow in the ice-sheet system under dynamic routing" $ do
+      let o = glacierSurfaceMassBalance nls nlg baseInp { gsmbi_glc_dyn_runoff_routing = 1.0 }
+      abs (gsmbo_qflx_ice_runoff_snwcp o - (4.0 - 2.0)) `shouldSatisfy` (< 1.0e-12)
+      abs (gsmbo_qflx_glcice_dyn_water_flux o - (melt - 2.0)) `shouldSatisfy` (< 1.0e-12)
+
+    it "passes through columns outside the do_smb filter" $ do
+      let o = glacierSurfaceMassBalance nls nlg baseInp { gsmbi_do_smb = False }
+      gsmbo_qflx_glcice_melt o `shouldBe` 0.0
+      gsmbo_qflx_qrgwl o `shouldBe` 0.5
+      gsmbo_h2osoi_liq o VU.! 12 `shouldBe` 5.0
+
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
       hasData <- doesFileExist "test/data/coldstart/t_veg.bin"

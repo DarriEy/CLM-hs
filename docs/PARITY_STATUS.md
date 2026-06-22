@@ -97,7 +97,9 @@ solver CNSoilMatrixMod is deferred by decision: explicit cascade is stable at th
 uptake), `TillageMod`.
 
 ### biogeophys missing / partial
-`GlacierSurfaceMassBalanceMod` (962 lines, missing), standalone `FrictionVelocityMod`
+`GlacierSurfaceMassBalanceMod` (Phase 4 #14: **ported** to
+`CLM.BioGeoPhys.GlacierSurfaceMassBalance`, 7 deterministic unit tests; driver
+integration pending a glacier column + stored snow-capping flux), standalone `FrictionVelocityMod`
 (u* is embedded in the flux modules, not independently validated), ozone stress on
 photosynthesis, `HumanIndexMod`, detailed urban building-temperature (Oleson 2015).
 Several "ported" modules are ~⅓ the Fortran line count (Photosynthesis 1,006 vs 5,209;
