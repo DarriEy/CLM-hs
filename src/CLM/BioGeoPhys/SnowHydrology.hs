@@ -43,6 +43,8 @@ module CLM.BioGeoPhys.SnowHydrology
 
     -- * Snow percolation
   , snowPercolation
+  , SnowPercResult(..)
+  , snowPercolationBottomPacked
 
     -- * Layer state helpers
   , zeroEmptySnowLayers
@@ -1031,6 +1033,135 @@ snowPercolation params dtime frac_sno_eff st =
       qflx_drain = if msno > 0 then VU.unsafeIndex percRates (msno - 1) else 0.0
 
   in (liq', qflx_drain)
+
+-- =========================================================================
+-- Snow percolation on the driver's bottom-packed layer layout
+-- =========================================================================
+
+-- | Result of bottom-packed snow meltwater percolation.
+data SnowPercResult = SnowPercResult
+  { sprLiq        :: !(VU.Vector Double)  -- ^ Updated liquid water per layer [kg/m2]
+  , sprIce        :: !(VU.Vector Double)  -- ^ Updated ice per layer [kg/m2] (refreeze)
+  , sprTSoisno    :: !(VU.Vector Double)  -- ^ Updated layer temperature [K] (refreeze)
+  , sprSnowDrain  :: !Double              -- ^ Liquid draining out of pack bottom [kg/m2]
+  } deriving (Show)
+
+-- | Snow meltwater percolation on the driver's bottom-packed layout.
+--
+-- Ports Fortran @BulkFlux_SnowPercolation@ (SnowHydrologyMod.F90): liquid water
+-- in excess of each layer's irreducible holding capacity (ssi * effective
+-- porosity) percolates into the layer below, limited by the available pore
+-- space of the receiving layer; the flux out of the bottom of the snowpack
+-- becomes @sprSnowDrain@ (routed to the top soil layer / runoff by the caller).
+--
+-- After the gravity flux is applied, any layer that is below freezing refreezes
+-- as much of its liquid as its cold content allows (energy-limited), releasing
+-- latent heat that warms the layer toward @tfrz@. This conserves total water
+-- mass: column liquid + column ice + drainage out of the bottom equals the
+-- incoming column liquid + ice.
+--
+-- Layers occupy bottom-packed indices @[nlevsno+snl .. nlevsno-1]@, with the
+-- topmost snow layer at @nlevsno+snl@ and the bottom snow layer at @nlevsno-1@;
+-- @snl@ is negative (number of resolved snow layers = @-snl@). When @snl >= 0@
+-- there are no resolved layers and the input is returned unchanged with zero
+-- drainage.
+snowPercolationBottomPacked
+  :: SnowHydrologyParams
+  -> Double            -- ^ dtime [s]
+  -> Double            -- ^ frac_sno_eff
+  -> Int               -- ^ snl (negative when resolved snow layers exist)
+  -> VU.Vector Double  -- ^ dz per layer [m]
+  -> VU.Vector Double  -- ^ h2osoi_ice per layer [kg/m2]
+  -> VU.Vector Double  -- ^ h2osoi_liq per layer [kg/m2]
+  -> VU.Vector Double  -- ^ t_soisno per layer [K]
+  -> SnowPercResult
+snowPercolationBottomPacked params dtime frac_sno_eff snl dz_v ice_v liq_v t_v
+  | snl >= 0 || frac_sno_eff <= 0.0 =
+      SnowPercResult liq_v ice_v t_v 0.0
+  | otherwise =
+  let topIdx  = nlevsno + snl   -- topmost snow layer (0-based)
+      botIdx  = nlevsno - 1     -- bottom snow layer (0-based)
+
+      idxAt v i = if i >= 0 && i < VU.length v then VU.unsafeIndex v i else 0.0
+
+      -- Partial volumes and effective porosity (Fortran vol_ice/eff_porosity/vol_liq).
+      vol_ice j =
+        let d = idxAt dz_v j
+        in if d > 0.0
+           then min 1.0 (idxAt ice_v j / (d * frac_sno_eff * denice))
+           else 1.0
+      eff_por j = 1.0 - vol_ice j
+      vol_liq j =
+        let d = idxAt dz_v j
+        in if d > 0.0
+           then min (eff_por j) (idxAt liq_v j / (d * frac_sno_eff * denh2o))
+           else 0.0
+
+      -- qperc j : liquid [kg/m2] leaving the bottom of layer j into layer j+1
+      -- (and out of the pack for the bottom layer). Matches Fortran.
+      qperc j
+        | j < topIdx || j > botIdx = 0.0
+        | j < botIdx =
+            let epj   = eff_por j
+                epjp1 = eff_por (j + 1)
+            in if epj < wimp params || epjp1 < wimp params
+               then 0.0
+               else
+                 let q1 = max 0.0
+                            ((vol_liq j - ssi params * epj)
+                              * idxAt dz_v j * frac_sno_eff)
+                     q2 = (1.0 - vol_ice (j + 1) - vol_liq (j + 1))
+                            * idxAt dz_v (j + 1) * frac_sno_eff
+                 in min q1 q2
+        | otherwise =  -- bottom layer
+            max 0.0 ((vol_liq j - ssi params * eff_por j)
+                      * idxAt dz_v j * frac_sno_eff)
+
+      -- Liquid after gravity flux: layer j loses qperc j, gains qperc (j-1).
+      liqAfterFlux = VU.imap
+        (\j old ->
+            if j < topIdx || j > botIdx
+            then old
+            else old - qperc j + (if j > topIdx then qperc (j - 1) else 0.0))
+        liq_v
+
+      snowDrain = qperc botIdx
+
+      -- Refreeze: a sub-freezing layer freezes liquid up to its cold content.
+      refreeze j liqIn iceIn tIn
+        | j < topIdx || j > botIdx = (liqIn, iceIn, tIn)
+        | liqIn <= 0.0 || tIn >= tfrz = (liqIn, iceIn, tIn)
+        | otherwise =
+            let coldContent = (cpice * iceIn + cpliq * liqIn) * (tfrz - tIn)
+                freezeable  = coldContent / hfus
+                frozen      = max 0.0 (min liqIn freezeable)
+                liq'        = liqIn - frozen
+                ice'        = iceIn + frozen
+                denom       = cpice * ice' + cpliq * liq'
+                t'          = if denom > 0.0
+                              then min tfrz (tIn + frozen * hfus / denom)
+                              else tfrz
+            in (liq', ice', t')
+
+      (liqF, iceF, tF) =
+        let go j accL accI accT
+              | j > botIdx = (accL, accI, accT)
+              | otherwise =
+                  let (l', i', t') = refreeze j
+                                       (idxAt liqAfterFlux j) (idxAt ice_v j)
+                                       (idxAt t_v j)
+                  in go (j + 1)
+                        (accL VU.// [(j, l')])
+                        (accI VU.// [(j, i')])
+                        (accT VU.// [(j, t')])
+        in go topIdx liqAfterFlux ice_v t_v
+
+  in SnowPercResult
+       { sprLiq       = liqF
+       , sprIce       = iceF
+       , sprTSoisno   = tF
+       , sprSnowDrain = snowDrain
+       }
 
 -- =========================================================================
 -- Zero empty snow layers

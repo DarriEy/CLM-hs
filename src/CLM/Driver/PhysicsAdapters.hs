@@ -136,7 +136,9 @@ import CLM.BioGeoPhys.SnowHydrology
   ( SnowLayerState(..), SnowLayerBounds(..)
   , initSnowLayerBounds, emptySnowLayerState
   , combineSnowLayers, divideSnowLayers
-  , updateSnowDepthAndFracSL2012, addNewsnowToIntsnowSL2012 )
+  , updateSnowDepthAndFracSL2012, addNewsnowToIntsnowSL2012
+  , SnowHydrologyParams(..), defaultSnowHydroParams
+  , SnowPercResult(..), snowPercolationBottomPacked )
 import CLM.BioGeoPhys.ActiveLayer
   ( AltCalcInput(..), AltCalcOutput(..)
   , altCalc )
@@ -1407,8 +1409,75 @@ soilTemperatureFullStep _cfg ctx st =
 -- Snow liquid routing through resolved snow layers
 -- ============================================================================
 
+-- | Snow meltwater percolation through the resolved snow layers.
+--
+-- Ports Fortran @BulkFlux_SnowPercolation@ (SnowHydrologyMod.F90) via
+-- 'snowPercolationBottomPacked': liquid water above each layer's irreducible
+-- holding capacity (ssi * effective porosity) drains into the layer below,
+-- limited by the receiving layer's pore space; the flux out of the bottom of
+-- the snowpack is routed into the top soil layer (index @nlevsno@), exactly as
+-- the Fortran feeds @qflx_top_soil@ into soil water. Sub-freezing layers
+-- refreeze part of their liquid (energy-limited), warming toward freezing.
+--
+-- Acts only when @snl < 0@ (resolved snow layers) and the layer arrays are
+-- allocated; otherwise the state passes through unchanged. Total water mass is
+-- conserved: liquid drained out of the bottom is added back into the top soil
+-- layer's liquid, and refreeze moves mass from liquid to ice within a layer.
 snowPercolationStep :: PhysicsStep
-snowPercolationStep _cfg _ctx st = st
+snowPercolationStep _cfg ctx st =
+  let snl   = clmSnl st
+      ws    = clmWaterState st
+      col   = clmColumn st
+      temp  = clmTemp st
+      wdiag = clmWaterDiagBulk st
+      dtime = tcDtime ctx
+
+      liq_v = h2osoi_liq_col ws
+      ice_v = h2osoi_ice_col ws
+      dz_v  = colDz col
+      t_v   = t_soisno_col temp
+
+      frac_sno_eff = safeIdx (wdiag_frac_sno_eff_col wdiag) 0
+
+      nLayers = negate snl
+      topSnow = nlevsno + snl   -- topmost snow layer index (bottom-packed)
+      topSoil = nlevsno         -- first soil layer index
+
+      canResolve =
+        VU.length liq_v >= nlevsno + nlevgrnd
+        && VU.length ice_v >= nlevsno + nlevgrnd
+        && VU.length dz_v  >= nlevsno + nlevgrnd
+        && VU.length t_v   >= nlevsno + nlevgrnd
+        && topSnow >= 0
+
+      active = snl < 0 && nLayers >= 1 && frac_sno_eff > 0.0 && canResolve
+
+  in if not active
+     then st
+     else
+       let res = snowPercolationBottomPacked
+                   defaultSnowHydroParams dtime frac_sno_eff snl
+                   dz_v ice_v liq_v t_v
+
+           liqPerc  = sprLiq res
+           drainMm  = sprSnowDrain res  -- kg/m2 leaving the pack bottom
+
+           -- Route bottom drainage into the top soil layer's liquid (Fortran
+           -- qflx_top_soil -> soil water); conserves total water mass.
+           liq' =
+             if topSoil < VU.length liqPerc
+             then liqPerc VU.// [(topSoil, safeIdx liqPerc topSoil + drainMm)]
+             else liqPerc
+
+           ws' = ws
+             { h2osoi_liq_col = liq'
+             , h2osoi_ice_col = sprIce res
+             }
+           temp' = temp { t_soisno_col = sprTSoisno res }
+
+       in st { clmWaterState = ws'
+             , clmTemp       = temp'
+             }
 
 snowWaterStepNoop :: PhysicsStep
 snowWaterStepNoop _cfg _ctx st = st
