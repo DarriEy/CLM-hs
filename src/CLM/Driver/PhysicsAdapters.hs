@@ -94,6 +94,8 @@ import qualified CLM.BioGeoChem.Allocation as Alloc
 import qualified CLM.BioGeoChem.Phenology as Phen
 import qualified CLM.BioGeoChem.NutrientCompetition as NComp
 import qualified CLM.BioGeoChem.MaintResp as MR
+import qualified CLM.BioGeoChem.GrowthResp as GResp
+import qualified CLM.BioGeoChem.GapMortality as GapM
 import qualified CLM.Types.CNVegNitrogenStateData as NState
 import CLM.Types.CNVegCarbonStateData
   ( cnvcs_leafc_patch, cnvcs_frootc_patch, cnvcs_livestemc_patch
@@ -3226,12 +3228,49 @@ scalarVegPath dt st0 =
           , Alloc.ali_downreg = clmFPG st
           }
 
-        !gr = Alloc.alo_cpool_leaf_gr allocOut
-            + Alloc.alo_cpool_froot_gr allocOut
-            + Alloc.alo_cpool_livestem_gr allocOut
-            + Alloc.alo_cpool_deadstem_gr allocOut
-            + Alloc.alo_cpool_livecroot_gr allocOut
-            + Alloc.alo_cpool_deadcroot_gr allocOut
+        -- Growth respiration (CNGRespMod.F90): a genuine C loss equal to
+        -- grperc * (new tissue C allocation). The allometric split in
+        -- 'Alloc.calcAllocation' already routes only the tissue fraction
+        -- (availc/(1+grperc)) into the cpool_to_* pool fluxes; the remaining
+        -- grperc fraction is respired here and never enters the C pools.
+        -- We drive the ported 'GResp.cnGrowthResp' kernel directly off those
+        -- per-pool allocation fluxes (single column "patch"), so the named
+        -- growth-respiration module is the source of truth for the GR flux.
+        !grOut = GResp.cnGrowthResp GResp.GrowthRespInput
+          { GResp.gri_np        = 1
+          , GResp.gri_mask      = VU.singleton True
+          , GResp.gri_ivt       = VU.singleton 0
+          , GResp.gri_pftcon    = GResp.PftConGrowthResp
+              { GResp.pgr_woody  = VU.fromList [0.0, 1.0]
+              , GResp.pgr_grperc = VU.fromList [0.3, 0.3]
+              , GResp.pgr_grpnow = VU.fromList [1.0, 1.0]
+              }
+          , GResp.gri_npcropmin = 15
+          , GResp.gri_cpool_to_leafc              = VU.singleton (Alloc.alo_cpool_to_leafc allocOut)
+          , GResp.gri_cpool_to_leafc_storage      = VU.singleton 0.0
+          , GResp.gri_cpool_to_frootc             = VU.singleton (Alloc.alo_cpool_to_frootc allocOut)
+          , GResp.gri_cpool_to_frootc_storage     = VU.singleton 0.0
+          , GResp.gri_cpool_to_livestemc          = VU.singleton (Alloc.alo_cpool_to_livestemc allocOut)
+          , GResp.gri_cpool_to_livestemc_storage  = VU.singleton 0.0
+          , GResp.gri_cpool_to_deadstemc          = VU.singleton (Alloc.alo_cpool_to_deadstemc allocOut)
+          , GResp.gri_cpool_to_deadstemc_storage  = VU.singleton 0.0
+          , GResp.gri_cpool_to_livecrootc         = VU.singleton (Alloc.alo_cpool_to_livecrootc allocOut)
+          , GResp.gri_cpool_to_livecrootc_storage = VU.singleton 0.0
+          , GResp.gri_cpool_to_deadcrootc         = VU.singleton (Alloc.alo_cpool_to_deadcrootc allocOut)
+          , GResp.gri_cpool_to_deadcrootc_storage = VU.singleton 0.0
+          , GResp.gri_leafc_xfer_to_leafc           = VU.singleton 0.0
+          , GResp.gri_frootc_xfer_to_frootc         = VU.singleton 0.0
+          , GResp.gri_livestemc_xfer_to_livestemc   = VU.singleton 0.0
+          , GResp.gri_deadstemc_xfer_to_deadstemc   = VU.singleton 0.0
+          , GResp.gri_livecrootc_xfer_to_livecrootc = VU.singleton 0.0
+          , GResp.gri_deadcrootc_xfer_to_deadcrootc = VU.singleton 0.0
+          }
+        !gr = VU.head (GResp.gro_cpool_leaf_gr grOut)
+            + VU.head (GResp.gro_cpool_froot_gr grOut)
+            + VU.head (GResp.gro_cpool_livestem_gr grOut)
+            + VU.head (GResp.gro_cpool_deadstem_gr grOut)
+            + VU.head (GResp.gro_cpool_livecroot_gr grOut)
+            + VU.head (GResp.gro_cpool_deadcroot_gr grOut)
 
         -- Step 4: Phenology (background litterfall)
         !leaf_long = 2.0  -- years
@@ -3280,14 +3319,28 @@ scalarVegPath dt st0 =
                 + nMin * dt
                 - NComp.nco_actual_plant_nuptake nCompOut * dt
 
+        -- Step 9: Gap (background) mortality (CNGapMortalityMod.F90).
+        -- A per-PFT background mortality rate (r_mort, 1/yr) kills a fraction of
+        -- each vegetation C/N pool every timestep; the killed biomass is moved
+        -- (conservatively) from the veg pools into the litter / coarse-woody-
+        -- debris pools. Applied here to the column-scalar veg pools after the
+        -- allocation/litterfall update so the kill acts on this step's pools.
+        (!leafC2, !frootC2, !stemC2, !deadstemC2, !litterC2, !somC2, !leafN2, !sminnGap) =
+          applyColumnGapMortality dt leafC' frootC' stemC' (clmDeadStemC st)
+                                  litterC' somC' (clmLeafN st)
+
+        !sminn2 = sminn' + sminnGap
+
         -- Use smooth max for AD-safe non-negativity enforcement
         !smax = smoothMax defaultK
-    in st { clmLeafC = smax 0.0 leafC'
-          , clmFrootC = smax 0.0 frootC'
-          , clmLiveStemC = smax 0.0 stemC'
-          , clmLitterC = smax 0.0 litterC'
-          , clmSoilOrgC = smax 0.0 somC'
-          , clmSMINN = smax 0.0 sminn'
+    in st { clmLeafC = smax 0.0 leafC2
+          , clmFrootC = smax 0.0 frootC2
+          , clmLiveStemC = smax 0.0 stemC2
+          , clmDeadStemC = smax 0.0 deadstemC2
+          , clmLitterC = smax 0.0 litterC2
+          , clmSoilOrgC = smax 0.0 somC2
+          , clmLeafN = smax 0.0 leafN2
+          , clmSMINN = smax 0.0 sminn2
           , clmNPP = npp
           , clmHR = hr
           , clmNEE = nee
@@ -4043,3 +4096,118 @@ runVectorizedLeaching dt st =
 -- | Pad/truncate a per-layer vector to length nlev.
 padLayers :: Int -> VU.Vector Double -> VU.Vector Double
 padLayers nlev v = VU.generate nlev (\i -> if i < VU.length v then v VU.! i else 0.0)
+
+-- | Apply background (gap-phase) mortality to the column-scalar vegetation
+-- pools (CNGapMortalityMod.F90).
+--
+-- The ported 'GapM.cnGapMortality' kernel computes, for a non-woody (grass)
+-- PFT at the background rate @r_mort@ (1/yr), the per-pool C and N fluxes that
+-- leave the displayed vegetation pools each timestep:
+--
+--     flux = pool * r_mort / (days_per_year * secspday)
+--
+-- We drive the kernel with the live column-scalar pools (a single "patch") and
+-- then route the killed mass into the dead-organic-matter pools, conserving
+-- total C and N exactly:
+--
+--   * leaf + fine-root C  -> litter C        (fine-litter, lf_f / fr_f sum to 1)
+--   * live-stem C         -> soil organic C  (coarse woody debris analogue;
+--                                             the scalar path has no separate
+--                                             CWD pool, so CWD is carried by the
+--                                             soil-organic coarse pool)
+--   * leaf N              -> soil mineral N  (returned as @sminnGap@; the killed
+--                                             leaf N mineralizes into sminn)
+--
+-- Dead-stem C is killed at the same rate but, being already dead structural C,
+-- is moved into the same soil-organic / CWD pool. Returns the post-mortality
+-- (leafC, frootC, livestemC, deadstemC, litterC, soilOrgC, leafN) plus the
+-- sminn increment from mineralized leaf N. Total C in
+-- (leaf+froot+livestem+deadstem+litter+som) is invariant under this transfer;
+-- total N (leafN+sminn) is invariant.
+applyColumnGapMortality
+  :: Double  -- ^ dt (s)
+  -> Double -> Double -> Double -> Double -> Double -> Double -> Double
+  -- ^ leafC frootC livestemC deadstemC litterC soilOrgC leafN
+  -> (Double, Double, Double, Double, Double, Double, Double, Double)
+applyColumnGapMortality dt leafC frootC livestemC deadstemC litterC soilOrgC leafN =
+  let days_per_year = 365.0
+      mortOut = GapM.cnGapMortality GapM.GapMortInput
+        { GapM.gmi2_np         = 1
+        , GapM.gmi2_mask       = VU.singleton True
+        , GapM.gmi2_ivt        = VU.singleton 0
+        , GapM.gmi2_params     = GapM.defaultGapMortalityParams
+            { GapM.gmp_r_mort = VU.fromList [0.02, 0.02] }  -- 2%/yr background rate
+        , GapM.gmi2_pftcon     = GapM.PftConGapMort
+            { GapM.pgm_woody  = VU.fromList [0.0, 1.0]
+            , GapM.pgm_leafcn = VU.fromList [25.0, 25.0]
+            , GapM.pgm_lf_f   = VU.fromList [1.0, 1.0]
+            , GapM.pgm_fr_f   = VU.fromList [1.0, 1.0]
+            , GapM.pgm_nlitr  = 1
+            }
+        , GapM.gmi2_dgvs       = GapM.DgvsGapMortData
+            { GapM.dgm_greffic    = VU.singleton 0.0
+            , GapM.dgm_heatstress = VU.singleton 0.0
+            , GapM.dgm_nind       = VU.singleton 0.0
+            }
+        , GapM.gmi2_use_cndv               = False
+        , GapM.gmi2_spinup_state           = 0
+        , GapM.gmi2_spinup_factor_deadwood = 1.0
+        , GapM.gmi2_days_per_year          = days_per_year
+        , GapM.gmi2_npcropmin              = 15
+        , GapM.gmi2_leafc            = VU.singleton leafC
+        , GapM.gmi2_frootc           = VU.singleton frootC
+        , GapM.gmi2_livestemc        = VU.singleton livestemC
+        , GapM.gmi2_deadstemc        = VU.singleton deadstemC
+        , GapM.gmi2_livecrootc       = VU.singleton 0.0
+        , GapM.gmi2_deadcrootc       = VU.singleton 0.0
+        , GapM.gmi2_leafc_storage    = VU.singleton 0.0
+        , GapM.gmi2_frootc_storage   = VU.singleton 0.0
+        , GapM.gmi2_livestemc_storage  = VU.singleton 0.0
+        , GapM.gmi2_deadstemc_storage  = VU.singleton 0.0
+        , GapM.gmi2_livecrootc_storage = VU.singleton 0.0
+        , GapM.gmi2_deadcrootc_storage = VU.singleton 0.0
+        , GapM.gmi2_gresp_storage    = VU.singleton 0.0
+        , GapM.gmi2_leafc_xfer       = VU.singleton 0.0
+        , GapM.gmi2_frootc_xfer      = VU.singleton 0.0
+        , GapM.gmi2_livestemc_xfer   = VU.singleton 0.0
+        , GapM.gmi2_deadstemc_xfer   = VU.singleton 0.0
+        , GapM.gmi2_livecrootc_xfer  = VU.singleton 0.0
+        , GapM.gmi2_deadcrootc_xfer  = VU.singleton 0.0
+        , GapM.gmi2_gresp_xfer       = VU.singleton 0.0
+        , GapM.gmi2_leafn            = VU.singleton leafN
+        , GapM.gmi2_frootn           = VU.singleton 0.0
+        , GapM.gmi2_livestemn        = VU.singleton 0.0
+        , GapM.gmi2_deadstemn        = VU.singleton 0.0
+        , GapM.gmi2_livecrootn       = VU.singleton 0.0
+        , GapM.gmi2_deadcrootn       = VU.singleton 0.0
+        , GapM.gmi2_retransn         = VU.singleton 0.0
+        , GapM.gmi2_leafn_storage    = VU.singleton 0.0
+        , GapM.gmi2_frootn_storage   = VU.singleton 0.0
+        , GapM.gmi2_livestemn_storage  = VU.singleton 0.0
+        , GapM.gmi2_deadstemn_storage  = VU.singleton 0.0
+        , GapM.gmi2_livecrootn_storage = VU.singleton 0.0
+        , GapM.gmi2_deadcrootn_storage = VU.singleton 0.0
+        , GapM.gmi2_leafn_xfer       = VU.singleton 0.0
+        , GapM.gmi2_frootn_xfer      = VU.singleton 0.0
+        , GapM.gmi2_livestemn_xfer   = VU.singleton 0.0
+        , GapM.gmi2_deadstemn_xfer   = VU.singleton 0.0
+        , GapM.gmi2_livecrootn_xfer  = VU.singleton 0.0
+        , GapM.gmi2_deadcrootn_xfer  = VU.singleton 0.0
+        }
+      -- Kernel fluxes are rates (gC/m2/s); integrate over the timestep.
+      mLeafC      = VU.head (GapM.gmo2_m_leafc_to_litter mortOut)      * dt
+      mFrootC     = VU.head (GapM.gmo2_m_frootc_to_litter mortOut)     * dt
+      mLivestemC  = VU.head (GapM.gmo2_m_livestemc_to_litter mortOut)  * dt
+      mDeadstemC  = VU.head (GapM.gmo2_m_deadstemc_to_litter mortOut)  * dt
+      mLeafN      = VU.head (GapM.gmo2_m_leafn_to_litter mortOut)      * dt
+
+      -- Conservative transfers: fine litter to litterC, woody debris to soilOrgC.
+      leafC'      = leafC      - mLeafC
+      frootC'     = frootC     - mFrootC
+      livestemC'  = livestemC  - mLivestemC
+      deadstemC'  = deadstemC  - mDeadstemC
+      litterC'    = litterC    + mLeafC + mFrootC
+      soilOrgC'   = soilOrgC   + mLivestemC + mDeadstemC
+      leafN'      = leafN      - mLeafN
+      sminnGap    = mLeafN
+  in (leafC', frootC', livestemC', deadstemC', litterC', soilOrgC', leafN', sminnGap)
