@@ -74,8 +74,9 @@ uptake sink was already present via NutrientCompetition). Symbiotic fixation use
 annualized-current-NPP proxy pending a true annual NPP accumulator.
 Still dead code (0 driver references): fire (CNFireLi2014/2016/2021), dynamic vegetation
 (CNDV), carbon isotopes (C13/C14), wood products / harvest, annual updates, methane,
-dust & VOC emissions. Still missing: crop allocation path; per-layer plant N uptake
-(SoilBiogeochemNitrogenUptakeMod) and the implicit matrix C/N solver (CNSoilMatrixMod).
+dust & VOC emissions. Still missing: crop allocation path. (Per-layer plant N uptake —
+SoilBiogeochemNitrogenUptakeMod — is now WIRED, Phase 2. The implicit matrix C/N solver
+CNSoilMatrixMod is deferred by decision: the explicit cascade is stable at this scope.)
 
 ### soilbiogeochem missing
 `CNSoilMatrixMod` (implicit matrix C/N solver), `SoilBiogeochemNitrogenUptake` (plant N

@@ -56,10 +56,14 @@ seasonal canopy.
    the runtime sminn balance; budget no longer sinks-only. Symbiotic fixation uses an
    annualized-NPP proxy (true annual accumulator + ndep stream I/O deferred to Phase 4).
    Suite 118/0/2.
-7. **soilbiogeochem completeness** — port `SoilBiogeochemNitrogenUptake` (plant N
-   uptake) and decide on `CNSoilMatrixMod` (implicit matrix solver) vs the current
-   explicit cascade. *Effort: M (uptake), L (matrix solver). Risk: M. Validate:
-   matched-state N-flux drift guard (already exists) + conservation.*
+7. **soilbiogeochem completeness** — DONE (commit d207638). Ported
+   `SoilBiogeochemNitrogenUptake` (the N-uptake vertical profile) and wired per-layer
+   plant N uptake into `runVectorizedNCycle`: the column plant uptake is distributed by
+   the available-N profile and debited from `sminn_vr`, conserving the column total
+   (previously sminn_vr only gained mineralization). DECISION on `CNSoilMatrixMod`
+   (implicit matrix C/N solver): keep the explicit cascade — it is stable over the
+   30-day single-column run; the matrix solve is a long-spinup accuracy optimization not
+   needed at this scope. Deferred. Suite 118/0/2.
 
 ## Phase 3 — Vegetation realism (still single column)
 
