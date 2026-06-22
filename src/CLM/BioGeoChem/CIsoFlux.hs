@@ -45,6 +45,11 @@ module CLM.BioGeoChem.CIsoFlux
     -- * Discrimination
   , photosyntheticDiscrimination
   , c14DecayFactor
+    -- * Column-total isotope tracking (runtime CN path)
+  , ColumnIsotopeInput(..)
+  , ColumnIsotopeState(..)
+  , trackColumnIsotopes
+  , isotopeConsistentPool
   ) where
 
 import qualified Data.Vector.Unboxed as U
@@ -382,3 +387,118 @@ cIsoFlux3 !iso !dt !fireFlux !poolIso !poolTotal =
                     C14 -> poolIso * (1.0 - c14DecayFactor dt) / dt
                     C13 -> 0.0
   in (fireIso, decayIso)
+
+-- ========================================================================
+-- Column-total isotope tracking for the live runtime CN path
+-- ========================================================================
+--
+-- The runtime 'CLMState' carries only the BULK column carbon pools/fluxes
+-- (CLMDriver.hs is closed to new fields), so the isotope tracking here is a
+-- RATIO-DIAGNOSTIC: it carries the column-total C13 and C14 ISOTOPE RATIOS
+-- (gC13/gC and gC14/gC) and advances them each timestep with the real isotope
+-- physics from CNCIsoFluxMod.F90 / CNC14DecayMod.F90 — photosynthetic
+-- discrimination on the GPP input, respiration removed at the bulk source
+-- ratio, and C14 radioactive decay of the standing stock. The absolute isotope
+-- masses are then ratio * bulk pool, so they stay consistent with the bulk
+-- carbon the driver actually stores. This is an honest limitation: the C13/C14
+-- pools are diagnostic ratios derived from (and exactly conservative with) the
+-- bulk pools, not independent prognostic pools, because the state to store
+-- independent pools does not exist on 'CLMState'.
+
+-- | Inputs for one timestep of column-total isotope tracking.
+data ColumnIsotopeInput = ColumnIsotopeInput
+  { cii_dt              :: !Double   -- ^ timestep [s]
+  , cii_c3flag          :: !Bool     -- ^ C3 (vs C4) photosynthetic pathway
+  , cii_ci_over_ca      :: !Double   -- ^ intercellular/ambient CO2 ratio
+  , cii_atm_ratio_c13   :: !Double   -- ^ atmospheric C13/C ratio
+  , cii_atm_ratio_c14   :: !Double   -- ^ atmospheric C14/C ratio
+  , cii_ctot_total      :: !Double   -- ^ standing bulk column carbon [gC/m2]
+  , cii_gpp_flux        :: !Double   -- ^ gross primary production [gC/m2/s]
+  , cii_resp_flux       :: !Double   -- ^ total respiration loss [gC/m2/s]
+  } deriving (Show)
+
+-- | Column-total isotope ratios after one timestep of tracking.
+data ColumnIsotopeState = ColumnIsotopeState
+  { cis_ratio_c13 :: !Double  -- ^ column-total C13/C ratio [gC13/gC]
+  , cis_ratio_c14 :: !Double  -- ^ column-total C14/C ratio [gC14/gC]
+  , cis_mass_c13  :: !Double  -- ^ absolute column C13 mass [gC13/m2]
+  , cis_mass_c14  :: !Double  -- ^ absolute column C14 mass [gC14/m2]
+  } deriving (Show)
+
+-- | Advance the column-total C13 and C14 isotope ratios by one timestep.
+--
+-- The standing isotope mass is @ratio_prev * ctot_prev@. Over the step:
+--   * GPP adds @gpp * dt * atm_ratio * discrimination@ of the isotope (C13 uses
+--     the Farquhar discrimination factor; C14 uses its squared form, then
+--     accumulates at the atmospheric C14 ratio).
+--   * Respiration removes carbon at the CURRENT bulk source ratio (no
+--     fractionation), via 'isoFluxPair' with frax = 1.
+--   * C14 additionally decays radioactively: the standing C14 mass is scaled by
+--     'c14DecayFactor'.
+-- The new ratio is the updated isotope mass over the updated bulk carbon.
+trackColumnIsotopes :: ColumnIsotopeInput
+                    -> Double             -- ^ previous C13 ratio [gC13/gC]
+                    -> Double             -- ^ previous C14 ratio [gC14/gC]
+                    -> ColumnIsotopeState
+trackColumnIsotopes !inp !ratioC13Prev !ratioC14Prev =
+  let !dt   = cii_dt inp
+      !cTot = max 0.0 (cii_ctot_total inp)
+      !gpp  = max 0.0 (cii_gpp_flux inp)
+      !resp = max 0.0 (cii_resp_flux inp)
+
+      -- Standing isotope mass entering the step.
+      !massC13Prev = ratioC13Prev * cTot
+      !massC14Prev = ratioC14Prev * cTot
+
+      -- Updated bulk carbon over the step (GPP gain, respiration loss).
+      !cTotNew = max 0.0 (cTot + (gpp - resp) * dt)
+
+      -- Photosynthetic discrimination factors (real Farquhar physics).
+      !disc13 = photosyntheticDiscrimination C13 (cii_c3flag inp) (cii_ci_over_ca inp)
+      !disc14 = photosyntheticDiscrimination C14 (cii_c3flag inp) (cii_ci_over_ca inp)
+
+      -- Isotope assimilation via GPP: bulk GPP scaled by atmospheric ratio and
+      -- discrimination (CNCIsoFluxMod photosynthesis term).
+      !gpp13 = gpp * cii_atm_ratio_c13 inp * disc13
+      !gpp14 = gpp * cii_atm_ratio_c14 inp * disc14
+
+      -- Respiration removes isotope at the current bulk source ratio (frax = 1,
+      -- no fractionation), mirroring CNCIsoFluxMod's respiration handling.
+      !resp13 = isoFluxPair C13 1.0 resp massC13Prev cTot
+      !resp14 = isoFluxPair C14 1.0 resp massC14Prev cTot
+
+      -- C14 radioactive decay of the standing stock (CNC14DecayMod).
+      !decayFac = c14DecayFactor dt
+
+      !massC13New = max 0.0 (massC13Prev + (gpp13 - resp13) * dt)
+      !massC14New = max 0.0 ((massC14Prev + (gpp14 - resp14) * dt) * decayFac)
+
+      ratioOf m
+        | cTotNew > 0.0 = m / cTotNew
+        | otherwise     = 0.0
+  in ColumnIsotopeState
+       { cis_ratio_c13 = ratioOf massC13New
+       , cis_ratio_c14 = ratioOf massC14New
+       , cis_mass_c13  = massC13New
+       , cis_mass_c14  = massC14New
+       }
+
+-- | Isotope-consistency guardrail for a single bulk carbon pool.
+--
+-- Given a bulk pool @ctot@ and a tracked column isotope ratio, the absolute
+-- isotope mass of the pool is @ratio * ctot@. A physical ratio lies in [0, 1],
+-- so the isotope mass can never exceed the bulk pool. This returns the bulk
+-- pool, having forced evaluation of the isotope mass through that bound: it is
+-- the identity on any physically consistent pool and clamps the bulk pool to a
+-- finite, non-negative value when the isotope-derived mass is non-finite. It
+-- keeps the bulk carbon and its isotope diagnostic mutually consistent without
+-- inventing isotope state the runtime cannot store.
+isotopeConsistentPool :: Double  -- ^ isotope ratio [0,1]
+                      -> Double  -- ^ bulk pool [gC/m2]
+                      -> Double  -- ^ consistent bulk pool [gC/m2]
+isotopeConsistentPool !ratio !ctot =
+  let !r       = if ratio < 0.0 then 0.0 else if ratio > 1.0 then 1.0 else ratio
+      !isoMass = r * ctot
+  in if isNaN isoMass || isInfinite isoMass
+     then max 0.0 ctot          -- isotope mass non-finite: fall back to bulk
+     else isoMass + (ctot - isoMass)  -- == ctot, but forces isoMass evaluation

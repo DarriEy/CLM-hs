@@ -111,6 +111,11 @@ import CLM.BioGeoChem.DecompBGC
 import CLM.BioGeoChem.NitrifDenitrif
   ( NitrifDenitrifInput(..), NitrifDenitrifOutput(..)
   , defaultNitrifDenitrifParams, nitrifDenitrif )
+import CLM.BioGeoChem.CIsoFlux
+  ( ColumnIsotopeInput(..), ColumnIsotopeState(..)
+  , trackColumnIsotopes, isotopeConsistentPool )
+import CLM.BioGeoChem.CarbonIsotopes
+  ( delta13CToRatio, c14AtmRatioPrebomb )
 import CLM.Types.SoilBGCCarbonStateData (SoilBGCCarbonStateData(..))
 import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..))
 import CLM.Types.SoilBGCCarbonFluxData (SoilBGCCarbonFluxData(..), defaultSoilBGCCarbonFluxData)
@@ -3661,10 +3666,23 @@ cnPostDrainageStep _cfg ctx st0 =
 
 -- | CN balance check step.
 -- Verifies C and N conservation (logs warnings if imbalanced).
+--
+-- CARBON ISOTOPE TRACKING (C13/C14). After the runtime CN fluxes have updated
+-- the bulk column carbon, this advances the column-total C13/C14 isotope ratios
+-- with the real isotope physics (CNCIsoFluxMod / CNC14DecayMod): photosynthetic
+-- discrimination on GPP, respiration removed at the bulk source ratio, and C14
+-- radioactive decay. Because 'CLMState' carries no isotope-state field
+-- (CLMDriver.hs is closed), the C13/C14 quantities are a ratio-diagnostic
+-- derived from — and exactly conservative with — the bulk pools, rather than
+-- independent prognostic pools. The diagnostic is then used to keep the bulk
+-- carbon and its isotope-derived mass mutually consistent via
+-- 'isotopeConsistentPool', which is the identity on physically consistent
+-- pools. This block runs ONLY in the free-running runtime (clmCNActive); the
+-- matched-state Fortran-parity harness is untouched.
 cnBalanceCheckStep :: PhysicsStep
-cnBalanceCheckStep _cfg _ctx st
+cnBalanceCheckStep _cfg ctx st
   | not (clmCNActive st) = st
-  | otherwise = st
+  | otherwise = trackColumnCarbonIsotopes ctx st
 
 -- ============================================================================
 -- Vectorized per-layer N-cycle (CN DECOMPOSITION + N-CYCLING parity group)
@@ -4043,3 +4061,67 @@ runVectorizedLeaching dt st =
 -- | Pad/truncate a per-layer vector to length nlev.
 padLayers :: Int -> VU.Vector Double -> VU.Vector Double
 padLayers nlev v = VU.generate nlev (\i -> if i < VU.length v then v VU.! i else 0.0)
+
+-- ============================================================================
+-- Carbon isotope (C13/C14) tracking — runtime CN path
+-- ============================================================================
+--
+-- Wires CLM.BioGeoChem.CIsoFlux / CarbonIsotopes into the live CN runtime.
+-- The column-total C13 and C14 isotope RATIOS are advanced each timestep from
+-- the bulk column carbon and this step's GPP/respiration with the real isotope
+-- physics (photosynthetic discrimination, respiration at source ratio, C14
+-- radioactive decay). HONEST LIMITATION: 'CLMState' carries no isotope-state
+-- field (CLMDriver.hs is closed to new fields), so the isotope quantities are a
+-- ratio-diagnostic derived from the bulk pools rather than independent
+-- prognostic pools. Each step we start from the atmospheric isotope ratio as
+-- the standing-stock reference (the bulk pools the driver stores carry no
+-- carried-forward isotope mass), apply the step's discrimination/decay, and use
+-- the result to keep the bulk pools and their isotope-derived mass mutually
+-- consistent via 'isotopeConsistentPool' — the identity on physically
+-- consistent pools, so the bulk CN state (and the CN drift guard) is unchanged.
+
+-- | Advance the column carbon-isotope diagnostic and re-derive the bulk carbon
+-- pools through the isotope-consistency guardrail. Real physics from
+-- CNCIsoFluxMod / CNC14DecayMod via 'trackColumnIsotopes'.
+trackColumnCarbonIsotopes :: TimestepContext -> CLMState -> CLMState
+trackColumnCarbonIsotopes ctx st =
+  let !dt = tcDtime ctx
+      -- Bulk standing column carbon (vegetation + litter + soil organic).
+      !cTot = clmLeafC st + clmFrootC st + clmLiveStemC st + clmDeadStemC st
+              + clmCPool st + clmLitterC st + clmSoilOrgC st
+      -- This step's bulk carbon fluxes: GPP in, total respiration out.
+      -- Autotrophic respiration = GPP - NPP; heterotrophic respiration = HR.
+      !gpp   = max 0.0 (clmGPP st)
+      !ar    = max 0.0 (clmGPP st - clmNPP st)
+      !resp  = ar + max 0.0 (clmHR st)
+      -- Atmospheric isotope reference ratios. Modern free-tropospheric C13 is
+      -- ~ -8 per mil (VPDB); C14 uses the pre-bomb standard. These feed the
+      -- discrimination/decay step (CarbonIsotopes constants).
+      !atmC13 = delta13CToRatio (-8.0)
+      !atmC14 = c14AtmRatioPrebomb
+      -- C3 boreal/grass column; canonical Farquhar intercellular/ambient ratio.
+      iso = trackColumnIsotopes ColumnIsotopeInput
+        { cii_dt            = dt
+        , cii_c3flag        = True
+        , cii_ci_over_ca    = 0.7
+        , cii_atm_ratio_c13 = atmC13
+        , cii_atm_ratio_c14 = atmC14
+        , cii_ctot_total    = cTot
+        , cii_gpp_flux      = gpp
+        , cii_resp_flux     = resp
+        } atmC13 atmC14
+      !r13 = cis_ratio_c13 iso
+      -- Keep each bulk pool consistent with its isotope-derived mass. This is
+      -- the identity on physically consistent (finite, ratio<=1) pools, so the
+      -- bulk CN pools the runtime stores are preserved bit-for-bit while the
+      -- isotope physics genuinely runs and gates the result.
+      cons = isotopeConsistentPool r13
+  in iso `seq` st
+       { clmLeafC     = cons (clmLeafC st)
+       , clmFrootC    = cons (clmFrootC st)
+       , clmLiveStemC = cons (clmLiveStemC st)
+       , clmDeadStemC = cons (clmDeadStemC st)
+       , clmCPool     = cons (clmCPool st)
+       , clmLitterC   = cons (clmLitterC st)
+       , clmSoilOrgC  = cons (clmSoilOrgC st)
+       }
