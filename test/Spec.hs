@@ -18,7 +18,7 @@ import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep )
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
-  , runPipeline, DailyDiag(..), runCLMForQrunoff )
+  , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
 import CLM.Types.WaterStateData (WaterStateData(..), defaultWaterStateData)
 import CLM.Types.WaterFluxData (WaterFluxData(..), defaultWaterFluxData)
@@ -1318,6 +1318,37 @@ main = hspec $ do
                 , a /= b
                 ]
           mismatches `shouldBe` []
+
+    it "reads a Fortran NetCDF restart into physically-sane state (warm-start, #15)" $ do
+      -- Completes #15's Fortran path: parse a real clm2.r.*.nc restart and map
+      -- one column's prognostic state onto a base. The file lives outside the
+      -- repo, so this is pending in CI but runs locally (same pattern as the
+      -- NetCDF-reader / Bow tests).
+      let rpath = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_lake_run/Bow_at_Banff_lumped.clm2.r.2003-01-03-00000.nc"
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      hasRst  <- doesFileExist rpath
+      if not hasData then pendingWith "test/data not available"
+      else if not hasRst then pendingWith "Fortran restart file not available on this machine"
+      else do
+        (st0, _, _) <- initCLMStateFromDir "test/data"
+        res <- readFortranRestart 0 rpath st0
+        case res of
+          Left e -> expectationFailure ("readFortranRestart failed: " ++ e)
+          Right st -> do
+            let tsoi = t_soisno_col (clmTemp st)
+                ice  = h2osoi_ice_col (clmWaterState st)
+                liq  = h2osoi_liq_col (clmWaterState st)
+                nlt  = nlevsno + nlevgrnd
+            VU.length tsoi `shouldBe` nlt
+            -- soil-layer temperatures physically sane (winter Bow profile)
+            VU.all (\t -> t > 200 && t < 340) (VU.drop nlevsno tsoi) `shouldBe` True
+            t_grnd_col (clmTemp st) `shouldSatisfy` (\t -> t > 200 && t < 340)
+            -- water non-negative in the soil layers
+            VU.all (>= 0) (VU.drop nlevsno ice) `shouldBe` True
+            VU.all (>= 0) (VU.drop nlevsno liq) `shouldBe` True
+            -- snow-layer count and SWE in valid ranges
+            clmSnl st `shouldSatisfy` (\s -> s <= 0 && s >= negate nlevsno)
+            h2osno_col (clmWaterState st) `shouldSatisfy` (>= 0)
 
     it "Day 1 T_GRND matches Julia reference within 0.10K" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"

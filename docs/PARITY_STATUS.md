@@ -49,7 +49,7 @@ fire/mortality/crop/dynamic-veg, or anything in the "missing" lists below.
 |-----------|-------|------|
 | dyn_subgrid (transient land use, dynamic landunits, harvest, conservation) | **0%** | 19 modules, ~6,700 lines — structurally locks the port to single column |
 | FATES (cohort/patch demography, PARTEH, ED radiation, hydraulics, fire) | **~0%** | 570-line type+no-op stub vs ~75,800 Fortran lines; `fatesDynamics` returns input |
-| Restart I/O (read/write full model state) | **real (Phase 4 #15)** | Write→read→resume is **bit-identical** to a continuous run (validated). Native per-variable binary format; reading a Fortran NetCDF restart still pending (needs #16 NetCDF) |
+| Restart I/O (read/write full model state) | **real (Phase 4 #15)** | Write→read→resume is **bit-identical** to a continuous run (validated). Native per-variable binary format. Also reads a real Fortran `clm2.r.*.nc` restart into sane state (`readFortranRestart`, validated) — warm-start-and-run *parity* still needs a matched config+reference; NetCDF *write* (history) is #16 |
 | History output (NetCDF, multi-tape, subgrid) | **CSV only** | Single gridcell, daily-average only |
 | Multi-landunit subgrid (urban / glacier / lake / crop / wetland) | code exists, **never run** | The run is 100% soil (`wt_lunit = (1,0,0,…)`) |
 | atm→lnd downscaling + lnd→atm coupling | **stub** | No topographic forcing downscaling; no coupling fluxes |
@@ -106,7 +106,7 @@ SoilTemperature 998 vs 2,974) — core algorithm without full option/edge-case c
 | CN/BGC | ~⅓ wired (alloc/MR/Ncomp/decomp); fire/mortality/CNDV/isotopes/products/crop/phenology-onset NOT wired |
 | soilbiogeochem | ~60–70%; missing matrix solver + N uptake |
 | dyn_subgrid | 0% |
-| Restart | **real, bit-identical round-trip** (native binary; Fortran-NetCDF read pending) |
+| Restart | **real, bit-identical round-trip** (native binary) + **reads Fortran `clm2.r.*.nc`** into sane state; warm-start-run parity pending |
 | History / Coupling / Streams | stub (~5–20%) |
 | Multi-landunit (urban/glacier/lake/crop) | code present, not exercised |
 | FATES | ~0% |

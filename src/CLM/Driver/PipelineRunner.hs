@@ -14,6 +14,7 @@ module CLM.Driver.PipelineRunner
     -- * Restart I/O (full prognostic state save/restore)
   , writeRestartState
   , readRestartState
+  , readFortranRestart
     -- * Daily diagnostics
   , DailyDiag(..)
   , zeroDailyDiag
@@ -62,6 +63,8 @@ import CLM.Infrastructure.BinaryIO
   , readManifestDims, ManifestDims(..) )
 import CLM.Infrastructure.ReadParams
   ( readParametersBinary, AllParams(..), PFTConstants(..) )
+import CLM.Infrastructure.NetCDF
+  ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D )
 import CLM.Infrastructure.ForcingReader
   ( ForcingReaderState(..), forcingReaderInitBinary, readForcingStepPure
   , ForcingTimestep(..)
@@ -947,6 +950,109 @@ readRestartState base dir = do
     , clmSoilHydro      = sh'
     , clmSnl            = snl'
     }
+
+-- | Read a Fortran CLM restart (@clm2.r.*.nc@) and overlay one column's
+-- biophysical prognostic state onto a /base/ CLMState, enabling warm-start from
+-- Fortran initial conditions. Returns 'Left' on a NetCDF open/read failure.
+--
+-- The Fortran restart stores @T_SOISNO@ / @H2OSOI_LIQ@ / @H2OSOI_ICE@ on the
+-- combined snow+soil grid (@levtot = nlevsno + nlevgrnd@), snow at the top
+-- indices (active layers at the bottom of the snow stack), soil below — the same
+-- convention as the port's @*_col@ vectors, so the column slice copies directly.
+-- @DZSNO@/@ZSNO@/@ZISNO@ carry only the @nlevsno@ snow layers; the static soil
+-- geometry stays from the base. Variable names follow the Fortran restart
+-- registry. @icol@ selects the column (0 = the natural-veg soil column).
+readFortranRestart :: Int -> FilePath -> CLMState -> IO (Either String CLMState)
+readFortranRestart icol path base = do
+  eNc <- ncOpen path
+  case eNc of
+    Left e   -> return (Left ("ncOpen failed: " ++ e))
+    Right nc -> do
+      let lt = nlevsno + nlevgrnd
+      tsoi   <- ncSlice2 nc "T_SOISNO"   icol lt
+      liq    <- ncSlice2 nc "H2OSOI_LIQ" icol lt
+      ice    <- ncSlice2 nc "H2OSOI_ICE" icol lt
+      dzsno  <- ncSlice2 nc "DZSNO"  icol nlevsno
+      zsno   <- ncSlice2 nc "ZSNO"   icol nlevsno
+      zisno  <- ncSlice2 nc "ZISNO"  icol nlevsno
+      tgrnd  <- ncScal nc "T_GRND"  icol
+      th2o   <- ncScal nc "TH2OSFC" icol
+      h2osfc <- ncScal nc "H2OSFC"  icol
+      tveg   <- ncScal nc "T_VEG"   icol
+      snoNoL <- ncScal nc "H2OSNO_NO_LAYERS" icol
+      zwt    <- ncScal nc "ZWT"        icol
+      zwtp   <- ncScal nc "ZWT_PERCH"  icol
+      fsno   <- ncScal nc "frac_sno"     icol
+      fsnoe  <- ncScal nc "frac_sno_eff" icol
+      intsno <- ncScal nc "INT_SNOW"   icol
+      snlD   <- ncScal nc "SNLSNO"     icol
+      ncClose nc
+      case tsoi of
+        Nothing -> return (Left "T_SOISNO not found / wrong shape — not a CLM restart?")
+        Just tsoiV -> do
+          let snl' = maybe (clmSnl base) round snlD
+              -- SWE = layered snow (liq+ice over the snow indices) + no-layer reservoir
+              snowLayered = case (liq, ice) of
+                (Just l, Just i) -> VU.sum (VU.take nlevsno l) + VU.sum (VU.take nlevsno i)
+                _                -> 0.0
+              h2osno' = maybe 0.0 id snoNoL + snowLayered
+              -- replace the first |new| elements (the snow portion) of a combined
+              -- vector, keeping the static soil tail from the base.
+              ovSnow baseVec = maybe baseVec (\nv -> nv VU.++ VU.drop (VU.length nv) baseVec)
+              bcol = clmColumn base
+              col' = bcol { colDz = ovSnow (colDz bcol) dzsno
+                          , colZ  = ovSnow (colZ  bcol) zsno
+                          , colZi = ovSnow (colZi bcol) zisno }
+              bt = clmTemp base
+              tmp' = bt { t_soisno_col  = tsoiV
+                        , t_grnd_col    = maybe (t_grnd_col bt) id tgrnd
+                        , t_h2osfc_col  = maybe (t_h2osfc_col bt) id th2o
+                        , t_veg_patch   = maybe (t_veg_patch bt) id tveg
+                        , t_veg_patch_vec =
+                            maybe (t_veg_patch_vec bt)
+                                  (\tv -> VU.replicate (VU.length (t_veg_patch_vec bt)) tv) tveg }
+              bw = clmWaterState base
+              wat' = bw { h2osoi_liq_col = maybe (h2osoi_liq_col bw) id liq
+                        , h2osoi_ice_col = maybe (h2osoi_ice_col bw) id ice
+                        , h2osno_col     = h2osno'
+                        , h2osfc_col     = maybe (h2osfc_col bw) id h2osfc }
+              bwd = clmWaterDiagBulk base
+              setCol1 mx baseVec = maybe baseVec VU.singleton mx
+              wd' = bwd { wdiag_frac_sno_col     = setCol1 fsno  (wdiag_frac_sno_col bwd)
+                        , wdiag_frac_sno_eff_col = setCol1 fsnoe (wdiag_frac_sno_eff_col bwd) }
+              bwsb = clmWaterStateBulk base
+              wsb' = bwsb { wsbulk_int_snow_col = setCol1 intsno (wsbulk_int_snow_col bwsb) }
+              bsh = clmSoilHydro base
+              sh' = bsh { sh_zwt_col         = setCol1 zwt  (sh_zwt_col bsh)
+                        , sh_zwt_perched_col = setCol1 zwtp (sh_zwt_perched_col bsh) }
+          return $ Right base
+            { clmColumn         = col'
+            , clmTemp           = tmp'
+            , clmWaterState     = wat'
+            , clmWaterDiagBulk  = wd'
+            , clmWaterStateBulk = wsb'
+            , clmSoilHydro      = sh'
+            , clmSnl            = snl'
+            }
+
+-- | Read a Fortran restart 2D variable @(column, n)@ and return column @icol@'s
+-- @n@-element slice (NetCDF C-order: column is the slow dimension). 'Nothing'
+-- if the variable is absent or the read is too short.
+ncSlice2 :: NcFile -> String -> Int -> Int -> IO (Maybe (VU.Vector Double))
+ncSlice2 nc name icol n = do
+  r <- ncReadDouble2D nc name
+  return $ case r of
+    Right v | VU.length v >= (icol + 1) * n -> Just (VU.slice (icol * n) n v)
+    _ -> Nothing
+
+-- | Read a Fortran restart @(column)@ variable, returning element @icol@.
+-- Also reads @int@ variables (nc_get_var_double auto-converts).
+ncScal :: NcFile -> String -> Int -> IO (Maybe Double)
+ncScal nc name icol = do
+  r <- ncReadDouble1D nc name
+  return $ case r of
+    Right v | VU.length v > icol -> Just (v VU.! icol)
+    _ -> Nothing
 
 -- | Overlay every named vector field present on disk onto a base record, via
 -- its (name, setter) table. A field whose file is absent keeps the base value.

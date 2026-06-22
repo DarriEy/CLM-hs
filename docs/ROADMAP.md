@@ -115,8 +115,19 @@ or needs writing (glacier).
     prognostic fields (T/water/snow/geometry/CN), bit-identity required the canopy
     sun/shade state (recomputed only in daylight), the canopy-air reservoir +
     Monin-Obukhov seeds, soil SMP_L/HK_L, integrated snowfall, and the surface
-    energy/water-flux carriers. STILL PENDING: reading a real Fortran NetCDF restart
-    (warm-start from Fortran ICs) — gated on NetCDF (#16) + Fortran var-name mapping.
+    energy/water-flux carriers.
+    **Fortran restart read also DONE**: `readFortranRestart` opens a real
+    `clm2.r.*.nc` via the existing NetCDF reader and maps one column's
+    biophysical state (T_SOISNO/H2OSOI_LIQ/ICE on the combined snow+soil grid,
+    T_GRND/T_VEG/H2OSFC, DZSNO/ZSNO/ZISNO snow geometry, SNLSNO, ZWT/ZWT_PERCH,
+    frac_sno, INT_SNOW) onto a base — the port's `nlevgrnd=25/nlevsno=12/levtot=37`
+    match the Fortran file exactly, so column slices copy directly. Validated:
+    a real Bow `clm2.r` restart parses into physically-sane state (test
+    "reads a Fortran NetCDF restart into physically-sane state"). REMAINING:
+    full warm-start-and-run *parity* (run from Fortran ICs and compare the
+    trajectory to Fortran history) — needs a matched forcing/surfdata config +
+    reference, the same data gap that blocks #12–14; and CN-pool / NetCDF-write
+    (history #16) are still separate.
 16. **NetCDF history** — multi-tape, subgrid-aggregated output. *Effort: L. Risk: L.
     Validate: against Fortran history for the matched cases.*
 17. **External data streams** — N-deposition, LAI, crop calendar, urban-tv readers +
