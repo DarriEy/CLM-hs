@@ -104,10 +104,19 @@ or needs writing (glacier).
     canyon energy balance closes.*
 14. **Glacier** — write `GlacierSurfaceMassBalanceMod` (not ported) + istice column
     handling. *Effort: L. Risk: M.*
-15. **Restart I/O** — real model-state save/restore (start with the binary path
-    carrying full state; NetCDF + subgrid pointers later). Enables resume and
-    bootstrapping from Fortran restarts. *Effort: L. Risk: M. Validate: write→read→run
-    is bit-identical to no-restart; read a Fortran restart and reproduce step 1.*
+15. **Restart I/O** — DONE (2026-06). Real full-prognostic-state save/restore
+    (`writeRestartState`/`readRestartState` in `PipelineRunner`): native
+    per-variable little-endian Float64 binary, overlaid onto a pristine cold-start
+    base on read (static geometry/params re-derive). **Validated bit-identical**:
+    an in-line round-trip hook (`pcRestartRoundtripDay`) writes at day 3, reads
+    back onto a fresh base, and resumes to a 6-day trajectory equal to a continuous
+    run, bit-for-bit (`test/Spec.hs` "restart round-trip is bit-identical"). Finding
+    the complete read-before-write set was the real work — beyond the obvious
+    prognostic fields (T/water/snow/geometry/CN), bit-identity required the canopy
+    sun/shade state (recomputed only in daylight), the canopy-air reservoir +
+    Monin-Obukhov seeds, soil SMP_L/HK_L, integrated snowfall, and the surface
+    energy/water-flux carriers. STILL PENDING: reading a real Fortran NetCDF restart
+    (warm-start from Fortran ICs) — gated on NetCDF (#16) + Fortran var-name mapping.
 16. **NetCDF history** — multi-tape, subgrid-aggregated output. *Effort: L. Risk: L.
     Validate: against Fortran history for the matched cases.*
 17. **External data streams** — N-deposition, LAI, crop calendar, urban-tv readers +

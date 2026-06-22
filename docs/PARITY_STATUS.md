@@ -34,6 +34,10 @@ Hard regression guards (gated on fixtures), all within the narrow slice above:
    within tolerance (T_GRND 0.044 K); `EFLX_GNET_P` excluded (diagnostic LW convention).
 4. CN free-running pool drift < 1% over 28 steps (xsmrpool + flux probes excluded);
    CENTURY cascade soil-C bounded over 30 days (stability, NOT correctness).
+5. Restart round-trip (Phase 4 #15): writing the full prognostic state at day 3,
+   reading it back onto a pristine cold-start base, and resuming yields a 6-day
+   daily trajectory **bit-identical** to a continuous run — proving the restart is
+   both lossless and complete for the prognostic + read-before-write state.
 
 These do not validate: any non-soil landunit, multi-day winter, restart, multi-column,
 fire/mortality/crop/dynamic-veg, or anything in the "missing" lists below.
@@ -45,7 +49,7 @@ fire/mortality/crop/dynamic-veg, or anything in the "missing" lists below.
 |-----------|-------|------|
 | dyn_subgrid (transient land use, dynamic landunits, harvest, conservation) | **0%** | 19 modules, ~6,700 lines — structurally locks the port to single column |
 | FATES (cohort/patch demography, PARTEH, ED radiation, hydraulics, fire) | **~0%** | 570-line type+no-op stub vs ~75,800 Fortran lines; `fatesDynamics` returns input |
-| Restart I/O (read/write full model state) | **stub** | Cold-start only; cannot resume or bootstrap from a Fortran restart |
+| Restart I/O (read/write full model state) | **real (Phase 4 #15)** | Write→read→resume is **bit-identical** to a continuous run (validated). Native per-variable binary format; reading a Fortran NetCDF restart still pending (needs #16 NetCDF) |
 | History output (NetCDF, multi-tape, subgrid) | **CSV only** | Single gridcell, daily-average only |
 | Multi-landunit subgrid (urban / glacier / lake / crop / wetland) | code exists, **never run** | The run is 100% soil (`wt_lunit = (1,0,0,…)`) |
 | atm→lnd downscaling + lnd→atm coupling | **stub** | No topographic forcing downscaling; no coupling fluxes |
@@ -102,7 +106,8 @@ SoilTemperature 998 vs 2,974) — core algorithm without full option/edge-case c
 | CN/BGC | ~⅓ wired (alloc/MR/Ncomp/decomp); fire/mortality/CNDV/isotopes/products/crop/phenology-onset NOT wired |
 | soilbiogeochem | ~60–70%; missing matrix solver + N uptake |
 | dyn_subgrid | 0% |
-| Restart / History / Coupling / Streams | stub (~5–20%) |
+| Restart | **real, bit-identical round-trip** (native binary; Fortran-NetCDF read pending) |
+| History / Coupling / Streams | stub (~5–20%) |
 | Multi-landunit (urban/glacier/lake/crop) | code present, not exercised |
 | FATES | ~0% |
 

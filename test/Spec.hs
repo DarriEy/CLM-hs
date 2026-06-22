@@ -1290,6 +1290,35 @@ main = hspec $ do
             { pcDataDir = "test/data", pcNdays = 10, pcVerbose = False }
           length dailies `shouldBe` 10
 
+    it "restart round-trip is bit-identical (write->read->resume == continuous)" $ do
+      -- Phase 4 #15 validation: at the end of day 3 the driver writes the full
+      -- prognostic state, reads it back onto a *pristine* cold-start base, and
+      -- continues from the restored state. If restart I/O is lossless AND
+      -- complete, the 6-day daily trajectory equals a run with no restart,
+      -- bit-for-bit. Any prognostic field we forget to serialize reverts to its
+      -- cold-start value on read and makes days 4-6 diverge here.
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      if not hasData
+        then pendingWith "test/data not available"
+        else do
+          let baseCfg = defaultPipelineConfig
+                { pcDataDir = "test/data", pcNdays = 6, pcVerbose = False }
+          continuous <- runPipeline baseCfg
+          restarted  <- runPipeline baseCfg { pcRestartRoundtripDay = Just 3 }
+          length restarted `shouldBe` length continuous
+          let fields = ["T_GRND","FSA","EFLX_LH_TOT","EFLX_SH_TOT"
+                       ,"H2OSNO","SNOW_DEPTH","FRAC_SNO"]
+              mismatches =
+                [ "day " ++ show day ++ " " ++ f
+                  ++ ": continuous " ++ show a ++ " /= restarted " ++ show b
+                | (day, dc, dr) <- zip3 [1 :: Int ..] continuous restarted
+                , f <- fields
+                , let Just a = dailyDiagValue f dc
+                , let Just b = dailyDiagValue f dr
+                , a /= b
+                ]
+          mismatches `shouldBe` []
+
     it "Day 1 T_GRND matches Julia reference within 0.10K" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"
       if not hasData

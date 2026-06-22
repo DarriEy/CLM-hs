@@ -9,6 +9,8 @@ module CLM.Infrastructure.BinaryIO
   , readFloat64Scalar
   , readInt64Vector
   , readFloat64Matrix
+    -- * Writing
+  , writeFloat64Vector
     -- * JSON manifest
   , ManifestDims(..)
   , readManifestDims
@@ -17,7 +19,14 @@ module CLM.Infrastructure.BinaryIO
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Binary.Get (runGet, getDoublele, getInt64le)
+import Data.Binary.Put (runPut, putDoublele)
 import qualified Data.Vector.Unboxed as VU
+
+-- | Write an unboxed vector as raw little-endian Float64 values (no header),
+-- matching the format 'readFloat64Vector' expects. Round-trips exactly.
+writeFloat64Vector :: FilePath -> VU.Vector Double -> IO ()
+writeFloat64Vector fp v =
+  BL.writeFile fp $ runPut (mapM_ putDoublele (VU.toList v))
 
 -- ---------------------------------------------------------------------------
 -- Binary reading

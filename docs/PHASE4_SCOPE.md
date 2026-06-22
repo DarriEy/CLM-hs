@@ -37,7 +37,7 @@ to validate the aggregated output against. Both are absent.
 | 12 | Multi-landunit / multi-column driver loop | **L–XL** | **No** (100%-soil gridcell → identical output) |
 | 13 | Lake + urban actually run | M (lake) / M–L (urban) | No (need lake/urban weight + reference) |
 | 14 | Glacier surface mass balance (write `GlacierSurfaceMassBalanceMod`, not ported) | L | No |
-| 15 | **Restart I/O** (real state save/restore) | L | **Yes** (write→read→run identity; read a Fortran restart) |
+| 15 | **Restart I/O** — **DONE**: write→read→resume **bit-identical** (validated); Fortran-NetCDF read pending | L | **Yes** ✅ |
 | 16 | **NetCDF history** (multi-tape, subgrid-aggregated) | L | **Yes** (vs Fortran history) |
 | 17 | External streams (N-dep, LAI, crop calendar, urban-tv) | M | partial |
 | 18 | atm→lnd downscaling + lnd→atm coupling | M | partial |

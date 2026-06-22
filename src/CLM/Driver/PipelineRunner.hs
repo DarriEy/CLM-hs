@@ -11,6 +11,9 @@ module CLM.Driver.PipelineRunner
   , runPipeline
   , PipelineConfig(..)
   , defaultPipelineConfig
+    -- * Restart I/O (full prognostic state save/restore)
+  , writeRestartState
+  , readRestartState
     -- * Daily diagnostics
   , DailyDiag(..)
   , zeroDailyDiag
@@ -24,7 +27,7 @@ module CLM.Driver.PipelineRunner
 
 import qualified Data.Vector.Unboxed as VU
 import System.FilePath ((</>))
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, createDirectoryIfMissing)
 import Control.Monad (when)
 
 import CLM.Constants.PhysicalConstants
@@ -50,9 +53,12 @@ import CLM.Types.CanopyStateData (CanopyStateData(..))
 import CLM.Types.SoilStateData (SoilStateData(..))
 import CLM.Types.GridcellData (GridcellData(..))
 import CLM.Types.FrictionVelocityData (FrictionVelocityData(..))
+import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
+import CLM.Types.WaterStateBulkData (WaterStateBulkData(..))
 
 import CLM.Infrastructure.BinaryIO
   ( readFloat64Vector, readInt64Vector, readFloat64Scalar
+  , writeFloat64Vector
   , readManifestDims, ManifestDims(..) )
 import CLM.Infrastructure.ReadParams
   ( readParametersBinary, AllParams(..), PFTConstants(..) )
@@ -96,6 +102,12 @@ data PipelineConfig = PipelineConfig
   , pcVerbose     :: !Bool
   , pcOutputCSV   :: !FilePath
   , pcUseCN       :: !Bool       -- ^ Enable CN biogeochemistry
+  , pcRestartRoundtripDay :: !(Maybe Int)
+    -- ^ Test hook: at the end of this day, write the full prognostic state to
+    -- a restart directory and immediately read it back onto a /pristine/
+    -- cold-start base, then continue from the restored state. If restart I/O is
+    -- both lossless and complete, the daily output is bit-identical to a run
+    -- with 'Nothing'. The restart dir is @\<pcDataDir\>/restart-roundtrip@.
   } deriving (Show)
 
 defaultPipelineConfig :: PipelineConfig
@@ -106,6 +118,7 @@ defaultPipelineConfig = PipelineConfig
   , pcVerbose = True
   , pcOutputCSV = ""
   , pcUseCN = False
+  , pcRestartRoundtripDay = Nothing
   }
 
 -- ============================================================================
@@ -560,6 +573,447 @@ avgDiag dd =
 -- Main run loop
 -- ============================================================================
 
+-- ============================================================================
+-- Restart I/O — full prognostic-state save/restore (Phase 4, item #15)
+-- ============================================================================
+--
+-- The restart carries the /prognostic/ state — everything the timestep loop
+-- evolves and reads back on the next step. Static fields (geometry params,
+-- soil thermal/hydraulic properties, subgrid topology, parameters) are NOT
+-- serialized: they are re-derived from cold-start / surfdata on read and
+-- overlaid by 'readRestartState'. This mirrors the matched-state harness's
+-- inject-and-carry pattern and keeps the file small.
+--
+-- Layout: one raw little-endian Float64 @.bin@ file per variable under @dir@,
+-- the same on-disk format the cold-start loader already uses. Scalars are
+-- written as length-1 vectors. @snl@ (an Int) is stored as a Float64.
+--
+-- Completeness is validated empirically by the in-line round-trip test
+-- ('pcRestartRoundtripDay'): write at day K, read back onto a pristine base,
+-- and require bit-identical daily output thereafter. Any prognostic field that
+-- is missing here reverts to its cold-start value on read and makes that test
+-- diverge — so the test, not this list, is the oracle for completeness.
+--
+-- NOTE: CN /vectorized/ pools (per-layer soil-BGC C/N, per-patch veg C/N) are
+-- not yet serialized; the scalar CN pools are. The round-trip test therefore
+-- runs in the default (CN-off) pipeline, where the vectorized pools are static.
+-- Serializing them is the next increment, alongside reading a Fortran restart.
+
+-- | Snow-/state-carrying WaterDiagnosticBulk fields that persist across steps.
+-- Listed once so 'writeRestartState' and 'readRestartState' cannot drift apart.
+restartWdiagFields :: [(String, WaterDiagnosticBulkData -> VU.Vector Double)]
+restartWdiagFields =
+  [ ("wdiag_qg_snow_col",            wdiag_qg_snow_col)
+  , ("wdiag_qg_soil_col",            wdiag_qg_soil_col)
+  , ("wdiag_qg_h2osfc_col",          wdiag_qg_h2osfc_col)
+  , ("wdiag_qg_col",                 wdiag_qg_col)
+  , ("wdiag_dqgdT_col",              wdiag_dqgdT_col)
+  , ("wdiag_snow_depth_col",         wdiag_snow_depth_col)
+  , ("wdiag_snowdp_col",             wdiag_snowdp_col)
+  , ("wdiag_snow_5day_col",          wdiag_snow_5day_col)
+  , ("wdiag_snomelt_accum_col",      wdiag_snomelt_accum_col)
+  , ("wdiag_frac_sno_col",           wdiag_frac_sno_col)
+  , ("wdiag_frac_sno_eff_col",       wdiag_frac_sno_eff_col)
+  , ("wdiag_frac_h2osfc_col",        wdiag_frac_h2osfc_col)
+  , ("wdiag_frac_h2osfc_nosnow_col", wdiag_frac_h2osfc_nosnow_col)
+  , ("wdiag_snw_rds_col",            wdiag_snw_rds_col)
+  , ("wdiag_snw_rds_top_col",        wdiag_snw_rds_top_col)
+  , ("wdiag_snow_persist_col",       wdiag_snow_persist_col)
+  , ("wdiag_frac_iceold_col",        wdiag_frac_iceold_col)
+  , ("wdiag_swe_old_col",            wdiag_swe_old_col)
+  , ("wdiag_snowice_col",            wdiag_snowice_col)
+  , ("wdiag_snowliq_col",            wdiag_snowliq_col)
+  , ("wdiag_h2osno_top_col",         wdiag_h2osno_top_col)
+  , ("wdiag_sno_liq_top_col",        wdiag_sno_liq_top_col)
+  , ("wdiag_bw_col",                 wdiag_bw_col)
+  , ("wdiag_h2osno_total_col",       wdiag_h2osno_total_col)
+  , ("wdiag_fwet_patch",             wdiag_fwet_patch)
+  , ("wdiag_fcansno_patch",          wdiag_fcansno_patch)
+  , ("wdiag_fdry_patch",             wdiag_fdry_patch)
+  , ("wdiag_h2ocan_patch",           wdiag_h2ocan_patch)
+  , ("wdiag_qaf_lun",                wdiag_qaf_lun)
+  ]
+
+-- | CanopyState sun/shade fields. 'surfaceRadiation' recomputes these only in
+-- daylight (coszen > 0); through night steps they retain their last daytime
+-- values, so they genuinely carry across a restart and must be serialized.
+restartCanopyFields :: [(String, CanopyStateData -> VU.Vector Double)]
+restartCanopyFields =
+  [ ("cstate_laisun_patch", cstate_laisun_patch)
+  , ("cstate_laisha_patch", cstate_laisha_patch)
+  , ("cstate_fsun_patch",   cstate_fsun_patch)
+  , ("cstate_parsun_patch", cstate_parsun_patch)
+  , ("cstate_parsha_patch", cstate_parsha_patch)
+  , ("cstate_lmrsun_patch", cstate_lmrsun_patch)
+  , ("cstate_lmrsha_patch", cstate_lmrsha_patch)
+  , ("cstate_psnsun_patch", cstate_psnsun_patch)
+  , ("cstate_psnsha_patch", cstate_psnsha_patch)
+  ]
+
+restartCanopySetters :: [(String, VU.Vector Double -> CanopyStateData -> CanopyStateData)]
+restartCanopySetters =
+  [ ("cstate_laisun_patch", \v c -> c { cstate_laisun_patch = v })
+  , ("cstate_laisha_patch", \v c -> c { cstate_laisha_patch = v })
+  , ("cstate_fsun_patch",   \v c -> c { cstate_fsun_patch = v })
+  , ("cstate_parsun_patch", \v c -> c { cstate_parsun_patch = v })
+  , ("cstate_parsha_patch", \v c -> c { cstate_parsha_patch = v })
+  , ("cstate_lmrsun_patch", \v c -> c { cstate_lmrsun_patch = v })
+  , ("cstate_lmrsha_patch", \v c -> c { cstate_lmrsha_patch = v })
+  , ("cstate_psnsun_patch", \v c -> c { cstate_psnsun_patch = v })
+  , ("cstate_psnsha_patch", \v c -> c { cstate_psnsha_patch = v })
+  ]
+
+-- | FrictionVelocity fields that carry across steps: the canopy-air temperature
+-- 'fvel_taf_patch' is a prognostic reservoir (the CanopyFluxes iteration seed),
+-- and the friction velocity / aerodynamic resistances seed the Monin-Obukhov
+-- iteration so they perturb the (finite-iteration) flux solve if not restored.
+restartFrictionFields :: [(String, FrictionVelocityData -> VU.Vector Double)]
+restartFrictionFields =
+  [ ("fvel_taf_patch",   fvel_taf_patch)
+  , ("fvel_uaf_patch",   fvel_uaf_patch)
+  , ("fvel_um_patch",    fvel_um_patch)
+  , ("fvel_ustar_patch", fvel_ustar_patch)
+  , ("fvel_ram1_patch",  fvel_ram1_patch)
+  ]
+
+restartFrictionSetters :: [(String, VU.Vector Double -> FrictionVelocityData -> FrictionVelocityData)]
+restartFrictionSetters =
+  [ ("fvel_taf_patch",   \v r -> r { fvel_taf_patch = v })
+  , ("fvel_uaf_patch",   \v r -> r { fvel_uaf_patch = v })
+  , ("fvel_um_patch",    \v r -> r { fvel_um_patch = v })
+  , ("fvel_ustar_patch", \v r -> r { fvel_ustar_patch = v })
+  , ("fvel_ram1_patch",  \v r -> r { fvel_ram1_patch = v })
+  ]
+
+-- | SoilState fields persisted by the Fortran restart (SMP_L / HK_L) plus the
+-- ground-evaporation factor, which is read by the flux solve.
+restartSoilFields :: [(String, SoilStateData -> VU.Vector Double)]
+restartSoilFields =
+  [ ("sstate_smp_l_col",    sstate_smp_l_col)
+  , ("sstate_hk_l_col",     sstate_hk_l_col)
+  , ("sstate_soilbeta_col", sstate_soilbeta_col)
+  ]
+
+restartSoilSetters :: [(String, VU.Vector Double -> SoilStateData -> SoilStateData)]
+restartSoilSetters =
+  [ ("sstate_smp_l_col",    \v s -> s { sstate_smp_l_col = v })
+  , ("sstate_hk_l_col",     \v s -> s { sstate_hk_l_col = v })
+  , ("sstate_soilbeta_col", \v s -> s { sstate_soilbeta_col = v })
+  ]
+
+-- | EnergyFlux scalars that may seed the next step's surface-flux / canopy
+-- temperature iteration (ground heat flux, conductances, canopy longwave).
+restartEnergyScalars :: [(String, EnergyFluxData -> Double, Double -> EnergyFluxData -> EnergyFluxData)]
+restartEnergyScalars =
+  [ ("eflx_sh_tot_patch",   eflx_sh_tot_patch,   \x e -> e { eflx_sh_tot_patch = x })
+  , ("eflx_lh_tot_patch",   eflx_lh_tot_patch,   \x e -> e { eflx_lh_tot_patch = x })
+  , ("eflx_sh_grnd_patch",  eflx_sh_grnd_patch,  \x e -> e { eflx_sh_grnd_patch = x })
+  , ("eflx_soil_grnd_col",  eflx_soil_grnd_col,  \x e -> e { eflx_soil_grnd_col = x })
+  , ("cgrnds_patch",        cgrnds_patch,        \x e -> e { cgrnds_patch = x })
+  , ("cgrndl_patch",        cgrndl_patch,        \x e -> e { cgrndl_patch = x })
+  , ("cgrnd_patch",         cgrnd_patch,         \x e -> e { cgrnd_patch = x })
+  , ("dlrad_patch",         dlrad_patch,         \x e -> e { dlrad_patch = x })
+  , ("ulrad_patch",         ulrad_patch,         \x e -> e { ulrad_patch = x })
+  , ("eflx_lwrad_out_patch",eflx_lwrad_out_patch,\x e -> e { eflx_lwrad_out_patch = x })
+  , ("eflx_lwrad_net_patch",eflx_lwrad_net_patch,\x e -> e { eflx_lwrad_net_patch = x })
+  ]
+
+-- | The patch-vector counterparts (the pipeline is patch-vectorized).
+restartEnergyVecs :: [(String, EnergyFluxData -> VU.Vector Double, VU.Vector Double -> EnergyFluxData -> EnergyFluxData)]
+restartEnergyVecs =
+  [ ("eflx_sh_tot_patch_vec",   eflx_sh_tot_patch_vec,   \v e -> e { eflx_sh_tot_patch_vec = v })
+  , ("eflx_lh_tot_patch_vec",   eflx_lh_tot_patch_vec,   \v e -> e { eflx_lh_tot_patch_vec = v })
+  , ("eflx_sh_grnd_patch_vec",  eflx_sh_grnd_patch_vec,  \v e -> e { eflx_sh_grnd_patch_vec = v })
+  , ("cgrnds_patch_vec",        cgrnds_patch_vec,        \v e -> e { cgrnds_patch_vec = v })
+  , ("cgrndl_patch_vec",        cgrndl_patch_vec,        \v e -> e { cgrndl_patch_vec = v })
+  , ("cgrnd_patch_vec",         cgrnd_patch_vec,         \v e -> e { cgrnd_patch_vec = v })
+  , ("dlrad_patch_vec",         dlrad_patch_vec,         \v e -> e { dlrad_patch_vec = v })
+  , ("ulrad_patch_vec",         ulrad_patch_vec,         \v e -> e { ulrad_patch_vec = v })
+  , ("eflx_lwrad_out_patch_vec",eflx_lwrad_out_patch_vec,\v e -> e { eflx_lwrad_out_patch_vec = v })
+  , ("eflx_lwrad_net_patch_vec",eflx_lwrad_net_patch_vec,\v e -> e { eflx_lwrad_net_patch_vec = v })
+  ]
+
+-- | WaterFlux fields that differ at the restart boundary.
+restartWaterFluxScalars :: [(String, WaterFluxData -> Double, Double -> WaterFluxData -> WaterFluxData)]
+restartWaterFluxScalars =
+  [ ("qflx_evap_tot_patch", qflx_evap_tot_patch, \x w -> w { qflx_evap_tot_patch = x })
+  , ("qflx_evap_grnd_col",  qflx_evap_grnd_col,  \x w -> w { qflx_evap_grnd_col = x })
+  , ("qflx_snow_grnd_col",  qflx_snow_grnd_col,  \x w -> w { qflx_snow_grnd_col = x })
+  , ("qflx_surf_col",       qflx_surf_col,       \x w -> w { qflx_surf_col = x })
+  , ("qflx_drain_col",      qflx_drain_col,      \x w -> w { qflx_drain_col = x })
+  ]
+
+restartWaterFluxVecs :: [(String, WaterFluxData -> VU.Vector Double, VU.Vector Double -> WaterFluxData -> WaterFluxData)]
+restartWaterFluxVecs =
+  [ ("qflx_evap_tot_patch_vec",  qflx_evap_tot_patch_vec,  \v w -> w { qflx_evap_tot_patch_vec = v })
+  , ("qflx_evap_grnd_patch_vec", qflx_evap_grnd_patch_vec, \v w -> w { qflx_evap_grnd_patch_vec = v })
+  , ("qflx_tran_veg_patch_vec",  qflx_tran_veg_patch_vec,  \v w -> w { qflx_tran_veg_patch_vec = v })
+  ]
+
+-- | Scalar CN pools that persist across steps.
+restartCNScalars :: [(String, CLMState -> Double)]
+restartCNScalars =
+  [ ("clmLeafC", clmLeafC),       ("clmFrootC", clmFrootC)
+  , ("clmLiveStemC", clmLiveStemC), ("clmDeadStemC", clmDeadStemC)
+  , ("clmCPool", clmCPool),       ("clmSoilOrgC", clmSoilOrgC)
+  , ("clmLitterC", clmLitterC),   ("clmSMINN", clmSMINN)
+  , ("clmLeafN", clmLeafN),       ("clmFPG", clmFPG)
+  , ("clmPlantNUptake", clmPlantNUptake)
+  ]
+
+-- | Setters for the scalar CN pools, in the same order as 'restartCNScalars'.
+restartCNSetters :: [Double -> CLMState -> CLMState]
+restartCNSetters =
+  [ \x s -> s { clmLeafC = x },       \x s -> s { clmFrootC = x }
+  , \x s -> s { clmLiveStemC = x },   \x s -> s { clmDeadStemC = x }
+  , \x s -> s { clmCPool = x },       \x s -> s { clmSoilOrgC = x }
+  , \x s -> s { clmLitterC = x },     \x s -> s { clmSMINN = x }
+  , \x s -> s { clmLeafN = x },       \x s -> s { clmFPG = x }
+  , \x s -> s { clmPlantNUptake = x }
+  ]
+
+-- | Write the full prognostic CLM state to @dir@ as per-variable @.bin@ files.
+writeRestartState :: FilePath -> CLMState -> IO ()
+writeRestartState dir st = do
+  createDirectoryIfMissing True dir
+  let col = clmColumn st
+      tmp = clmTemp st
+      wat = clmWaterState st
+      wsb = clmWaterStateBulk st
+      wd  = clmWaterDiagBulk st
+      sh  = clmSoilHydro st
+      wv name v = writeFloat64Vector (dir </> name ++ ".bin") v
+      ws name x = writeFloat64Vector (dir </> name ++ ".bin") (VU.singleton x)
+  -- column geometry (evolves with snow accumulation/compaction)
+  wv "colZ" (colZ col); wv "colDz" (colDz col); wv "colZi" (colZi col)
+  -- temperatures
+  wv "t_soisno_col"     (t_soisno_col tmp)
+  wv "t_soisno_bef_col" (t_soisno_bef_col tmp)
+  ws "t_grnd_col"       (t_grnd_col tmp)
+  ws "t_h2osfc_col"     (t_h2osfc_col tmp)
+  ws "t_h2osfc_bef_col" (t_h2osfc_bef_col tmp)
+  ws "t_veg_patch"      (t_veg_patch tmp)
+  ws "t_ref2m_patch"    (t_ref2m_patch tmp)
+  wv "t_veg_patch_vec"  (t_veg_patch_vec tmp)
+  wv "t_ref2m_patch_vec"(t_ref2m_patch_vec tmp)
+  -- water state
+  wv "h2osoi_liq_col"   (h2osoi_liq_col wat)
+  wv "h2osoi_ice_col"   (h2osoi_ice_col wat)
+  wv "h2osoi_vol_col"   (h2osoi_vol_col wat)
+  ws "h2osno_col"       (h2osno_col wat)
+  ws "h2osfc_col"       (h2osfc_col wat)
+  ws "h2ocan_patch"     (h2ocan_patch wat)
+  ws "liqcan_patch"     (liqcan_patch wat)
+  ws "snocan_patch"     (snocan_patch wat)
+  wv "h2ocan_patch_vec" (h2ocan_patch_vec wat)
+  wv "liqcan_patch_vec" (liqcan_patch_vec wat)
+  wv "snocan_patch_vec" (snocan_patch_vec wat)
+  -- bulk water state that carries across steps (integrated snowfall drives the
+  -- snow-cover fraction; snow persistence feeds SNICAR albedo)
+  wv "wsbulk_int_snow_col"         (wsbulk_int_snow_col wsb)
+  wv "wsbulk_snow_persistence_col" (wsbulk_snow_persistence_col wsb)
+  -- snow layer count (Int as Float64)
+  ws "snl" (fromIntegral (clmSnl st))
+  -- water diagnostics that carry across steps
+  mapM_ (\(n, f) -> wv n (f wd)) restartWdiagFields
+  -- canopy sun/shade state (recomputed only in daylight)
+  mapM_ (\(n, f) -> wv n (f (clmCanopyState st))) restartCanopyFields
+  -- canopy-air reservoir + Monin-Obukhov iteration seeds
+  mapM_ (\(n, f) -> wv n (f (clmFrictionVel st))) restartFrictionFields
+  -- soil matric potential / conductivity / evap factor
+  mapM_ (\(n, f) -> wv n (f (clmSoilState st))) restartSoilFields
+  -- energy-flux seeds for the surface-flux / canopy iteration
+  mapM_ (\(n, f, _) -> ws n (f (clmEnergyFlux st))) restartEnergyScalars
+  mapM_ (\(n, f, _) -> wv n (f (clmEnergyFlux st))) restartEnergyVecs
+  -- water-flux fields at the restart boundary
+  mapM_ (\(n, f, _) -> ws n (f (clmWaterFlux st))) restartWaterFluxScalars
+  mapM_ (\(n, f, _) -> wv n (f (clmWaterFlux st))) restartWaterFluxVecs
+  -- soil hydrology / water table
+  wv "sh_zwt_col"         (sh_zwt_col sh)
+  wv "sh_zwts_col"        (sh_zwts_col sh)
+  wv "sh_zwt_perched_col" (sh_zwt_perched_col sh)
+  wv "sh_qcharge_col"     (sh_qcharge_col sh)
+  wv "sh_frost_table_col" (sh_frost_table_col sh)
+  wv "sh_icefrac_col"     (sh_icefrac_col sh)
+  -- scalar CN pools
+  mapM_ (\(n, f) -> ws n (f st)) restartCNScalars
+
+-- | Read a restart written by 'writeRestartState' and overlay it onto a
+-- /base/ state (typically a pristine cold-start init), returning the restored
+-- state. Any variable whose file is absent keeps the base value. The forcing
+-- reader is step-indexed and stateless, so resuming only requires running the
+-- driver from the matching step number with this restored state.
+readRestartState :: CLMState -> FilePath -> IO CLMState
+readRestartState base dir = do
+  let rv name = do
+        let f = dir </> name ++ ".bin"
+        ex <- doesFileExist f
+        if ex then Just <$> readFloat64Vector f else return Nothing
+      rs name = do
+        let f = dir </> name ++ ".bin"
+        ex <- doesFileExist f
+        if ex then Just <$> readFloat64Scalar f else return Nothing
+  -- column
+  cZ  <- rv "colZ"; cDz <- rv "colDz"; cZi <- rv "colZi"
+  let col' = (clmColumn base)
+        { colZ  = maybe (colZ  (clmColumn base)) id cZ
+        , colDz = maybe (colDz (clmColumn base)) id cDz
+        , colZi = maybe (colZi (clmColumn base)) id cZi }
+  -- temperatures
+  tSoi <- rv "t_soisno_col"; tSoiB <- rv "t_soisno_bef_col"
+  tGr <- rs "t_grnd_col"; tHs <- rs "t_h2osfc_col"; tHsB <- rs "t_h2osfc_bef_col"
+  tVeg <- rs "t_veg_patch"; tRef <- rs "t_ref2m_patch"
+  tVegV <- rv "t_veg_patch_vec"; tRefV <- rv "t_ref2m_patch_vec"
+  let bt = clmTemp base
+      tmp' = bt
+        { t_soisno_col      = maybe (t_soisno_col bt) id tSoi
+        , t_soisno_bef_col  = maybe (t_soisno_bef_col bt) id tSoiB
+        , t_grnd_col        = maybe (t_grnd_col bt) id tGr
+        , t_h2osfc_col      = maybe (t_h2osfc_col bt) id tHs
+        , t_h2osfc_bef_col  = maybe (t_h2osfc_bef_col bt) id tHsB
+        , t_veg_patch       = maybe (t_veg_patch bt) id tVeg
+        , t_ref2m_patch     = maybe (t_ref2m_patch bt) id tRef
+        , t_veg_patch_vec   = maybe (t_veg_patch_vec bt) id tVegV
+        , t_ref2m_patch_vec = maybe (t_ref2m_patch_vec bt) id tRefV }
+  -- water state
+  wLiq <- rv "h2osoi_liq_col"; wIce <- rv "h2osoi_ice_col"; wVol <- rv "h2osoi_vol_col"
+  wSno <- rs "h2osno_col"; wSfc <- rs "h2osfc_col"
+  hcan <- rs "h2ocan_patch"; lcan <- rs "liqcan_patch"; scan <- rs "snocan_patch"
+  hcanV <- rv "h2ocan_patch_vec"; lcanV <- rv "liqcan_patch_vec"; scanV <- rv "snocan_patch_vec"
+  let bw = clmWaterState base
+      wat' = bw
+        { h2osoi_liq_col   = maybe (h2osoi_liq_col bw) id wLiq
+        , h2osoi_ice_col   = maybe (h2osoi_ice_col bw) id wIce
+        , h2osoi_vol_col   = maybe (h2osoi_vol_col bw) id wVol
+        , h2osno_col       = maybe (h2osno_col bw) id wSno
+        , h2osfc_col       = maybe (h2osfc_col bw) id wSfc
+        , h2ocan_patch     = maybe (h2ocan_patch bw) id hcan
+        , liqcan_patch     = maybe (liqcan_patch bw) id lcan
+        , snocan_patch     = maybe (snocan_patch bw) id scan
+        , h2ocan_patch_vec = maybe (h2ocan_patch_vec bw) id hcanV
+        , liqcan_patch_vec = maybe (liqcan_patch_vec bw) id lcanV
+        , snocan_patch_vec = maybe (snocan_patch_vec bw) id scanV }
+  -- bulk water state
+  intSnow <- rv "wsbulk_int_snow_col"; snowPers <- rv "wsbulk_snow_persistence_col"
+  let bwsb = clmWaterStateBulk base
+      wsb' = bwsb
+        { wsbulk_int_snow_col         = maybe (wsbulk_int_snow_col bwsb) id intSnow
+        , wsbulk_snow_persistence_col = maybe (wsbulk_snow_persistence_col bwsb) id snowPers }
+  -- snl
+  snlR <- rs "snl"
+  let snl' = maybe (clmSnl base) round snlR
+  -- water diagnostics: overlay the carry-over fields onto the base record
+  let bwd = clmWaterDiagBulk base
+  wd' <- overlayWdiag dir bwd
+  -- canopy sun/shade state
+  cs' <- overlayNamed dir restartCanopySetters (clmCanopyState base)
+  -- canopy-air reservoir + iteration seeds
+  fv' <- overlayNamed dir restartFrictionSetters (clmFrictionVel base)
+  -- soil matric potential / conductivity / evap factor
+  ss' <- overlayNamed dir restartSoilSetters (clmSoilState base)
+  -- energy-flux seeds (vectors then scalars)
+  ef1 <- overlayNamed   dir [(n, set) | (n, _, set) <- restartEnergyVecs]    (clmEnergyFlux base)
+  ef' <- overlayScalars dir [(n, set) | (n, _, set) <- restartEnergyScalars] ef1
+  -- water-flux fields
+  wf1 <- overlayNamed   dir [(n, set) | (n, _, set) <- restartWaterFluxVecs]    (clmWaterFlux base)
+  wf' <- overlayScalars dir [(n, set) | (n, _, set) <- restartWaterFluxScalars] wf1
+  -- soil hydrology
+  zwt <- rv "sh_zwt_col"; zwts <- rv "sh_zwts_col"; zwtp <- rv "sh_zwt_perched_col"
+  qch <- rv "sh_qcharge_col"; frost <- rv "sh_frost_table_col"; icef <- rv "sh_icefrac_col"
+  let bsh = clmSoilHydro base
+      sh' = bsh
+        { sh_zwt_col         = maybe (sh_zwt_col bsh) id zwt
+        , sh_zwts_col        = maybe (sh_zwts_col bsh) id zwts
+        , sh_zwt_perched_col = maybe (sh_zwt_perched_col bsh) id zwtp
+        , sh_qcharge_col     = maybe (sh_qcharge_col bsh) id qch
+        , sh_frost_table_col = maybe (sh_frost_table_col bsh) id frost
+        , sh_icefrac_col     = maybe (sh_icefrac_col bsh) id icef }
+  -- scalar CN pools: read each (Nothing → keep base) and apply its setter
+  cnVals <- mapM (\(n, _) -> rs n) restartCNScalars
+  let cnApply s =
+        foldl (\acc (mv, setter) -> maybe acc (`setter` acc) mv)
+              s (zip cnVals restartCNSetters)
+  return $ cnApply base
+    { clmColumn         = col'
+    , clmTemp           = tmp'
+    , clmWaterState     = wat'
+    , clmWaterStateBulk = wsb'
+    , clmWaterDiagBulk  = wd'
+    , clmCanopyState    = cs'
+    , clmFrictionVel    = fv'
+    , clmSoilState      = ss'
+    , clmEnergyFlux     = ef'
+    , clmWaterFlux      = wf'
+    , clmSoilHydro      = sh'
+    , clmSnl            = snl'
+    }
+
+-- | Overlay every named vector field present on disk onto a base record, via
+-- its (name, setter) table. A field whose file is absent keeps the base value.
+-- Setters are explicit so a missing field is a compile error, not a silent drop.
+overlayNamed :: FilePath
+             -> [(String, VU.Vector Double -> r -> r)]
+             -> r -> IO r
+overlayNamed dir setters = go setters
+  where
+    go [] rec = return rec
+    go ((name, setter) : rest) rec = do
+      let f = dir </> name ++ ".bin"
+      ex <- doesFileExist f
+      rec' <- if ex then (\v -> setter v rec) <$> readFloat64Vector f else return rec
+      go rest rec'
+
+-- | Like 'overlayNamed' but for scalar (length-1) files.
+overlayScalars :: FilePath
+               -> [(String, Double -> r -> r)]
+               -> r -> IO r
+overlayScalars dir setters = go setters
+  where
+    go [] rec = return rec
+    go ((name, setter) : rest) rec = do
+      let f = dir </> name ++ ".bin"
+      ex <- doesFileExist f
+      rec' <- if ex then (\x -> setter x rec) <$> readFloat64Scalar f else return rec
+      go rest rec'
+
+-- | Overlay the carry-over WaterDiagnosticBulk fields onto the base record.
+overlayWdiag :: FilePath -> WaterDiagnosticBulkData -> IO WaterDiagnosticBulkData
+overlayWdiag dir = overlayNamed dir restartWdiagSetters
+
+-- | Setters paired with the same names as 'restartWdiagFields'.
+restartWdiagSetters :: [(String, VU.Vector Double -> WaterDiagnosticBulkData -> WaterDiagnosticBulkData)]
+restartWdiagSetters =
+  [ ("wdiag_qg_snow_col",            \v wd -> wd { wdiag_qg_snow_col = v })
+  , ("wdiag_qg_soil_col",            \v wd -> wd { wdiag_qg_soil_col = v })
+  , ("wdiag_qg_h2osfc_col",          \v wd -> wd { wdiag_qg_h2osfc_col = v })
+  , ("wdiag_qg_col",                 \v wd -> wd { wdiag_qg_col = v })
+  , ("wdiag_dqgdT_col",              \v wd -> wd { wdiag_dqgdT_col = v })
+  , ("wdiag_snow_depth_col",         \v wd -> wd { wdiag_snow_depth_col = v })
+  , ("wdiag_snowdp_col",             \v wd -> wd { wdiag_snowdp_col = v })
+  , ("wdiag_snow_5day_col",          \v wd -> wd { wdiag_snow_5day_col = v })
+  , ("wdiag_snomelt_accum_col",      \v wd -> wd { wdiag_snomelt_accum_col = v })
+  , ("wdiag_frac_sno_col",           \v wd -> wd { wdiag_frac_sno_col = v })
+  , ("wdiag_frac_sno_eff_col",       \v wd -> wd { wdiag_frac_sno_eff_col = v })
+  , ("wdiag_frac_h2osfc_col",        \v wd -> wd { wdiag_frac_h2osfc_col = v })
+  , ("wdiag_frac_h2osfc_nosnow_col", \v wd -> wd { wdiag_frac_h2osfc_nosnow_col = v })
+  , ("wdiag_snw_rds_col",            \v wd -> wd { wdiag_snw_rds_col = v })
+  , ("wdiag_snw_rds_top_col",        \v wd -> wd { wdiag_snw_rds_top_col = v })
+  , ("wdiag_snow_persist_col",       \v wd -> wd { wdiag_snow_persist_col = v })
+  , ("wdiag_frac_iceold_col",        \v wd -> wd { wdiag_frac_iceold_col = v })
+  , ("wdiag_swe_old_col",            \v wd -> wd { wdiag_swe_old_col = v })
+  , ("wdiag_snowice_col",            \v wd -> wd { wdiag_snowice_col = v })
+  , ("wdiag_snowliq_col",            \v wd -> wd { wdiag_snowliq_col = v })
+  , ("wdiag_h2osno_top_col",         \v wd -> wd { wdiag_h2osno_top_col = v })
+  , ("wdiag_sno_liq_top_col",        \v wd -> wd { wdiag_sno_liq_top_col = v })
+  , ("wdiag_bw_col",                 \v wd -> wd { wdiag_bw_col = v })
+  , ("wdiag_h2osno_total_col",       \v wd -> wd { wdiag_h2osno_total_col = v })
+  , ("wdiag_fwet_patch",             \v wd -> wd { wdiag_fwet_patch = v })
+  , ("wdiag_fcansno_patch",          \v wd -> wd { wdiag_fcansno_patch = v })
+  , ("wdiag_fdry_patch",             \v wd -> wd { wdiag_fdry_patch = v })
+  , ("wdiag_h2ocan_patch",           \v wd -> wd { wdiag_h2ocan_patch = v })
+  , ("wdiag_qaf_lun",                \v wd -> wd { wdiag_qaf_lun = v })
+  ]
+
 runPipeline :: PipelineConfig -> IO [DailyDiag]
 runPipeline cfg = do
   let dir = pcDataDir cfg
@@ -597,9 +1051,9 @@ runPipeline cfg = do
   let drvCfg = defaultDriverConfig
       pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
-  go st0 defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
+  go st0 st0 defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
-    go !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime !pl
+    go !base !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime !pl
       | step > total = return (reverse results)
       | otherwise = do
           let ctx = buildTimestepContext fr step dtime
@@ -629,9 +1083,17 @@ runPipeline cfg = do
                           ++ ", HR=" ++ showF (dd_hr avg * 86400.0) ++ " gC/m2/d"
                           ++ ", LeafC=" ++ showF (dd_leafc avg) ++ " gC/m2"
                           ++ ", SoilC=" ++ showF (dd_soilorgc avg) ++ " gC/m2"
-              go st' drvSt' fr (step + 1) zeroDailyDiag (avg : results) total spd drvCfg dtime pl
+              -- Restart round-trip test hook: write the full prognostic state,
+              -- read it back onto the pristine base, and continue from it.
+              st'' <- case pcRestartRoundtripDay cfg of
+                        Just k | k == dayNum -> do
+                          let rdir = pcDataDir cfg </> "restart-roundtrip"
+                          writeRestartState rdir st'
+                          readRestartState base rdir
+                        _ -> return st'
+              go base st'' drvSt' fr (step + 1) zeroDailyDiag (avg : results) total spd drvCfg dtime pl
             else
-              go st' drvSt' fr (step + 1) dayAcc' results total spd drvCfg dtime pl
+              go base st' drvSt' fr (step + 1) dayAcc' results total spd drvCfg dtime pl
 
 -- ============================================================================
 -- CSV output (matching Julia daily_avg format)
