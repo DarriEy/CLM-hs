@@ -24,9 +24,29 @@ module CLM.BioGeoChem.NDynamics
   , NSoyfixInput(..)
   , NSoyfixOutput(..)
   , nSoyfix
+    -- * Plant N uptake vertical profile
+  , nitrogenUptakeProfile
   ) where
 
 import qualified Data.Vector.Unboxed as VU
+
+-- | Vertical profile [1/m] for distributing the column plant N uptake across
+-- soil layers, weighting by available mineral N. Integrates to 1 over depth
+-- (sum_j prof(j)*dzsoi(j) = 1), so multiplying a column uptake flux [gN/m2/s] by
+-- prof(j) gives the per-layer uptake [gN/m3/s] that conserves the column total.
+-- Falls back to the fixation profile where there is no mineral N.
+-- Ported from SoilBiogeochemNitrogenUptakeMod.F90 (SoilBiogeochemNitrogenUptake).
+nitrogenUptakeProfile
+  :: Int               -- ^ nlevdecomp
+  -> VU.Vector Double  -- ^ sminn_vr (per layer) [gN/m3]
+  -> VU.Vector Double  -- ^ dzsoi (per layer) [m]
+  -> VU.Vector Double  -- ^ nfixation_prof (fallback profile) [1/m]
+  -> VU.Vector Double
+nitrogenUptakeProfile nlev sminnVr dzsoi nfixProf =
+  let at v j = if j >= 0 && j < VU.length v then v VU.! j else 0.0
+      sminnTot = sum [ at sminnVr j * at dzsoi j | j <- [0 .. nlev - 1] ]
+  in VU.generate nlev $ \j ->
+       if sminnTot > 0.0 then at sminnVr j / sminnTot else at nfixProf j
 
 -- | Seconds per day.
 secspday :: Double

@@ -235,6 +235,7 @@ data CLMState = CLMState
   , clmSMINN       :: !Double           -- ^ Soil mineral nitrogen (gN/m2)
   , clmLeafN       :: !Double           -- ^ Leaf nitrogen pool (gN/m2)
   , clmFPG         :: !Double           -- ^ Fraction of potential growth [0,1]
+  , clmPlantNUptake :: !Double          -- ^ Column plant N uptake from sminn (gN/m2/s)
     -- Vectorized CN/BGC state (CN parity foundation). These hold the full
     -- per-patch vegetation and per-layer soil/litter decomposition pools.
     -- The scalar CN fields above are retained for backwards compatibility; the
@@ -307,6 +308,7 @@ defaultCLMState = CLMState
   , clmSMINN        = 0.0
   , clmLeafN        = 0.0
   , clmFPG          = 1.0
+  , clmPlantNUptake = 0.0
   , clmCNVegCState   = defaultCNVegCarbonStateData
   , clmCNVegNState   = defaultCNVegNitrogenStateData
   , clmCNVegState    = defaultCNVegStateData

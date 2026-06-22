@@ -98,7 +98,8 @@ import CLM.BioGeoChem.NDynamics
   ( NDepositionInput(..), nDeposition
   , FreeLivingFixInput(..), nFreeLivingFixation
   , NFixationInput(..), nFixation
-  , NDynamicsParams(..), defaultNDynamicsParams )
+  , NDynamicsParams(..), defaultNDynamicsParams
+  , nitrogenUptakeProfile )
 import qualified CLM.BioGeoChem.MaintResp as MR
 import qualified CLM.BioGeoChem.GrowthResp as GResp
 import qualified CLM.BioGeoChem.GapMortality as GapM
@@ -3684,6 +3685,7 @@ scalarVegPath dt st0 =
           , clmHR = hr
           , clmNEE = nee
           , clmFPG = fpg
+          , clmPlantNUptake = NComp.nco_actual_plant_nuptake nCompOut
           }
 
 -- | Per-patch allocation overlay (the xsmrpool lever).
@@ -4488,7 +4490,18 @@ runVectorizedNCycle dt st =
       !cpoolsPM' = levelMajorToPoolMajor nlev npools cpoolsLM'
       !npoolsPM' = VU.generate (npools * nlev) $ \idx ->
         let pool = idx `div` nlev in (cpoolsPM' VU.! idx) / (cnDecompPoolCN !! pool)
-      !sminnVr' = VU.generate nlev $ \j -> max 0.0 (atV sminnVr j + atV netNminVr j * dt)
+      -- sminn advanced by net mineralization, then DEBITED by per-layer plant N
+      -- uptake (SoilBiogeochemNitrogenUptakeMod): the column plant uptake flux
+      -- (clmPlantNUptake, from the competition) is distributed vertically by the
+      -- available-N profile and removed from each layer, conserving the column
+      -- total. Previously sminn_vr only gained mineralization (no plant sink).
+      !sminnVrMin = VU.generate nlev $ \j -> max 0.0 (atV sminnVr j + atV netNminVr j * dt)
+      !nfixProf = let totDz = max 1.0e-6 (sum [ atV dzsoi j | j <- [0 .. nlev-1] ])
+                  in VU.replicate nlev (1.0 / totDz)  -- uniform fallback (∫=1)
+      !nupProf  = nitrogenUptakeProfile nlev sminnVrMin dzsoi nfixProf
+      !plantNup = max 0.0 (clmPlantNUptake st)
+      !sminnVr' = VU.generate nlev $ \j ->
+                    max 0.0 (atV sminnVrMin j - plantNup * (nupProf VU.! j) * dt)
       -- Derived scalar diagnostics (areal gC/m2): soil pools 3..5, litter 0..2.
       !soilCAreal = sum [ (cpoolsLM' VU.! (j*npools+pool)) * atV dzsoi j
                         | j <- [0 .. nlev-1], pool <- [3,4,5] ]
