@@ -219,7 +219,13 @@ import CLM.BioGeoPhys.Photosynthesis
 import CLM.BioGeoPhys.UrbanFluxes
   ( UrbanFluxesParams(..), defaultUrbanFluxesParams
   , UrbanFluxesInput(..), UrbanFluxesResult(..)
-  , urbanFluxesSinglePatch )
+  , urbanFluxesSinglePatch
+  , CanyonEnergyInput(..), CanyonEnergyOutput(..), solveCanyonEnergyBalance
+  , urbanHacOn )
+import CLM.BioGeoPhys.UrbanRadiation
+  ( NetLongwaveInput(..), NetLongwaveResult(..)
+  , UrbanViewFactors(..), netLongwave )
+import CLM.Constants.LandunitConstants (isturb_min, isturb_max)
 
 import CLM.Types.ColumnData (ColumnData(..))
 import CLM.Types.TemperatureData (TemperatureData(..))
@@ -3443,18 +3449,146 @@ cnPhenologyAdvance ctx st =
 -- Urban Fluxes adapter (skip for non-urban columns)
 -- ============================================================================
 
+-- | Urban turbulent + radiative fluxes for an urban landunit column.
+--
+-- Gated on the urban landunit types (Fortran @isturb_tbd=7@, @isturb_hd=8@,
+-- @isturb_md=9@); non-urban columns pass through unchanged. (The previous stub
+-- mistakenly tested @it /= 6@, which is WETLAND, and then did nothing — both
+-- bugs are fixed here.)
+--
+-- This wires the ported, previously-unused urban modules:
+--
+--   * 'solveCanyonEnergyBalance' (UrbanFluxesMod) — canyon air temperature,
+--     per-facet sensible heat (roof/road/sun-/shade-wall), net canyon longwave,
+--     and HVAC waste heat.
+--   * 'netLongwave' (UrbanRadiationMod) — multiple-reflection longwave in the
+--     canyon, giving upward and net longwave for the landunit.
+--
+-- IMPORTANT — SANITY ONLY, NO FORTRAN PARITY:
+-- The port is single-column / single-landunit / cold-start and there is NO
+-- urban surface dataset and NO urban Fortran reference run available. CLM
+-- proper splits an urban landunit into five columns (roof, sun/shade wall,
+-- pervious/impervious road) each with its own temperature profile; here we only
+-- have one ground temperature ('t_grnd_col') and one soil/snow profile. We
+-- therefore use 't_grnd_col' as a common surface-temperature proxy for the
+-- canyon facets and read geometry/emissivity/view-factors from the landunit
+-- (falling back to physically reasonable urban defaults when the surface
+-- dataset has not populated them). The outputs are validated ONLY for physical
+-- sanity / stability / conservation (finite, bounded temperatures; sensible
+-- flux/longwave signs consistent with the surface-vs-air gradient), NOT against
+-- any Fortran reference.
 urbanFluxesStep :: PhysicsStep
 urbanFluxesStep _cfg ctx st =
-  let col = clmColumn st
-      lun = clmLandunit st
-      it = if VU.null (lun_itype lun) then 1 else lun_itype lun VU.! 0
-  in if it /= 6 -- urban
+  let lun = clmLandunit st
+      it  = if VU.null (lun_itype lun) then 1 else lun_itype lun VU.! 0
+  in if it < isturb_min || it > isturb_max  -- urban landunits are 7/8/9
      then st
      else
-       -- Urban fluxes wiring (Phase 2):
-       -- Calls urbanFluxesSinglePatch with forcing and urban parameters.
-       -- For now, return state as-is but with the logic structure in place.
-       st
+       let temp = clmTemp st
+           ef   = clmEnergyFlux st
+
+           -- Forcing (fall back to mild values when the context is empty, as in
+           -- lakeFluxesStep).
+           forc_t     = if VU.null (tcForcT ctx)     then 280.0    else tcForcT ctx     VU.! 0
+           forc_th    = if VU.null (tcForcTh ctx)    then forc_t   else tcForcTh ctx    VU.! 0
+           forc_q     = if VU.null (tcForcQ ctx)     then 0.005    else tcForcQ ctx     VU.! 0
+           forc_pbot  = if VU.null (tcForcPbot ctx)  then 101325.0 else tcForcPbot ctx  VU.! 0
+           forc_rho   = if VU.null (tcForcRho ctx)   then 1.2      else tcForcRho ctx   VU.! 0
+           forc_lwrad = if VU.null (tcForcLwrad ctx) then 300.0    else tcForcLwrad ctx VU.! 0
+           forc_wind  = if VU.null (tcForcWind ctx)  then 3.0      else tcForcWind ctx  VU.! 0
+
+           -- Urban geometry / radiative params from the landunit, with safe
+           -- urban defaults where the surface dataset is unpopulated.
+           lunVal v dflt = if VU.null v then dflt else v VU.! 0
+           canyon_hwr  = max 0.05 (lunVal (lun_canyon_hwr lun)  1.0)
+           wtroad_perv = min 1.0 (max 0.0 (lunVal (lun_wtroad_perv lun) 0.2))
+
+           -- Facet surface temperatures. Single-column port: use the ground
+           -- temperature as the common surface-temperature proxy for all canyon
+           -- facets and the roof (see step header). Interior building temp is
+           -- nudged toward a comfortable set point.
+           tSurf      = t_grnd_col temp
+           t_building = 292.0  -- ~19 C interior set point (proxy)
+
+           -- Default urban emissivities (CLM urban param typical values).
+           em_roof = 0.90
+           em_wall = 0.90
+           em_road = 0.95
+
+           -- Canyon view factors (geometric, depend only on H/W ratio).
+           -- vf_sr: sky->road; vf_sw: sky->one wall; remainder distributed.
+           vfSr = sqrt (canyon_hwr*canyon_hwr + 1.0) - canyon_hwr
+           vfSw = 0.5 * (canyon_hwr + 1.0 - sqrt (canyon_hwr*canyon_hwr + 1.0)) / canyon_hwr
+           vfWr = 1.0 - vfSr            -- road sees (1 - sky) split over walls
+           vfRw = 0.5 * (1.0 - vfSw)    -- one wall sees road
+           vfWw = 1.0 - vfSw - vfRw     -- one wall sees opposing wall
+           vf = UrbanViewFactors
+             { vf_sr = vfSr, vf_wr = vfWr, vf_sw = vfSw
+             , vf_rw = vfRw, vf_ww = vfWw }
+
+           -- Canyon energy balance (turbulent fluxes + canyon air temp).
+           ceIn = CanyonEnergyInput
+             { cei_forc_t      = forc_t
+             , cei_forc_q      = forc_q
+             , cei_forc_rho    = forc_rho
+             , cei_forc_u      = forc_wind
+             , cei_forc_lwrad  = forc_lwrad
+             , cei_t_roof      = tSurf
+             , cei_t_sunwall   = tSurf
+             , cei_t_shadewall = tSurf
+             , cei_t_road      = tSurf
+             , cei_canyon_hwr  = canyon_hwr
+             , cei_wtroad      = 1.0 - wtroad_perv
+             , cei_em_roof     = em_roof
+             , cei_em_wall     = em_wall
+             , cei_em_road     = em_road
+             , cei_hac_method  = urbanHacOn
+             , cei_t_building  = t_building
+             }
+           ceOut = solveCanyonEnergyBalance ceIn
+
+           -- Net / upward longwave with canyon multiple reflections.
+           nlIn = NetLongwaveInput
+             { nli_canyon_hwr  = canyon_hwr
+             , nli_wtroad_perv = wtroad_perv
+             , nli_lwdown      = forc_lwrad
+             , nli_em_roof     = em_roof
+             , nli_em_improad  = em_road
+             , nli_em_perroad  = em_road
+             , nli_em_wall     = em_wall
+             , nli_t_roof      = tSurf
+             , nli_t_improad   = tSurf
+             , nli_t_perroad   = tSurf
+             , nli_t_sunwall   = tSurf
+             , nli_t_shadewall = tSurf
+             , nli_vf          = vf
+             }
+           nlOut = netLongwave nlIn
+
+           -- Total canyon sensible heat (W/m2): roof + road + two walls.
+           eflx_sh_tot = ceo_eflx_sh_roof ceOut
+                       + ceo_eflx_sh_road ceOut
+                       + ceo_eflx_sh_sunwall ceOut
+                       + ceo_eflx_sh_shadewall ceOut
+
+           -- Ground heat flux (into surface) = absorbed solar - SH - net LW
+           -- + waste heat. Closes the surface energy budget for the column.
+           eflx_soil_grnd = sabg_patch ef
+                          - eflx_sh_tot
+                          - nlr_lwnet_canyon nlOut
+                          + ceo_eflx_wasteheat ceOut
+
+           ef' = ef
+             { eflx_sh_tot_patch    = eflx_sh_tot
+             , eflx_sh_grnd_patch   = eflx_sh_tot
+             , eflx_soil_grnd_col   = eflx_soil_grnd
+             , eflx_lwrad_out_patch = nlr_lwup_canyon nlOut
+             , eflx_lwrad_net_patch = nlr_lwnet_canyon nlOut
+             }
+
+           temp' = temp { t_ref2m_patch = ceo_taf ceOut }
+
+       in st { clmEnergyFlux = ef', clmTemp = temp' }
 
 -- ============================================================================
 -- Lake Temperature adapter

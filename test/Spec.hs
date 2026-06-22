@@ -16,8 +16,8 @@ import CLM.Driver.CLMDriver
   , defaultTimestepContext, clmDrvPatch2Col )
 import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
-  , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep )
-import CLM.Types.LandunitData (LandunitData(..))
+  , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep )
+import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
@@ -658,6 +658,106 @@ main = hspec $ do
             }
           st' = snowWaterStep defaultDriverConfig (snowCtx 2.0e-3) st0
       abs (h2osno_col (clmWaterState st') - 1.8) `shouldSatisfy` (< 1.0e-12)
+
+  -- =====================================================================
+  -- Urban fluxes adapter
+  --
+  -- HONESTY NOTE: there is NO urban surface dataset and NO urban Fortran
+  -- reference run available, so these tests CANNOT and DO NOT assert any
+  -- Fortran parity. They validate only physical SANITY / STABILITY /
+  -- CONSERVATION: finiteness, bounded temperatures, and sensible flux/longwave
+  -- signs consistent with the surface-vs-air temperature gradient. The
+  -- single-column port also uses t_grnd as a proxy for all canyon facets (see
+  -- urbanFluxesStep doc comment), so absolute magnitudes are not meaningful.
+  -- =====================================================================
+  describe "Urban fluxes" $ do
+    let urbanCtx tAir = defaultTimestepContext
+          { tcDtime     = 1800.0
+          , tcForcT     = VU.singleton tAir
+          , tcForcTh    = VU.singleton tAir
+          , tcForcQ     = VU.singleton 0.006
+          , tcForcPbot  = VU.singleton 101325.0
+          , tcForcRho   = VU.singleton 1.2
+          , tcForcLwrad = VU.singleton 320.0
+          , tcForcWind  = VU.singleton 4.0
+          }
+        -- Urban column: landunit type `it`, ground temp tGrnd, absorbed solar sabg.
+        urbanState it tGrnd sabg = defaultCLMState
+          { clmLandunit = defaultLandunitData
+              { lun_itype       = VU.singleton it
+              , lun_canyon_hwr  = VU.singleton 1.0
+              , lun_wtroad_perv = VU.singleton 0.2
+              , lun_ht_roof     = VU.singleton 15.0
+              }
+          , clmTemp = defaultTemperatureData
+              { t_grnd_col = tGrnd }
+          , clmEnergyFlux = defaultEnergyFluxData
+              { sabg_patch = sabg }
+          }
+        finite x = not (isNaN x) && not (isInfinite x)
+
+    it "passes a non-urban (soil) column through unchanged" $ do
+      let st0 = urbanState 1 290.0 200.0   -- istsoil = 1
+          st' = urbanFluxesStep defaultDriverConfig (urbanCtx 285.0) st0
+      -- Soil columns must be inert under the urban step.
+      eflx_sh_tot_patch  (clmEnergyFlux st') `shouldBe` eflx_sh_tot_patch  (clmEnergyFlux st0)
+      eflx_soil_grnd_col (clmEnergyFlux st') `shouldBe` eflx_soil_grnd_col (clmEnergyFlux st0)
+      t_ref2m_patch (clmTemp st')            `shouldBe` t_ref2m_patch (clmTemp st0)
+
+    it "passes a wetland column (type 6) through unchanged" $ do
+      -- The old stub used `it /= 6`, treating WETLAND as urban. Guard against
+      -- that regression: type 6 must be inert.
+      let st0 = urbanState 6 290.0 200.0
+          st' = urbanFluxesStep defaultDriverConfig (urbanCtx 285.0) st0
+      eflx_sh_tot_patch (clmEnergyFlux st') `shouldBe` eflx_sh_tot_patch (clmEnergyFlux st0)
+
+    it "runs on each urban landunit type (7/8/9) producing finite, bounded output" $ do
+      let check it = do
+            let st' = urbanFluxesStep defaultDriverConfig (urbanCtx 285.0)
+                        (urbanState it 295.0 250.0)
+                ef   = clmEnergyFlux st'
+                taf  = t_ref2m_patch (clmTemp st')
+            -- Finiteness / conservation: all derived fluxes must be finite.
+            finite (eflx_sh_tot_patch ef)    `shouldBe` True
+            finite (eflx_soil_grnd_col ef)   `shouldBe` True
+            finite (eflx_lwrad_out_patch ef) `shouldBe` True
+            finite (eflx_lwrad_net_patch ef) `shouldBe` True
+            finite taf                       `shouldBe` True
+            -- Canyon air temperature must be bounded between the forcing and the
+            -- surface temperature (it is a conductance-weighted blend of them).
+            taf `shouldSatisfy` (\t -> t >= 284.0 && t <= 296.0)
+            -- Upward longwave from a ~295 K canyon must be physical (positive,
+            -- below blackbody at that temperature ~ 430 W/m2).
+            eflx_lwrad_out_patch ef `shouldSatisfy` (\l -> l > 0.0 && l < 500.0)
+      check 7
+      check 8
+      check 9
+
+    it "sensible heat flux sign follows the surface-air temperature gradient" $ do
+      -- Warm surface (305 K) over cooler air (285 K): canyon should warm the air,
+      -- so canyon air temp exceeds the forcing air temp and SH is upward (>0).
+      let stWarm = urbanFluxesStep defaultDriverConfig (urbanCtx 285.0)
+                     (urbanState 8 305.0 250.0)
+          tafWarm = t_ref2m_patch (clmTemp stWarm)
+      eflx_sh_tot_patch (clmEnergyFlux stWarm) `shouldSatisfy` (> 0.0)
+      tafWarm `shouldSatisfy` (> 285.0)
+      -- Cold surface (270 K) under warmer air (290 K): air loses heat to the
+      -- canyon, so net sensible heat is downward (<0).
+      let stCold = urbanFluxesStep defaultDriverConfig (urbanCtx 290.0)
+                     (urbanState 8 270.0 0.0)
+      eflx_sh_tot_patch (clmEnergyFlux stCold) `shouldSatisfy` (< 0.0)
+
+    it "stays finite and bounded under extreme cold forcing" $ do
+      -- Stability: a deep-cold case (230 K air, 235 K surface, no sun) must not
+      -- blow up or produce NaNs.
+      let st' = urbanFluxesStep defaultDriverConfig (urbanCtx 230.0)
+                  (urbanState 9 235.0 0.0)
+          ef  = clmEnergyFlux st'
+          taf = t_ref2m_patch (clmTemp st')
+      finite (eflx_sh_tot_patch ef)  `shouldBe` True
+      finite (eflx_soil_grnd_col ef) `shouldBe` True
+      finite taf                     `shouldBe` True
+      taf `shouldSatisfy` (\t -> t >= 229.0 && t <= 236.0)
 
   -- =====================================================================
   -- Driver patch-to-column aggregation
