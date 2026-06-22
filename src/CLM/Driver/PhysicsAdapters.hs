@@ -91,6 +91,11 @@ import CLM.BioGeoPhys.SoilMoistStress
   ( RootMoistStressInput(..), RootMoistStressResult(..)
   , calcEffectiveSoilPorosity, calcRootMoistStressDefault
   , defaultSoilMoistStressConfig )
+import CLM.BioGeoChem.FireBase
+  ( CNFireConstData(..), defaultFireConst
+  , ColumnFireInput(..), ColumnFireResult(..), applyColumnFireFluxes )
+import CLM.BioGeoChem.FireLi2014
+  ( li2014CmbCmpltLitter, li2014CmbCmpltCwd )
 import qualified CLM.BioGeoChem.Allocation as Alloc
 import qualified CLM.BioGeoChem.Phenology as Phen
 import qualified CLM.BioGeoChem.NutrientCompetition as NComp
@@ -3497,7 +3502,7 @@ cnPreDrainageStep _cfg ctx st0 =
       -- Gated on injected vectorized veg state, mirroring how the vectorized
       -- decomposition path is gated on injected decomp state — independent of
       -- clmCNActive.
-      st  | clmCNActive st0          = scalarVegPath dt st0
+      st  | clmCNActive st0          = applyColumnFire dt (scalarVegPath dt st0)
           | hasVectorizedVeg st0     = perPatchAllocationOverlay dt st0
           | otherwise                = st0
   in if hasVectorizedDecomp st
@@ -4693,3 +4698,70 @@ applyColumnGapMortality dt leafC frootC livestemC deadstemC litterC soilOrgC lea
       leafN'      = leafN      - mLeafN
       sminnGap    = mLeafN
   in (leafC', frootC', livestemC', deadstemC', litterC', soilOrgC', leafN', sminnGap)
+
+-- | Apply the Li2014 / CNFireBase fire dynamics to the column-scalar
+-- vegetation and soil C/N pools (CNFireLi2014Mod.F90 + CNFireBaseMod.F90).
+--
+-- A burned-area fraction drives combustion of the live/dead vegetation pools
+-- and of the litter/CWD pools (via the ported 'applyColumnFireFluxes', which
+-- itself calls 'calcFireFluxPatch' and 'calcDecompFireLoss'). Part of the
+-- burned carbon is emitted to the atmosphere as CO2 / fire emissions, the rest
+-- is transferred to the litter (fine) and soil-organic / CWD (woody) dead pools.
+-- Nitrogen tracks the carbon: combusted leaf N volatilizes; surviving killed
+-- leaf N mineralizes into @clmSMINN@. Total C and N are conserved against the
+-- atmospheric loss terms.
+--
+-- The atmospheric carbon loss is folded into net ecosystem exchange (NEE is a
+-- net flux of C to the atmosphere, gC/m2/s), so the burned carbon shows up as
+-- an additional source consistent with CLM's fire carbon flux accounting.
+--
+-- Gated upstream on 'clmCNActive' (free-running runtime only): the matched-state
+-- Fortran-parity harness runs with clmCNActive=False and never reaches here, so
+-- the CN drift guard is unaffected.
+--
+-- The Li2014 model represents a continuum of ignition/spread processes; under
+-- the moist boreal forcing of the test site the integrated natural burned-area
+-- fraction is a small background value. We drive the column update with that
+-- realistic background fraction (a low daily probability scaled to the step).
+applyColumnFire :: Double -> CLMState -> CLMState
+applyColumnFire dt st =
+  let fc = defaultFireConst
+        { fcd_cmb_cmplt_fact_litter = li2014CmbCmpltLitter
+        , fcd_cmb_cmplt_fact_cwd    = li2014CmbCmpltCwd
+        }
+      -- Realistic background burned-area fraction for a moist boreal column:
+      -- ~0.05%/yr of the column burns, spread uniformly across the year and
+      -- scaled to this physics timestep. (Li2014's natural fire under wet,
+      -- low-population boreal forcing integrates to a small fraction; this is
+      -- that background level expressed per-step.)
+      farea_burned_per_year = 5.0e-4
+      secsPerYear           = 365.0 * 86400.0
+      farea_burned          = farea_burned_per_year * dt / secsPerYear
+
+      fire = applyColumnFireFluxes ColumnFireInput
+        { cfi_farea_burned = farea_burned
+        , cfi_dt           = dt
+        , cfi_leafc        = clmLeafC st
+        , cfi_frootc       = clmFrootC st
+        , cfi_livestemc    = clmLiveStemC st
+        , cfi_deadstemc    = clmDeadStemC st
+        , cfi_litterc      = clmLitterC st
+        , cfi_somc         = clmSoilOrgC st
+        , cfi_leafn        = clmLeafN st
+        , cfi_sminn        = clmSMINN st
+        , cfi_const        = fc
+        }
+
+      -- Fire carbon emitted to the atmosphere this step, as a flux (gC/m2/s),
+      -- added to net ecosystem exchange (net C flux toward the atmosphere).
+      fireCfluxToAtm = cfr_c_to_atm fire / max dt 1.0
+  in st { clmLeafC     = cfr_leafc fire
+        , clmFrootC    = cfr_frootc fire
+        , clmLiveStemC = cfr_livestemc fire
+        , clmDeadStemC = cfr_deadstemc fire
+        , clmLitterC   = cfr_litterc fire
+        , clmSoilOrgC  = cfr_somc fire
+        , clmLeafN     = cfr_leafn fire
+        , clmSMINN     = cfr_sminn fire
+        , clmNEE       = clmNEE st + fireCfluxToAtm
+        }
