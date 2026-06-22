@@ -17,7 +17,14 @@ land use) that may be out of scope for this port's purpose.
 
 ---
 
-## Phase 1 — Make the single soil column honest (fix live-path stubs + wire dead code)
+## Phase 1 — Make the single soil column honest (fix live-path stubs + wire dead code) — DONE (2026-06)
+
+Status: items 1–5 implemented and merged (commits up to 095226b); suite 118
+examples, 0 failures. Snow percolation, growth respiration, gap mortality,
+phenology onset/offset, and CN precision control now run on the single soil
+column. Caveat: validated for build/stability/conservation-guardrail, NOT
+bitwise correctness (no per-process Fortran reference). Items below kept for
+the record with their original notes.
 
 These are the highest-value, lowest-risk fixes: the code mostly exists; it's
 either a no-op step or never called.

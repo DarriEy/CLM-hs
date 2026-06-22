@@ -52,18 +52,26 @@ fire/mortality/crop/dynamic-veg, or anything in the "missing" lists below.
 | External data streams (N-deposition, LAI, crop calendar, urban-tv) | **missing** | N budget has no atmospheric/biological inputs |
 | MPI / OpenMP parallelism | **missing** | Single process, single column |
 
-### Stubs in the LIVE timestep path (verified in code)
-- `snowPercolationStep` (`ppSnowWater`) = `st` — no-op; snow meltwater percolation absent.
+### Stubs in the LIVE timestep path
+FIXED in Phase 1 (now real, runtime-gated on clmCNActive):
+- `snowPercolationStep` — real meltwater percolation/refreeze + drainage to top soil.
+- `cnBalanceCheckStep` — real CN precision control (round-off truncation +
+  non-negativity guardrail) instead of a no-op.
+
+Still stubs (only reached by non-soil landunits, which the single-column run never
+exercises — so harmless to the current run, but real gaps):
 - `lakeTemperatureStep` — computes thermal props then returns `st` unchanged.
 - `urbanFluxesStep` — returns `st`; also checks the wrong landunit type (`it /= 6`).
-- `cnBalanceCheckStep` / CN precision control — no conservation enforcement.
 
 ### CN/BGC: modules exist but are NEVER CALLED (dead code; 0 driver references)
-fire (CNFireLi2014/2016/2021), growth respiration, gap mortality, dynamic vegetation
+WIRED in Phase 1 (now run free-running): growth respiration (via `GResp.cnGrowthResp`),
+gap (background) mortality (→ litter/CWD, conserving C/N), and phenology onset/offset
+(seasonal & stress deciduous: classify, GDD/daylength/soil-water gating, storage→
+transfer→display→litter transfers).
+Still dead code (0 driver references): fire (CNFireLi2014/2016/2021), dynamic vegetation
 (CNDV), carbon isotopes (C13/C14), wood products / harvest, annual updates, methane,
-dust & VOC emissions. Also missing: crop allocation path; seasonal/stress phenology
-onset & offset (only background litterfall runs → evergreen-like); N fixation & N
-deposition (N budget is sinks-only).
+dust & VOC emissions. Still missing: crop allocation path; N fixation & N deposition
+(N budget is sinks-only).
 
 ### soilbiogeochem missing
 `CNSoilMatrixMod` (implicit matrix C/N solver), `SoilBiogeochemNitrogenUptake` (plant N
