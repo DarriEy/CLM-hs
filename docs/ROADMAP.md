@@ -51,9 +51,11 @@ seasonal canopy.
 
 ## Phase 2 — Close the budgets (inputs the column is missing)
 
-6. **N inputs** — N fixation (`NDynamics`) and N deposition (a constant/forcing input;
-   full stream I/O deferred to Phase 4). Without these the N budget is sinks-only.
-   *Effort: S–M. Risk: L. Validate: N balance; sminn stays bounded.*
+6. **N inputs** — DONE (commit 8f0417e). N deposition (constant rate), free-living
+   fixation (baseline), and NPP-driven symbiotic fixation wired via `NDynamicsMod` into
+   the runtime sminn balance; budget no longer sinks-only. Symbiotic fixation uses an
+   annualized-NPP proxy (true annual accumulator + ndep stream I/O deferred to Phase 4).
+   Suite 118/0/2.
 7. **soilbiogeochem completeness** — port `SoilBiogeochemNitrogenUptake` (plant N
    uptake) and decide on `CNSoilMatrixMod` (implicit matrix solver) vs the current
    explicit cascade. *Effort: M (uptake), L (matrix solver). Risk: M. Validate:

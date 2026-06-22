@@ -68,10 +68,14 @@ WIRED in Phase 1 (now run free-running): growth respiration (via `GResp.cnGrowth
 gap (background) mortality (→ litter/CWD, conserving C/N), and phenology onset/offset
 (seasonal & stress deciduous: classify, GDD/daylength/soil-water gating, storage→
 transfer→display→litter transfers).
+Also WIRED (Phase 2): N inputs — atmospheric deposition + free-living + NPP-driven
+symbiotic fixation (via NDynamicsMod), so the N budget is no longer sinks-only (plant
+uptake sink was already present via NutrientCompetition). Symbiotic fixation uses an
+annualized-current-NPP proxy pending a true annual NPP accumulator.
 Still dead code (0 driver references): fire (CNFireLi2014/2016/2021), dynamic vegetation
 (CNDV), carbon isotopes (C13/C14), wood products / harvest, annual updates, methane,
-dust & VOC emissions. Still missing: crop allocation path; N fixation & N deposition
-(N budget is sinks-only).
+dust & VOC emissions. Still missing: crop allocation path; per-layer plant N uptake
+(SoilBiogeochemNitrogenUptakeMod) and the implicit matrix C/N solver (CNSoilMatrixMod).
 
 ### soilbiogeochem missing
 `CNSoilMatrixMod` (implicit matrix C/N solver), `SoilBiogeochemNitrogenUptake` (plant N
