@@ -51,7 +51,7 @@ fire/mortality/crop/dynamic-veg, or anything in the "missing" lists below.
 | FATES (cohort/patch demography, PARTEH, ED radiation, hydraulics, fire) | **~0%** | 570-line type+no-op stub vs ~75,800 Fortran lines; `fatesDynamics` returns input |
 | Restart I/O (read/write full model state) | **real (Phase 4 #15)** | Write→read→resume is **bit-identical** to a continuous run (validated). Native per-variable binary format. Also reads a real Fortran `clm2.r.*.nc` restart into sane state (`readFortranRestart`, validated) — warm-start-and-run *parity* still needs a matched config+reference; NetCDF *write* (history) is #16 |
 | History output (NetCDF) | **real, single-tape (Phase 4 #16)** | `writeDailyNetCDF` emits a NetCDF history tape (time-dimensioned, CF-attributed vars), round-trip validated. Multi-tape / subgrid aggregation / Fortran-h0 comparison still out of scope |
-| Multi-landunit subgrid (urban / glacier / lake / crop / wetland) | code exists, **never run** | The run is 100% soil (`wt_lunit = (1,0,0,…)`) |
+| Multi-landunit subgrid (soil + lake gridcell) | **Option A done (Phase 4 #12)** | `runMixedGridcell` loops the column kernel (soil pipeline + lake path) and aggregates by area weight; weights read directly from NetCDF surfdata. Validated by self-consistency + column independence (no mixed Fortran ref exists). Option B (CLMState array-vectorization, filters/down-pointers) unported; urban/crop/wetland columns still not run |
 | atm→lnd downscaling + lnd→atm coupling | **stub** | No topographic forcing downscaling; no coupling fluxes |
 | External data streams (N-deposition, LAI, crop calendar, urban-tv) | **missing** | N budget has no atmospheric/biological inputs |
 | MPI / OpenMP parallelism | **missing** | Single process, single column |

@@ -22,6 +22,10 @@ module CLM.Driver.PipelineRunner
   , writeDailyCSV
     -- * NetCDF history output
   , writeDailyNetCDF
+    -- * Multi-landunit gridcell (Phase 4 #12, Option A: column-loop)
+  , SurfdataLandunits(..)
+  , readSurfdataLandunits
+  , runMixedGridcell
     -- * CLM forward model for calibration (extracts QRUNOFF)
   , runCLMForQrunoff
     -- * Re-exports for pipeline users
@@ -42,7 +46,9 @@ import CLM.Driver.CLMDriver
   , PhysicsPipeline(..)
   , defaultCLMState, defaultDriverState, defaultTimestepContext
   , clmDrv )
-import CLM.Driver.PhysicsAdapters (wiredPhysicsPipeline, initCNDecompPools)
+import CLM.Driver.PhysicsAdapters
+  ( wiredPhysicsPipeline, initCNDecompPools
+  , lakeFluxesStep, lakeTemperatureStep )
 import CLM.BioGeoPhys.CanopyHydrology
   ( CanopyHydrologyParams(..), defaultCanopyHydroParams )
 
@@ -67,8 +73,8 @@ import CLM.Infrastructure.BinaryIO
 import CLM.Infrastructure.ReadParams
   ( readParametersBinary, AllParams(..), PFTConstants(..) )
 import CLM.Infrastructure.NetCDF
-  ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D, ncDimLen
-  , ncWriteTimeseries )
+  ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D, ncReadDoubleScalar
+  , ncDimLen, ncWriteTimeseries )
 import CLM.Infrastructure.ForcingReader
   ( ForcingReaderState(..), forcingReaderInitBinary, readForcingStepPure
   , ForcingTimestep(..)
@@ -1133,6 +1139,98 @@ restartWdiagSetters =
   , ("wdiag_h2ocan_patch",           \v wd -> wd { wdiag_h2ocan_patch = v })
   , ("wdiag_qaf_lun",                \v wd -> wd { wdiag_qaf_lun = v })
   ]
+
+-- ============================================================================
+-- Multi-landunit gridcell (Phase 4 #12, Option A: loop the single-column kernel)
+-- ============================================================================
+
+-- | Landunit area fractions (percent) + lake depth from a NetCDF surfdata file.
+data SurfdataLandunits = SurfdataLandunits
+  { sl_pct_natveg  :: !Double
+  , sl_pct_lake    :: !Double
+  , sl_pct_glacier :: !Double
+  , sl_pct_crop    :: !Double
+  , sl_pct_wetland :: !Double
+  , sl_pct_urban   :: !Double
+  , sl_lakedepth   :: !Double
+  } deriving (Show)
+
+-- | Read landunit fractions + lake depth directly from a NetCDF surfdata file —
+-- no @.bin@ export step. (The cold-start/forcing/param @.bin@ pipeline is a
+-- historical Julia-export artifact; with the NetCDF reader we can take surfdata
+-- straight from @.nc@.) Missing variables default to 0 (lakedepth to 10).
+readSurfdataLandunits :: FilePath -> IO (Either String SurfdataLandunits)
+readSurfdataLandunits path = do
+  e <- ncOpen path
+  case e of
+    Left err -> return (Left ("ncOpen surfdata failed: " ++ err))
+    Right nc -> do
+      let rd v dflt = either (const dflt) id <$> ncReadDoubleScalar nc v
+      nv <- rd "PCT_NATVEG" 0.0
+      lk <- rd "PCT_LAKE"    0.0
+      gl <- rd "PCT_GLACIER" 0.0
+      cr <- rd "PCT_CROP"    0.0
+      wl <- rd "PCT_WETLAND" 0.0
+      ur <- rd "PCT_URBAN"   0.0
+      ld <- rd "LAKEDEPTH"  10.0
+      ncClose nc
+      return $ Right SurfdataLandunits
+        { sl_pct_natveg = nv, sl_pct_lake = lk, sl_pct_glacier = gl
+        , sl_pct_crop = cr, sl_pct_wetland = wl, sl_pct_urban = ur
+        , sl_lakedepth = ld }
+
+-- | Run a soil + lake gridcell as the column-loop realization of the
+-- multi-landunit driver (PHASE4_SCOPE Option A): the soil column runs the full
+-- wired physics pipeline and the lake column runs the lake surface-flux +
+-- temperature path, both sharing the same forcing; gridcell diagnostics are the
+-- area-weighted average of the two columns. Columns are independent within a
+-- timestep (they interact only through the gridcell aggregate to the
+-- atmosphere), so looping the kernel and weighting the outputs is exact for one
+-- gridcell. Returns per-step @(gridcell, soil, lake)@ of @(T_GRND, H2OSNO)@.
+runMixedGridcell
+  :: FilePath  -- ^ data dir (soil base + forcing)
+  -> Double    -- ^ natural-veg (soil) area weight
+  -> Double    -- ^ lake area weight
+  -> Double    -- ^ lake depth [m]
+  -> Double    -- ^ dtime [s]
+  -> Int       -- ^ forcing step offset
+  -> Int       -- ^ number of steps
+  -> IO [((Double, Double), (Double, Double), (Double, Double))]
+runMixedGridcell dir wNatveg wLake lakedepth dtime off nsteps = do
+  (st0, forcing, albConst) <- initCLMStateFromDir dir
+  chParams  <- readCanopyHydroParamsFromDir dir
+  snicarOpt <- readSnicarOptics dir
+  let pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
+      cfg      = defaultDriverConfig
+      nlevlak  = 10
+      ntot     = nlevsno + nlevgrnd
+      soil0    = st0
+      lake0    = st0
+        { clmColumn = (clmColumn st0) { lakedepth = lakedepth }
+        , clmSnl = 0
+        , clmTemp = (clmTemp st0)
+            { t_grnd_col = 277.0, t_soisno_col = VU.replicate ntot 277.0 }
+        , clmWaterState = (clmWaterState st0)
+            { h2osno_col = 0.0
+            , h2osoi_liq_col = VU.replicate ntot 0.0
+            , h2osoi_ice_col = VU.replicate ntot 0.0 }
+        , clmLakeState = (clmLakeState st0)
+            { lake_t_lake_col = VU.replicate nlevlak 277.0
+            , lake_lake_icefrac_col = VU.replicate nlevlak 0.0 }
+        }
+      go _ _ _ step acc | step > nsteps = return (reverse acc)
+      go soilSt lakeSt drvSt step acc = do
+        let ctx = buildTimestepContext forcing (off + step) dtime
+            (drvSt', soilSt') = clmDrv cfg pipeline ctx drvSt soilSt
+            lakeSt' = lakeTemperatureStep cfg ctx (lakeFluxesStep cfg ctx lakeSt)
+            sTG = t_grnd_col (clmTemp soilSt')
+            sSno = h2osno_col (clmWaterState soilSt')
+            lTG = t_grnd_col (clmTemp lakeSt')
+            lSno = h2osno_col (clmWaterState lakeSt')
+        go soilSt' lakeSt' drvSt' (step + 1)
+           ( ( (wNatveg * sTG + wLake * lTG, wNatveg * sSno + wLake * lSno)
+             , (sTG, sSno), (lTG, lSno) ) : acc )
+  go soil0 lake0 defaultDriverState 1 []
 
 runPipeline :: PipelineConfig -> IO [DailyDiag]
 runPipeline cfg = do

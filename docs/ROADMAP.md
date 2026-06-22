@@ -94,10 +94,25 @@ bitwise correctness.
 These are large and unlock the landunit physics that already has code (urban/lake)
 or needs writing (glacier).
 
-12. **Multi-landunit / multi-column driver loop** — make `clmDrv` iterate landunits →
-    columns → patches with proper weights and filters (the `decompMod`/`filterMod`/
-    `subgridAve` machinery). *Effort: XL. Risk: H (touches all state). Validate:
-    single-soil-column results must be unchanged (regression) before adding landunits.*
+12. **Multi-landunit / multi-column driver loop** — DONE via Option A (2026-06,
+    soil+lake gridcell). `runMixedGridcell` (PipelineRunner) loops the single-column
+    kernel over the landunit columns — the soil column runs the full wired physics
+    pipeline, the lake column runs the lake surface-flux + temperature path, both
+    on the same forcing — and aggregates gridcell diagnostics by area weight.
+    Columns are independent within a timestep (they interact only through the
+    gridcell aggregate to the atmosphere), so the column-loop is exact for one
+    gridcell without a CLMState multi-column refactor. Landunit weights are read
+    **directly from NetCDF surfdata** (`readSurfdataLandunits`, no .bin export) —
+    using CLM.jl's synthesized `surfdata_mixed.nc` (PCT_NATVEG=50/PCT_LAKE=50,
+    LAKEDEPTH=10). **Validated** (test "aggregates soil + lake columns by area
+    weight, columns independent"): the gridcell diagnostic equals the area-weighted
+    column average and lies between the columns, and each column's trajectory is
+    bit-identical (±1e-12) regardless of the weights — proving the loop doesn't let
+    columns corrupt one another. No mixed Fortran reference run exists (the
+    clm_lake_run is 100% lake), so this is self-consistency + per-column
+    equivalence, not a mixed-gridcell Fortran parity. The full CLMState
+    array-vectorization (Option B: filters/down-pointers/p2c-c2l-c2g) remains
+    unported; Option A covers the single-gridcell column loop.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake

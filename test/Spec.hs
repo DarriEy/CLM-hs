@@ -20,7 +20,8 @@ import CLM.Driver.PhysicsAdapters
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
-  , writeDailyNetCDF, buildTimestepContext )
+  , writeDailyNetCDF, buildTimestepContext
+  , SurfdataLandunits(..), readSurfdataLandunits, runMixedGridcell )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
 import CLM.Types.LakeStateData (LakeStateData(..))
 import CLM.BioGeoPhys.GlacierSurfaceMassBalance
@@ -1335,6 +1336,56 @@ main = hspec $ do
       gsmbo_qflx_glcice_melt o `shouldBe` 0.0
       gsmbo_qflx_qrgwl o `shouldBe` 0.5
       gsmbo_h2osoi_liq o VU.! 12 `shouldBe` 5.0
+
+  describe "Multi-landunit gridcell (column loop)" $ do
+    let mixed = "/Users/darri.eythorsson/Library/CloudStorage/GoogleDrive-dareyt@gmail.com/My Drive/code/clm_ports/CLM.jl/test_inputs/lake/surfdata_mixed.nc"
+
+    it "reads landunit fractions directly from NetCDF surfdata" $ do
+      has <- doesFileExist mixed
+      if not has then pendingWith "surfdata_mixed.nc not available"
+      else do
+        r <- readSurfdataLandunits mixed
+        case r of
+          Left e   -> expectationFailure ("readSurfdataLandunits failed: " ++ e)
+          Right sl -> do
+            sl_pct_natveg sl `shouldBe` 50.0
+            sl_pct_lake   sl `shouldBe` 50.0
+            sl_pct_glacier sl `shouldBe` 0.0
+            abs (sl_lakedepth sl - 10.0) `shouldSatisfy` (< 1.0e-9)
+
+    it "aggregates soil + lake columns by area weight, columns independent (#12)" $ do
+      hasBow   <- doesDirectoryExist "test/data_bow/coldstart"
+      hasMixed <- doesFileExist mixed
+      if not hasBow then pendingWith "test/data_bow not available"
+      else if not hasMixed then pendingWith "surfdata_mixed.nc not available"
+      else do
+        r <- readSurfdataLandunits mixed
+        case r of
+          Left e   -> expectationFailure ("readSurfdataLandunits failed: " ++ e)
+          Right sl -> do
+            let wN  = sl_pct_natveg sl / 100.0
+                wL  = sl_pct_lake   sl / 100.0
+                off = 26304; nst = 24
+            traj     <- runMixedGridcell "test/data_bow" wN  wL  (sl_lakedepth sl) 3600.0 off nst
+            soilOnly <- runMixedGridcell "test/data_bow" 1.0 0.0 (sl_lakedepth sl) 3600.0 off nst
+            lakeOnly <- runMixedGridcell "test/data_bow" 0.0 1.0 (sl_lakedepth sl) 3600.0 off nst
+            length traj `shouldBe` nst
+            -- gridcell diagnostic is exactly the area-weighted column average,
+            -- bounded, and lies between the two columns
+            let ok ((gTG, gSno), (sTG, sSno), (lTG, lSno)) =
+                  abs (gTG  - (wN * sTG  + wL * lTG))  < 1.0e-9
+                  && abs (gSno - (wN * sSno + wL * lSno)) < 1.0e-9
+                  && not (isNaN gTG) && gTG > 200.0 && gTG < 320.0
+                  && gTG >= min sTG lTG - 1.0e-9 && gTG <= max sTG lTG + 1.0e-9
+            all ok traj `shouldBe` True
+            -- each column's trajectory is independent of the area weights
+            -- (the column loop does not let columns corrupt one another)
+            let soilMix  = map (\(_, (s, _), _) -> s) traj
+                soilPure = map (\(_, (s, _), _) -> s) soilOnly
+                lakeMix  = map (\(_, _, (l, _)) -> l) traj
+                lakePure = map (\(_, _, (l, _)) -> l) lakeOnly
+            and (zipWith (\a b -> abs (a - b) < 1.0e-12) soilMix soilPure) `shouldBe` True
+            and (zipWith (\a b -> abs (a - b) < 1.0e-12) lakeMix lakePure) `shouldBe` True
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
