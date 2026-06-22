@@ -102,7 +102,11 @@ import qualified CLM.Types.CNVegStateData as VState
 import CLM.Types.CNVegCarbonStateData
   ( cnvcs_leafc_patch, cnvcs_frootc_patch, cnvcs_livestemc_patch
   , cnvcs_cpool_patch, cnvcs_xsmrpool_patch
-  , cnvcs_leafc_storage_patch, cnvcs_frootc_storage_patch )
+  , cnvcs_leafc_storage_patch, cnvcs_frootc_storage_patch
+  , cnvcs_leafc_xfer_patch, cnvcs_frootc_xfer_patch )
+import CLM.Types.CNVegNitrogenStateData
+  ( cnvns_leafn_patch, cnvns_leafn_storage_patch, cnvns_leafn_xfer_patch
+  , cnvns_frootn_patch, cnvns_frootn_storage_patch, cnvns_frootn_xfer_patch )
 import CLM.BioGeoChem.CNDriver
   ( CNDriverConfig(..), defaultCNDriverConfig
   , CNDriverInput(..), CNDriverResult(..)
@@ -3201,7 +3205,13 @@ waterTableStep _cfg ctx st =
 
 phenologyStep :: PhysicsStep
 phenologyStep _cfg ctx st0 =
-  let st = if hasVectorizedVeg st0 then cnPhenologyAdvance ctx st0 else st0
+      -- Gate phenology onset/offset on the free-running runtime (clmCNActive),
+      -- NOT on hasVectorizedVeg: the matched-state Fortran-parity harness also
+      -- injects vectorized veg pools (hasVectorizedVeg=True) but must NOT have
+      -- its pools advanced here, or the CN drift guard breaks. Mirrors how
+      -- scalarVegPath / gap mortality are gated.
+  let st = if clmCNActive st0 && hasVectorizedVeg st0
+           then cnPhenologyAdvance ctx st0 else st0
       cs = clmCanopyState st
       wdiag = clmWaterDiagBulk st
 
