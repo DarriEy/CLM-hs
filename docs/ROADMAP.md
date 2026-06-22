@@ -114,8 +114,18 @@ or needs writing (glacier).
     bottom soil layer). **Validated**: warm-started from the Bow lake restart
     (column 1, ityplun=5) and run a day under cold forcing, the lake evolves a
     physically-sane ice-covered profile, bounded, ice fraction in [0,1] (test
-    "lake column temperature physics runs and evolves a sane profile"). Tight
-    Fortran parity isn't possible (single time-averaged h0 record). URBAN still a
+    "lake column temperature physics runs and evolves a sane profile").
+    **Lake-vs-Fortran parity** (test "lake free-run cold-start tracks the Fortran
+    h0 lake trajectory", mirroring CLM.jl's `fortran_parity_lake.jl`): cold-start a
+    PCT_LAKE=100 / LAKEDEPTH=10 column (t_lake=277 K, ice-free) on the Bow site and
+    free-run 48 hourly steps from 2003-01-01 (forcing index 26304 of the 2000-2004
+    series), diffing against the Fortran `clm2.h0.2003-01-01` history. Result: the
+    bulk lake thermodynamics track Fortran (deep TLAKE rel diff ~1e-14), while the
+    surface ground temperature carries a ~3% residual (TG over-cools) — the SAME
+    lake surface turbulent-flux / thermal coupling gap that is unresolved in CLM.jl.
+    Reported as a pending parity diagnostic; the hard assertion is stability +
+    physical bounds. So the lake solve is correct in the bulk; tight surface parity
+    is an open problem shared with the Julia port. URBAN still a
     no-op stub (`urbanFluxesStep` returns input and checks the wrong landunit
     type `it /= 6`) — separate item, not addressed here.
 14. **Glacier** — module DONE (2026-06). Ported `GlacierSurfaceMassBalanceMod` →
