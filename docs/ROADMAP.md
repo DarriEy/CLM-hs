@@ -89,9 +89,17 @@ bitwise correctness.
      Instead the module MATH is now locked in by deterministic conservation unit
      tests (gain*dt growth, first-order decay loss = pool*k, Δpool = (gains−k·pool)·dt,
      distinct 1/10/100-yr lifespans) — test block "CNProducts (wood/crop product pools)".
-   - **CNDV** (dynamic vegetation) — ported and *would* run on the natural-veg column
-     (annual PFT competition/establishment/mortality), but no dynamic-vegetation Fortran
-     reference exists, so it could only be sanity-validated. Not wired (offer pending).
+   - **CNDV** (dynamic vegetation) — WIRED (2026-06). Added `clmDGVS` (DGVSData) +
+     `clmCNDVYear` to CLMState, a `ppCNDV` pipeline slot, and `cndvStep` (PhysicsAdapters)
+     running every step in `CLM.BioGeoChem.CNDVStep`. Faithful climate accumulators
+     (agdd base-5, agddtw, 30-day t_mo, 365-day prec365, annsum_npp, 20-yr tmomin20/agdd20
+     with the (19·old+new)/20 weighting) feed the annual Light→Establishment→Mortality
+     driver gated on tcIsBegCurrYear. 10 unit+integration tests. KNOWN GAPS: PFT bioclimatic
+     limits (pftpar28-31) use documented placeholder constants pending pftcon wiring;
+     agddtw uses t_ref2m as a t_a10 proxy; running means are an EMA approximation of CLM's
+     boxcar runmean; no Fortran reference exists so only sanity/conservation-validated; and
+     cold-start seeding of `clmDGVS` in the live runtime (behind a use_cndv flag) is the
+     remaining piece — until seeded, `cndvStep` is a no-op in production.
    - **Crop** — unported (see above).
 9. **Carbon isotopes (C13/C14)** — DONE (8e3d0d2). Wired CNCIsoFluxMod/CNC14DecayMod into
    cnBalanceCheckStep: GPP discrimination, respiration at source ratio, C14 decay. Honest

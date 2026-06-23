@@ -17,7 +17,7 @@ import CLM.Driver.CLMDriver
 import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
-  , aggregateLnd2Atm )
+  , aggregateLnd2Atm, cndvStep )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
 import CLM.BioGeoChem.CNProducts
   ( CNProductsState(..), CNProductsFluxes(..)
@@ -25,6 +25,9 @@ import CLM.BioGeoChem.CNProducts
   , productPoolUpdate, kprod1, kprod10, kprod100 )
 import qualified CLM.Infrastructure.InitSubgrid as IS
 import qualified CLM.Infrastructure.SubgridAverage as SA
+import CLM.Types.DGVSData (DGVSData(..))
+import CLM.BioGeoChem.CNDVStep
+  ( CNDVStepInput(..), cndvStepAdvance, seedDGVS, tkfrz )
 import CLM.Types.Lnd2AtmData (Lnd2AtmData(..))
 import CLM.Infrastructure.DataStream
   ( mkDataStream, interpStream, streamLength, dataStreamFromVectors
@@ -1614,6 +1617,99 @@ main = hspec $ do
       VU.length c `shouldBe` 2
       abs (c VU.! 0 - 5.0) `shouldSatisfy` (< 1.0e-9)
       abs (c VU.! 1 - 7.0) `shouldSatisfy` (< 1.0e-9)
+
+  describe "CNDV step (dynamic vegetation accumulators + annual driver)" $ do
+    -- Faithful accumulator cadence + annual Light->Establishment->Mortality.
+    -- One tree patch unless noted. dt = 1 day so GDD increments are readable.
+    let day = 86400.0
+        mkInput np isAnnual kyr tK = CNDVStepInput
+          { csi_is_annual = isAnnual, csi_kyr = kyr, csi_dt = day
+          , csi_t_ref2m   = VU.replicate np tK
+          , csi_rain_snow = VU.replicate np 0.0
+          , csi_npp       = VU.replicate np 0.0
+          , csi_leafc     = VU.replicate np 0.0
+          , csi_tcmin     = VU.replicate np (-30.0)
+          , csi_tcmax     = VU.replicate np 15.0
+          , csi_gddmin    = VU.replicate np 0.0
+          , csi_twmax     = VU.replicate np 1000.0  -- no warmth limit
+          , csi_is_tree   = VU.replicate np True
+          }
+        seed1 = seedDGVS 1 (tkfrz + 5.0) 0.2 0.5
+
+    it "accumulates GDD above the 5C base over one day at 10C" $ do
+      -- (10 - 5) degC * (86400 s / 86400 s) = 5 degree-days
+      let d = cndvStepAdvance (mkInput 1 False 1 (tkfrz + 10.0)) seed1
+      abs (dgvs_agdd_patch d VU.! 0 - 5.0) `shouldSatisfy` (< 1.0e-9)
+
+    it "adds no GDD when below the 5C base" $ do
+      let d = cndvStepAdvance (mkInput 1 False 1 (tkfrz + 2.0)) seed1
+      dgvs_agdd_patch d VU.! 0 `shouldBe` 0.0
+
+    it "accumulates the within-year NPP sum every step" $ do
+      let inp = (mkInput 1 False 1 (tkfrz + 10.0)) { csi_npp = VU.singleton 3.0e-7 }
+          d = cndvStepAdvance inp seed1
+      abs (dgvs_tempsum_npp_patch d VU.! 0 - 3.0e-7) `shouldSatisfy` (< 1.0e-15)
+
+    it "is a no-op when there are no patches" $ do
+      let d = cndvStepAdvance (mkInput 0 True 5 (tkfrz + 10.0)) (seedDGVS 0 280.0 0 0)
+      VU.length (dgvs_nind_patch d) `shouldBe` 0
+
+    it "annual step applies background mortality and resets GDD" $ do
+      -- Pre-load a realistic annual minimum so the survival filter passes.
+      let warm = seed1 { dgvs_t_mo_min_patch = VU.singleton (tkfrz + 8.0)
+                       , dgvs_agdd_patch     = VU.singleton 200.0 }
+          d = cndvStepAdvance (mkInput 1 True 2 (tkfrz + 10.0)) warm
+      -- background tree mortality 0.1%/yr -> nind shrinks but patch survives
+      dgvs_nind_patch d VU.! 0 `shouldSatisfy` (\n -> n > 0.0 && n < 0.2)
+      -- annual reset zeroed agdd, then this step re-accumulated one day at 10C
+      abs (dgvs_agdd_patch d VU.! 0 - 5.0) `shouldSatisfy` (< 1.0e-9)
+
+    it "initializes the 20-year mean from the annual minimum on year 2" $ do
+      let warm = seed1 { dgvs_t_mo_min_patch = VU.singleton (tkfrz + 8.0)
+                       , dgvs_tmomin20_patch = VU.singleton 999.0 }
+          d = cndvStepAdvance (mkInput 1 True 2 (tkfrz + 10.0)) warm
+      -- kyr==2 sets tmomin20 = t_mo_min directly (not the running blend)
+      abs (dgvs_tmomin20_patch d VU.! 0 - (tkfrz + 8.0)) `shouldSatisfy` (< 1.0e-9)
+
+    it "light competition caps total tree FPC at 0.95 on the annual step" $ do
+      -- Two trees with FPC summing to 1.2; survival pre-armed via t_mo_min.
+      let d2 = (seedDGVS 2 (tkfrz + 8.0) 0.1 0.6)
+                 { dgvs_t_mo_min_patch = VU.replicate 2 (tkfrz + 8.0) }
+          d = cndvStepAdvance (mkInput 2 True 2 (tkfrz + 10.0)) d2
+          totalFpc = VU.sum (dgvs_fpcgrid_patch d)
+      totalFpc `shouldSatisfy` (< 0.95 + 1.0e-9)
+      totalFpc `shouldSatisfy` (> 0.0)
+
+    -- Integration: the wired PhysicsStep adapter through CLMState/ctx.
+    let cndvState = defaultCLMState
+          { clmCNActive = True
+          , clmNPP = 2.0e-7
+          , clmDGVS = (seedDGVS 1 (tkfrz + 8.0) 0.2 0.5)
+                        { dgvs_t_mo_min_patch = VU.singleton (tkfrz + 8.0) }
+          }
+        cndvCtx annual = defaultTimestepContext
+          { tcIsBegCurrYear = annual
+          , tcDtime = 86400.0
+          , tcForcT = VU.singleton (tkfrz + 10.0)
+          , tcForcRain = VU.singleton 0.0
+          , tcForcSnow = VU.singleton 0.0
+          }
+
+    it "adapter advances accumulators every step without touching the year" $ do
+      let st' = cndvStep defaultDriverConfig (cndvCtx False) cndvState
+      clmCNDVYear st' `shouldBe` 1                 -- not a year boundary
+      abs (dgvs_agdd_patch (clmDGVS st') VU.! 0 - 5.0) `shouldSatisfy` (< 1.0e-9)
+
+    it "adapter runs the annual driver and bumps kyr on the year boundary" $ do
+      let st' = cndvStep defaultDriverConfig (cndvCtx True) cndvState
+      clmCNDVYear st' `shouldBe` 2
+      -- annual mortality reduced the stand; patch still present
+      dgvs_nind_patch (clmDGVS st') VU.! 0 `shouldSatisfy` (\n -> n > 0.0 && n < 0.2)
+
+    it "adapter is a no-op when CN is inactive" $ do
+      let st' = cndvStep defaultDriverConfig (cndvCtx True) (cndvState { clmCNActive = False })
+      dgvs_agdd_patch (clmDGVS st') VU.! 0 `shouldBe` 0.0
+      clmCNDVYear st' `shouldBe` 1
 
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column

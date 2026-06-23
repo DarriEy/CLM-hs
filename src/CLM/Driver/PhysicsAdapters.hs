@@ -10,6 +10,7 @@ module CLM.Driver.PhysicsAdapters
   ( -- * Wired pipeline
     wiredPhysicsPipeline
   , initCNDecompPools
+  , cndvStep
     -- * Individual adapters (PhysicsStep signature)
   , dayLengthStep
   , activeLayerStep
@@ -127,6 +128,8 @@ import CLM.BioGeoChem.CNDriver
   ( CNDriverConfig(..), defaultCNDriverConfig
   , CNDriverInput(..), CNDriverResult(..)
   , CNLeachingInput(..), cnDriverNoLeaching, cnDriverLeaching )
+import CLM.Types.DGVSData (DGVSData(..))
+import CLM.BioGeoChem.CNDVStep (CNDVStepInput(..), cndvStepAdvance)
 import CLM.BioGeoChem.DecompBGC
   ( DecompCascadeConData(..)
   , InitCascadeInput(..), InitCascadeOutput(..), initDecompCascadeBGC
@@ -286,11 +289,59 @@ wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
   , ppCNPreDrainage      = cnPreDrainageStep
   , ppCNPostDrainage     = cnPostDrainageStep
   , ppCNBalanceCheck     = cnBalanceCheckStep
+  , ppCNDV               = cndvStep
   , ppHydrologyDrainage  = hydrologyDrainageStep
   , ppWaterBalance       = waterBalanceStep
   , ppEnergyBalance      = energyBalanceStep
   , ppSurfaceAlbedo      = surfaceAlbedoStep albConst snicarOpt
   }
+
+-- | CNDV step adapter: advances the carried DGVS state by one timestep. The
+-- climate accumulators run every step; the annual establishment/light/mortality
+-- driver fires on the year boundary (tcIsBegCurrYear). A no-op unless CN is
+-- active and the DGVS state has been seeded with at least one patch.
+--
+-- The climate accumulators (agdd, agddtw, t_mo, prec365, annsum_npp) are
+-- faithful to the Fortran reference. The PFT bioclimatic limits
+-- (tcmin/tcmax/gddmin/twmax) currently use documented placeholder constants
+-- pending pftcon (pftpar28-31) wiring; woody/tree classification is taken from
+-- the carried per-patch PFT-type vector.
+cndvStep :: PhysicsStep
+cndvStep _cfg ctx st
+  | not (clmCNActive st)           = st
+  | VU.null (dgvs_nind_patch dgvs) = st
+  | otherwise = st
+      { clmDGVS     = cndvStepAdvance inp dgvs
+      , clmCNDVYear = kyr
+      }
+  where
+    dgvs     = clmDGVS st
+    np       = VU.length (dgvs_nind_patch dgvs)
+    isAnnual = tcIsBegCurrYear ctx
+    kyr      = if isAnnual then clmCNDVYear st + 1 else clmCNDVYear st
+    bcast x  = VU.replicate np x
+    forcT    = if VU.null (tcForcT ctx)    then 283.15 else tcForcT ctx    VU.! 0
+    rain     = if VU.null (tcForcRain ctx) then 0.0    else tcForcRain ctx VU.! 0
+    snow     = if VU.null (tcForcSnow ctx) then 0.0    else tcForcSnow ctx VU.! 0
+    -- Woody/tree classification from the per-patch PFT-type vector (CLM PFTs
+    -- 1-11 are trees + shrubs); default to tree for natural veg when absent.
+    isTree   = if VU.length (clmPatchIvt st) == np
+               then VU.map (\ivt -> ivt >= 1 && ivt <= 11) (clmPatchIvt st)
+               else bcast True
+    inp = CNDVStepInput
+      { csi_is_annual = isAnnual
+      , csi_kyr       = kyr
+      , csi_dt        = tcDtime ctx
+      , csi_t_ref2m   = bcast forcT
+      , csi_rain_snow = bcast (rain + snow)
+      , csi_npp       = bcast (clmNPP st)
+      , csi_leafc     = bcast (clmLeafC st)
+      , csi_tcmin     = bcast (-30.0)   -- placeholder pftpar28
+      , csi_tcmax     = bcast 18.0      -- placeholder pftpar29
+      , csi_gddmin    = bcast 0.0       -- placeholder pftpar30
+      , csi_twmax     = bcast 1000.0    -- placeholder pftpar31 (no warmth limit)
+      , csi_is_tree   = isTree
+      }
 
 -- ============================================================================
 -- Helpers

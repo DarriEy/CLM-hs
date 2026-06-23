@@ -18,6 +18,15 @@ data DGVSData = DGVSData
   , dgvs_agddtw_patch      :: !(VU.Vector Double)  -- ^ accumulated GDD for twmax check (degree-days)
   , dgvs_agdd20_patch      :: !(VU.Vector Double)  -- ^ 20-year running mean annual GDD (degree-days)
   , dgvs_tmomin20_patch    :: !(VU.Vector Double)  -- ^ 20-year running mean of annual min monthly temp (K)
+    -- Climate accumulators feeding the annual establishment filters. These are
+    -- updated every timestep by the CNDV accumulator step (Fortran: the 'TDA',
+    -- 'PREC365', 'AGDD', 'AGDDTW' accumulators in CNDVType/atm2lnd/Wateratm2lnd).
+  , dgvs_t_mo_patch        :: !(VU.Vector Double)  -- ^ 30-day running mean 2m temp (K)
+  , dgvs_t_mo_min_patch    :: !(VU.Vector Double)  -- ^ annual min of t_mo (K); reset to 1e36 each year
+  , dgvs_prec365_patch     :: !(VU.Vector Double)  -- ^ 365-day running mean precip rain+snow (mm/s)
+  , dgvs_annsum_npp_patch  :: !(VU.Vector Double)  -- ^ annual sum of NPP (gC/m2/yr)
+  , dgvs_tempsum_npp_patch :: !(VU.Vector Double)  -- ^ running within-year NPP accumulator (gC/m2/yr)
+  , dgvs_leafcmax_patch    :: !(VU.Vector Double)  -- ^ annual max leaf C (gC/m2); reset each year
     -- Vegetation state (patch)
   , dgvs_nind_patch         :: !(VU.Vector Double)  -- ^ number of individuals (#/m2)
   , dgvs_lm_ind_patch       :: !(VU.Vector Double)  -- ^ individual leaf mass (gC/ind)
@@ -34,6 +43,9 @@ defaultDGVSData :: DGVSData
 defaultDGVSData = DGVSData
   { dgvs_agdd_patch = VU.empty, dgvs_agddtw_patch = VU.empty
   , dgvs_agdd20_patch = VU.empty, dgvs_tmomin20_patch = VU.empty
+  , dgvs_t_mo_patch = VU.empty, dgvs_t_mo_min_patch = VU.empty
+  , dgvs_prec365_patch = VU.empty, dgvs_annsum_npp_patch = VU.empty
+  , dgvs_tempsum_npp_patch = VU.empty, dgvs_leafcmax_patch = VU.empty
   , dgvs_nind_patch = VU.empty, dgvs_lm_ind_patch = VU.empty
   , dgvs_lai_ind_patch = VU.empty, dgvs_fpcinc_patch = VU.empty
   , dgvs_fpcgrid_patch = VU.empty, dgvs_fpcgridold_patch = VU.empty

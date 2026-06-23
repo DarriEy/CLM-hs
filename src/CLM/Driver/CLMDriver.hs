@@ -96,6 +96,7 @@ import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..), default
 import CLM.Types.SoilBGCCarbonFluxData (SoilBGCCarbonFluxData(..), defaultSoilBGCCarbonFluxData)
 import CLM.Types.SoilBGCNitrogenFluxData (SoilBGCNitrogenFluxData(..), defaultSoilBGCNitrogenFluxData)
 import CLM.Types.SoilBGCStateData (SoilBGCStateData(..), defaultSoilBGCStateData)
+import CLM.Types.DGVSData         (DGVSData(..), defaultDGVSData)
 import CLM.Infrastructure.Filters (FilterSet(..), defaultFilterSet)
 
 -- ============================================================================
@@ -256,6 +257,15 @@ data CLMState = CLMState
   , clmPatchIvt      :: !(VU.Vector Int)  -- ^ Per-patch PFT type (pfts1d_itypveg)
   , clmNlevDecomp    :: !Int              -- ^ Number of decomposition soil layers
   , clmNDecompPools  :: !Int              -- ^ Number of decomposition pools
+    -- Dynamic global vegetation (CNDV / DGVM) state. Carries the per-patch
+    -- DGVS pools (nind, fpcgrid, crownarea, greffic, heatstress) plus the
+    -- annual climate accumulators (agdd, agddtw, agdd20, tmomin20, t_mo*,
+    -- prec365, annsum_npp) consumed by the annual CNDV driver. Empty unless
+    -- dynamic vegetation is enabled and seeded at cold start.
+  , clmDGVS          :: !DGVSData
+  , clmCNDVYear      :: !Int              -- ^ Simulation year index for CNDV
+                                          --   (kyr); incremented at each year
+                                          --   boundary by the CNDV step.
     -- Calibration parameters (injected by SiteCalibration, read by hydrology)
   , clmP_baseflow_scalar :: !Double
   , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
@@ -320,6 +330,8 @@ defaultCLMState = CLMState
   , clmPatchIvt      = VU.empty
   , clmNlevDecomp    = 0
   , clmNDecompPools  = 0
+  , clmDGVS          = defaultDGVSData
+  , clmCNDVYear      = 1
   , clmP_baseflow_scalar = 0.01
   , clmP_fff        = 0.5
   , clmP_fmax       = 0.5
@@ -382,6 +394,9 @@ data PhysicsPipeline = PhysicsPipeline
   , ppCNPreDrainage        :: !PhysicsStep
   , ppCNPostDrainage       :: !PhysicsStep
   , ppCNBalanceCheck       :: !PhysicsStep
+    -- Phase 9c: Annual dynamic vegetation (CNDV). Fires only on the year
+    -- boundary (gated by tcIsBegCurrYear at the call site); a no-op otherwise.
+  , ppCNDV                 :: !PhysicsStep
     -- Phase 9: Hydrology drainage
   , ppHydrologyDrainage    :: !PhysicsStep
     -- Phase 10: Balance and diagnostics
@@ -426,6 +441,7 @@ defaultPhysicsPipeline = PhysicsPipeline
   , ppCNPreDrainage      = idStep
   , ppCNPostDrainage     = idStep
   , ppCNBalanceCheck     = idStep
+  , ppCNDV               = idStep
   , ppHydrologyDrainage  = idStep
   , ppWaterBalance       = idStep
   , ppEnergyBalance      = idStep
@@ -675,10 +691,15 @@ clmDrvBoundaries cfg pipeline ctx drvState st0 =
     st23 = apply (ppEnergyBalance pipeline) st22
     st23b = apply (ppCNBalanceCheck pipeline) st23
 
+    -- Phase 9c: Dynamic vegetation (CNDV). The step runs every timestep to
+    -- advance the climate accumulators; it internally gates the annual
+    -- establishment/light/mortality driver on tcIsBegCurrYear.
+    st23c = apply (ppCNDV pipeline) st23b
+
     -- Phase 11: Albedo for next step
     st24 = if tcDoAlb ctx
-           then apply (ppSurfaceAlbedo pipeline) st23b
-           else st23b
+           then apply (ppSurfaceAlbedo pipeline) st23c
+           else st23c
 
     -- Advance driver state
     drvState' = advanceDriverState drvState (tcDtime ctx)

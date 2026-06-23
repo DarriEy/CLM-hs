@@ -122,6 +122,7 @@ library
                      , CLM.BioGeoChem.NutrientCompetition
                      , CLM.BioGeoChem.FUN
                      , CLM.BioGeoChem.CNDV
+                     , CLM.BioGeoChem.CNDVStep
                      , CLM.BioGeoChem.Decomp
                      , CLM.BioGeoChem.DecompBGC
                      , CLM.BioGeoChem.DecompMIMICS
