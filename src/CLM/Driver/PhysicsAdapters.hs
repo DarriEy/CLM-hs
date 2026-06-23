@@ -129,7 +129,8 @@ import CLM.BioGeoChem.CNDriver
   , CNDriverInput(..), CNDriverResult(..)
   , CNLeachingInput(..), cnDriverNoLeaching, cnDriverLeaching )
 import CLM.Types.DGVSData (DGVSData(..))
-import CLM.BioGeoChem.CNDVStep (CNDVStepInput(..), cndvStepAdvance)
+import CLM.BioGeoChem.CNDVStep
+  ( CNDVStepInput(..), cndvStepAdvance, dgvmPftBioclim, isWoodyPFT )
 import CLM.BioGeoChem.DecompBGC
   ( DecompCascadeConData(..)
   , InitCascadeInput(..), InitCascadeOutput(..), initDecompCascadeBGC
@@ -323,11 +324,14 @@ cndvStep _cfg ctx st
     forcT    = if VU.null (tcForcT ctx)    then 283.15 else tcForcT ctx    VU.! 0
     rain     = if VU.null (tcForcRain ctx) then 0.0    else tcForcRain ctx VU.! 0
     snow     = if VU.null (tcForcSnow ctx) then 0.0    else tcForcSnow ctx VU.! 0
-    -- Woody/tree classification from the per-patch PFT-type vector (CLM PFTs
-    -- 1-11 are trees + shrubs); default to tree for natural veg when absent.
-    isTree   = if VU.length (clmPatchIvt st) == np
-               then VU.map (\ivt -> ivt >= 1 && ivt <= 11) (clmPatchIvt st)
-               else bcast True
+    -- Per-patch PFT type (default to a temperate broadleaf deciduous tree,
+    -- ivt 7, for natural veg when the type vector is absent).
+    ivts     = if VU.length (clmPatchIvt st) == np
+               then clmPatchIvt st else VU.replicate np 7
+    -- Bioclimatic limits resolved per patch from the PFT type (LPJ/CLM-DGVM
+    -- table; see CNDVStep.dgvmPftBioclim).
+    bioclim  = VU.map dgvmPftBioclim ivts
+    isTree   = VU.map isWoodyPFT ivts
     inp = CNDVStepInput
       { csi_is_annual = isAnnual
       , csi_kyr       = kyr
@@ -336,10 +340,10 @@ cndvStep _cfg ctx st
       , csi_rain_snow = bcast (rain + snow)
       , csi_npp       = bcast (clmNPP st)
       , csi_leafc     = bcast (clmLeafC st)
-      , csi_tcmin     = bcast (-30.0)   -- placeholder pftpar28
-      , csi_tcmax     = bcast 18.0      -- placeholder pftpar29
-      , csi_gddmin    = bcast 0.0       -- placeholder pftpar30
-      , csi_twmax     = bcast 1000.0    -- placeholder pftpar31 (no warmth limit)
+      , csi_tcmin     = VU.map (\(a,_,_,_) -> a) bioclim  -- pftpar28
+      , csi_tcmax     = VU.map (\(_,b,_,_) -> b) bioclim  -- pftpar29
+      , csi_gddmin    = VU.map (\(_,_,c,_) -> c) bioclim  -- pftpar30
+      , csi_twmax     = VU.map (\(_,_,_,e) -> e) bioclim  -- pftpar31
       , csi_is_tree   = isTree
       }
 

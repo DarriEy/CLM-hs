@@ -173,6 +173,7 @@ clmRun rc = do
         , pcDataDir   = if null (rc_fforcing rc) then pcDataDir defaultPipelineConfig else rc_fforcing rc
         , pcVerbose   = rc_verbose rc
         , pcUseCN     = rc_use_cn rc
+        , pcUseCndv   = rc_use_cndv rc
         , pcOutputCSV = rc_fhistory rc
         }
 

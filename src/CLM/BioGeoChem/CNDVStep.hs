@@ -18,10 +18,11 @@
 -- Fortran: CNDVDriverMod.F90, CNDVType.F90 (UpdateAccVars),
 --          CNDVEstablishmentMod.F90, CNDVLightMod.F90.
 --
--- NOTE: the running means use an exponential-moving-average approximation of
--- CLM's boxcar 'runmean' accumulators (weight dt/(period*secs_per_day)); the
--- agddtw increment uses t_ref2m as a proxy for the 10-day mean t_a10, which
--- this single-column port does not track. Both are documented approximations.
+-- NOTE: the running means (t_a10, t_mo, prec365) use an exponential-moving-
+-- average with weight dt/(period*secs_per_day). This is the steady-state
+-- equivalent of CLM's boxcar 'runmean' accumulators (which converge to the same
+-- 1/period weighting once the period has filled); it avoids carrying a per-step
+-- ring buffer. agddtw is driven by the tracked 10-day mean t_a10.
 module CLM.BioGeoChem.CNDVStep
   ( -- * Constants
     tkfrz, cday, gddBase, rampAgddtw, twmaxOff
@@ -31,6 +32,9 @@ module CLM.BioGeoChem.CNDVStep
   , cndvStepAdvance
     -- * Cold-start seed
   , seedDGVS
+    -- * PFT bioclimatic limits
+  , dgvmPftBioclim
+  , isWoodyPFT
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -65,6 +69,46 @@ rampAgddtw = 300.0
 -- month upper limit (Fortran uses 999).
 twmaxOff :: Double
 twmaxOff = 999.0
+
+-- =========================================================================
+-- PFT bioclimatic limits
+-- =========================================================================
+
+-- | Per-PFT bioclimatic establishment/survival limits, returned as
+-- (tcmin, tcmax, gddmin, twmax) with temperatures in deg C and gddmin in
+-- degree-days above 5 C. twmax >= 1000 means "no warmest-month limit";
+-- tcmin <= -1000 means "no cold limit".
+--
+-- CLM reads these (pftpar28/29/30/31) from the NetCDF parameter file at runtime;
+-- this port does not load that file, so the table below uses the canonical
+-- LPJ/CLM-DGVM values (Sitch et al. 2003 Table 1; Levis et al. 2004), keyed by
+-- the CLM natural-PFT index. If the pftcon param file is wired in later, those
+-- values should override this table. The CLM PFT ordering used here:
+--   1-8  trees (1 ndl-evg-temp, 2 ndl-evg-bor, 3 ndl-dcd-bor, 4 bdl-evg-trop,
+--                5 bdl-evg-temp, 6 bdl-dcd-trop, 7 bdl-dcd-temp, 8 bdl-dcd-bor)
+--   9-11 shrubs   12-14 grasses (12 c3-arctic, 13 c3, 14 c4)   15+ crops
+dgvmPftBioclim :: Int -> (Double, Double, Double, Double)
+dgvmPftBioclim ivt = case ivt of
+  1  -> (  -2.0,   22.0,  900.0, 1000.0)  -- needleleaf evergreen temperate
+  2  -> ( -32.5,   -2.0,  600.0,   23.0)  -- needleleaf evergreen boreal
+  3  -> (nolim,    -2.0,  350.0,   23.0)  -- needleleaf deciduous boreal
+  4  -> (  15.5, 1000.0,    0.0, 1000.0)  -- broadleaf evergreen tropical
+  5  -> (   3.0,   18.8, 1200.0, 1000.0)  -- broadleaf evergreen temperate
+  6  -> (  15.5, 1000.0,    0.0, 1000.0)  -- broadleaf deciduous tropical
+  7  -> ( -17.0,   15.5, 1200.0, 1000.0)  -- broadleaf deciduous temperate
+  8  -> (nolim,    -2.0,  350.0,   23.0)  -- broadleaf deciduous boreal
+  9  -> (   3.0,   18.8, 1200.0, 1000.0)  -- broadleaf evergreen shrub
+  10 -> ( -17.0,   15.5, 1000.0, 1000.0)  -- broadleaf deciduous temperate shrub
+  11 -> (nolim,    -2.0,  350.0,   23.0)  -- broadleaf deciduous boreal shrub
+  12 -> (nolim,  1000.0,    0.0, 1000.0)  -- c3 arctic grass
+  13 -> (nolim,  1000.0,    0.0, 1000.0)  -- c3 non-arctic grass
+  14 -> (  15.5, 1000.0,    0.0, 1000.0)  -- c4 grass (needs warmth)
+  _  -> (nolim,  1000.0,    0.0, 1000.0)  -- crops / unknown: no climate limit
+  where nolim = -1000.0
+
+-- | Woody (tree or shrub) PFT classification: CLM natural-PFT indices 1-11.
+isWoodyPFT :: Int -> Bool
+isWoodyPFT ivt = ivt >= 1 && ivt <= 11
 
 -- =========================================================================
 -- Step input
@@ -108,8 +152,9 @@ cndvStepAdvance !inp !dgvs
 cndvAccumStep :: CNDVStepInput -> DGVSData -> DGVSData
 cndvAccumStep !inp !d =
   let !dt = csi_dt inp
-      !w30  = dt / (30.0  * cday)  -- 30-day running-mean weight
-      !w365 = dt / (365.0 * cday)  -- 365-day running-mean weight
+      !w10  = dt / (10.0  * cday)  -- 10-day running-mean weight (t_a10)
+      !w30  = dt / (30.0  * cday)  -- 30-day running-mean weight (t_mo)
+      !w365 = dt / (365.0 * cday)  -- 365-day running-mean weight (prec365)
       !t2m  = csi_t_ref2m inp
       !pr   = csi_rain_snow inp
       !npp  = csi_npp inp
@@ -118,11 +163,13 @@ cndvAccumStep !inp !d =
 
       !agdd' = VU.zipWith (\a t -> a + max 0.0 ((t - (tkfrz + gddBase)) * dt / cday))
                  (dgvs_agdd_patch d) t2m
-      -- agddtw uses t_ref2m as a proxy for the (untracked) 10-day mean t_a10
-      !agddtw' = VU.izipWith (\i a t ->
+      -- 10-day running mean of 2m temperature; feeds agddtw (Fortran: t_a10).
+      !ta10' = VU.zipWith (\o t -> o + (t - o) * w10) (dgvs_t_a10_patch d) t2m
+      -- agddtw accumulates degree-days of the 10-day mean above twmax.
+      !agddtw' = VU.izipWith (\i a ta ->
                    let !tw = twm VU.! i
-                   in a + max 0.0 ((t - tkfrz - tw) * dt / cday))
-                   (dgvs_agddtw_patch d) t2m
+                   in a + max 0.0 ((ta - tkfrz - tw) * dt / cday))
+                   (dgvs_agddtw_patch d) ta10'
       !tmo' = VU.zipWith (\o t -> o + (t - o) * w30) (dgvs_t_mo_patch d) t2m
       !tmoMin' = VU.zipWith min (dgvs_t_mo_min_patch d) tmo'
       !prec' = VU.zipWith (\o p -> o + (p - o) * w365) (dgvs_prec365_patch d) pr
@@ -130,6 +177,7 @@ cndvAccumStep !inp !d =
       !leafcmax' = VU.zipWith max (dgvs_leafcmax_patch d) lc
   in d { dgvs_agdd_patch = agdd'
        , dgvs_agddtw_patch = agddtw'
+       , dgvs_t_a10_patch = ta10'
        , dgvs_t_mo_patch = tmo'
        , dgvs_t_mo_min_patch = tmoMin'
        , dgvs_prec365_patch = prec'
@@ -275,6 +323,7 @@ seedDGVS np t0 nind0 fpc0 = defaultDGVSData
   , dgvs_agdd20_patch      = VU.replicate np 0.0
   , dgvs_tmomin20_patch    = VU.replicate np t0
   , dgvs_t_mo_patch        = VU.replicate np t0
+  , dgvs_t_a10_patch       = VU.replicate np t0
   , dgvs_t_mo_min_patch    = VU.replicate np 1.0e36
   , dgvs_prec365_patch     = VU.replicate np 0.0
   , dgvs_annsum_npp_patch  = VU.replicate np 0.0

@@ -27,7 +27,8 @@ import qualified CLM.Infrastructure.InitSubgrid as IS
 import qualified CLM.Infrastructure.SubgridAverage as SA
 import CLM.Types.DGVSData (DGVSData(..))
 import CLM.BioGeoChem.CNDVStep
-  ( CNDVStepInput(..), cndvStepAdvance, seedDGVS, tkfrz )
+  ( CNDVStepInput(..), cndvStepAdvance, seedDGVS, tkfrz
+  , dgvmPftBioclim, isWoodyPFT )
 import CLM.Types.Lnd2AtmData (Lnd2AtmData(..))
 import CLM.Infrastructure.DataStream
   ( mkDataStream, interpStream, streamLength, dataStreamFromVectors
@@ -1645,6 +1646,16 @@ main = hspec $ do
       let d = cndvStepAdvance (mkInput 1 False 1 (tkfrz + 2.0)) seed1
       dgvs_agdd_patch d VU.! 0 `shouldBe` 0.0
 
+    it "accumulates agddtw from the 10-day mean above twmax" $ do
+      -- Seed t_a10 hot (30C) and impose a 20C warmest-month limit; one day
+      -- adds (30 - 20) = 10 degree-days of heat stress.
+      let hot = seedDGVS 1 (tkfrz + 30.0) 0.2 0.5
+          inp = (mkInput 1 False 1 (tkfrz + 30.0)) { csi_twmax = VU.singleton 20.0 }
+          d = cndvStepAdvance inp hot
+      abs (dgvs_agddtw_patch d VU.! 0 - 10.0) `shouldSatisfy` (< 1.0e-9)
+      -- the 10-day running mean stays near the (constant) forcing
+      abs (dgvs_t_a10_patch d VU.! 0 - (tkfrz + 30.0)) `shouldSatisfy` (< 1.0e-9)
+
     it "accumulates the within-year NPP sum every step" $ do
       let inp = (mkInput 1 False 1 (tkfrz + 10.0)) { csi_npp = VU.singleton 3.0e-7 }
           d = cndvStepAdvance inp seed1
@@ -1670,6 +1681,18 @@ main = hspec $ do
           d = cndvStepAdvance (mkInput 1 True 2 (tkfrz + 10.0)) warm
       -- kyr==2 sets tmomin20 = t_mo_min directly (not the running blend)
       abs (dgvs_tmomin20_patch d VU.! 0 - (tkfrz + 8.0)) `shouldSatisfy` (< 1.0e-9)
+
+    it "runs a stable accumulate -> annual -> reset cycle over a simulated year" $ do
+      -- 364 daily accumulation steps at 12C, then one year-boundary step.
+      let afterYear   = foldl (\d _ -> cndvStepAdvance (mkInput 1 False 2 (tkfrz + 12.0)) d)
+                              seed1 [1 .. (364 :: Int)]
+          afterAnnual = cndvStepAdvance (mkInput 1 True 2 (tkfrz + 12.0)) afterYear
+      -- a full year of 12C accumulation builds substantial GDD pre-boundary
+      dgvs_agdd_patch afterYear VU.! 0 `shouldSatisfy` (> 2000.0)
+      -- the annual reset zeroed it; one post-boundary step re-accumulates ~7
+      dgvs_agdd_patch afterAnnual VU.! 0 `shouldSatisfy` (< 10.0)
+      -- stand survived (12C within temperate limits) and was trimmed by mortality
+      dgvs_nind_patch afterAnnual VU.! 0 `shouldSatisfy` (\n -> n > 0.0 && n <= 0.2)
 
     it "light competition caps total tree FPC at 0.95 on the annual step" $ do
       -- Two trees with FPC summing to 1.2; survival pre-armed via t_mo_min.
@@ -1710,6 +1733,24 @@ main = hspec $ do
       let st' = cndvStep defaultDriverConfig (cndvCtx True) (cndvState { clmCNActive = False })
       dgvs_agdd_patch (clmDGVS st') VU.! 0 `shouldBe` 0.0
       clmCNDVYear st' `shouldBe` 1
+
+    it "PFT bioclimatic table differentiates boreal trees, grasses, crops" $ do
+      -- boreal needleleaf evergreen (ivt 2): a real warmest-month limit (23C)
+      let (_, _, _, twmaxBoreal) = dgvmPftBioclim 2
+      twmaxBoreal `shouldBe` 23.0
+      -- temperate broadleaf deciduous (ivt 7): cold limit, no warmth limit
+      let (tcminTemp, _, gddTemp, twmaxTemp) = dgvmPftBioclim 7
+      tcminTemp `shouldBe` (-17.0)
+      gddTemp `shouldBe` 1200.0
+      twmaxTemp `shouldBe` 1000.0
+      -- c3 grass (ivt 13): no cold limit, no warmth limit, no GDD requirement
+      let (tcminGrass, _, gddGrass, twmaxGrass) = dgvmPftBioclim 13
+      tcminGrass `shouldSatisfy` (<= -1000.0)
+      gddGrass `shouldBe` 0.0
+      twmaxGrass `shouldBe` 1000.0
+      -- woody classification: trees/shrubs woody, grasses/crops not
+      map isWoodyPFT [1, 7, 11] `shouldBe` [True, True, True]
+      map isWoodyPFT [12, 14, 17] `shouldBe` [False, False, False]
 
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column

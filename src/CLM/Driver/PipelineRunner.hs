@@ -46,6 +46,7 @@ import CLM.Driver.CLMDriver
   , PhysicsPipeline(..)
   , defaultCLMState, defaultDriverState, defaultTimestepContext
   , clmDrv )
+import CLM.BioGeoChem.CNDVStep (seedDGVS, tkfrz)
 import CLM.Driver.PhysicsAdapters
   ( wiredPhysicsPipeline, initCNDecompPools
   , lakeFluxesStep, lakeTemperatureStep )
@@ -115,6 +116,7 @@ data PipelineConfig = PipelineConfig
   , pcVerbose     :: !Bool
   , pcOutputCSV   :: !FilePath
   , pcUseCN       :: !Bool       -- ^ Enable CN biogeochemistry
+  , pcUseCndv     :: !Bool       -- ^ Enable dynamic vegetation (seed clmDGVS)
   , pcRestartRoundtripDay :: !(Maybe Int)
     -- ^ Test hook: at the end of this day, write the full prognostic state to
     -- a restart directory and immediately read it back onto a /pristine/
@@ -131,8 +133,22 @@ defaultPipelineConfig = PipelineConfig
   , pcVerbose = True
   , pcOutputCSV = ""
   , pcUseCN = False
+  , pcUseCndv = False
   , pcRestartRoundtripDay = Nothing
   }
+
+-- | Seed the dynamic-vegetation (CNDV) state for a single natural-veg patch
+-- when dynamic vegetation is enabled; otherwise leave clmDGVS empty (which makes
+-- the wired cndvStep a no-op). The simplified CNDV driver runs survival /
+-- light-competition / mortality on a pre-established stand — sapling
+-- establishment that grows nind is not yet ported — so cold start begins with a
+-- modest established stand rather than bare ground. The seed temperature is
+-- neutral; the first year's accumulation populates t_mo_min / tmomin20.
+seedCNDV :: PipelineConfig -> CLMState -> CLMState
+seedCNDV cfg st
+  | pcUseCndv cfg = st { clmDGVS = seedDGVS 1 (tkfrz + 5.0) 0.1 0.5
+                       , clmCNDVYear = 1 }
+  | otherwise     = st
 
 -- ============================================================================
 -- Canopy-hydrology parameters from the CLM parameter file
@@ -1269,7 +1285,7 @@ runPipeline cfg = do
   let drvCfg = defaultDriverConfig
       pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
-  go st0 st0 defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
+  go (seedCNDV cfg st0) (seedCNDV cfg st0) defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
     go !base !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime !pl
       | step > total = return (reverse results)
@@ -1399,7 +1415,7 @@ runCLMForQrunoff cfg = do
   let drvCfg = defaultDriverConfig
       pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
-  goQ st0 defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
+  goQ (seedCNDV cfg st0) defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
   where
     goQ !st !drvSt !fr !step !qAcc !total !drvCfg !dtime !pl
       | step > total = return (reverse qAcc)

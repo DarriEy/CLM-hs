@@ -92,14 +92,19 @@ bitwise correctness.
    - **CNDV** (dynamic vegetation) — WIRED (2026-06). Added `clmDGVS` (DGVSData) +
      `clmCNDVYear` to CLMState, a `ppCNDV` pipeline slot, and `cndvStep` (PhysicsAdapters)
      running every step in `CLM.BioGeoChem.CNDVStep`. Faithful climate accumulators
-     (agdd base-5, agddtw, 30-day t_mo, 365-day prec365, annsum_npp, 20-yr tmomin20/agdd20
-     with the (19·old+new)/20 weighting) feed the annual Light→Establishment→Mortality
-     driver gated on tcIsBegCurrYear. 10 unit+integration tests. KNOWN GAPS: PFT bioclimatic
-     limits (pftpar28-31) use documented placeholder constants pending pftcon wiring;
-     agddtw uses t_ref2m as a t_a10 proxy; running means are an EMA approximation of CLM's
-     boxcar runmean; no Fortran reference exists so only sanity/conservation-validated; and
-     cold-start seeding of `clmDGVS` in the live runtime (behind a use_cndv flag) is the
-     remaining piece — until seeded, `cndvStep` is a no-op in production.
+     (agdd base-5, agddtw fed by a tracked 10-day t_a10, 30-day t_mo, 365-day prec365,
+     annsum_npp, 20-yr tmomin20/agdd20 with the (19·old+new)/20 weighting) feed the annual
+     Light→Establishment→Mortality driver gated on tcIsBegCurrYear. PFT bioclimatic limits
+     (tcmin/tcmax/gddmin/twmax) resolved per-patch from a canonical LPJ/CLM-DGVM table
+     (`dgvmPftBioclim`). Live activation: `use_cndv` (RunConfig) → `pcUseCndv` (PipelineConfig)
+     seeds `clmDGVS` at cold start with a single natural-veg stand; unseeded ⇒ `cndvStep`
+     is a no-op. 13 unit+integration tests. REMAINING (can't close here): no dynamic-veg
+     Fortran reference exists (sanity/conservation-validated only); the exact pftpar20/28-31
+     come from a NetCDF param file the port doesn't load yet (the LPJ table stands in and
+     would be overridden once pftcon is wired); the running means are the steady-state
+     equivalent of CLM's boxcar runmean (no ring buffer); and sapling establishment that
+     grows `nind` is not ported, so cold start seeds a pre-established stand rather than
+     bare ground (the driver does survival/competition/mortality only).
    - **Crop** — unported (see above).
 9. **Carbon isotopes (C13/C14)** — DONE (8e3d0d2). Wired CNCIsoFluxMod/CNC14DecayMod into
    cnBalanceCheckStep: GPP discrimination, respiration at source ratio, C14 decay. Honest
