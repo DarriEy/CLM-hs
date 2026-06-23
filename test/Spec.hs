@@ -17,7 +17,9 @@ import CLM.Driver.CLMDriver
 import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
-  , aggregateLnd2Atm, cndvStep )
+  , aggregateLnd2Atm, cndvStep, dustEmissionStep )
+import CLM.Types.FrictionVelocityData
+  ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
 import CLM.BioGeoChem.CNProducts
   ( CNProductsState(..), CNProductsFluxes(..)
@@ -1825,6 +1827,44 @@ main = hspec $ do
       -- woody classification: trees/shrubs woody, grasses/crops not
       map isWoodyPFT [1, 7, 11] `shouldBe` [True, True, True]
       map isWoodyPFT [12, 14, 17] `shouldBe` [False, False, False]
+
+  describe "Dust emission (Zender 2003, wired #dust)" $ do
+    -- Build a bare, dry, snow-free column with strong wind -> dust mobilizes.
+    let dustState ustar volw fracSno elai = defaultCLMState
+          { clmFrictionVel = defaultFrictionVelocityData
+              { fvel_ustar_patch = VU.singleton ustar
+              , fvel_u10_patch   = VU.singleton 10.0 }
+          , clmSoilState = defaultSoilStateData
+              { sstate_gwc_thr_col = VU.singleton 0.1
+              , sstate_bd_col      = VU.singleton 1500.0 }
+          , clmWaterState = defaultWaterStateData
+              { h2osoi_vol_col = VU.singleton volw }
+          , clmCanopyState = defaultCanopyStateData
+              { cstate_elai_patch = VU.singleton elai
+              , cstate_esai_patch = VU.singleton 0.1 }
+          , clmWaterDiagBulk = defaultWaterDiagnosticBulkData
+              { wdiag_frac_sno_col = VU.singleton fracSno }
+          }
+        dustCtx = defaultTimestepContext { tcForcRho = VU.singleton 1.2 }
+        runDust st = l2a_flxdst_grc (clmLnd2Atm (dustEmissionStep defaultDriverConfig dustCtx st))
+
+    it "mobilizes dust over bare dry soil in strong wind" $ do
+      let f = runDust (dustState 1.0 0.02 0.0 0.1)
+      VU.length f `shouldBe` 4               -- ndst size bins
+      VU.sum f `shouldSatisfy` (> 0.0)
+
+    it "emits no dust when the friction velocity is below threshold" $ do
+      let f = runDust (dustState 0.05 0.02 0.0 0.1)
+      VU.sum f `shouldBe` 0.0
+
+    it "suppresses dust under full snow cover" $ do
+      let f = runDust (dustState 1.0 0.02 1.0 0.1)
+      VU.sum f `shouldBe` 0.0
+
+    it "emits less dust under a denser canopy (more sheltering, less bare)" $ do
+      let bare  = VU.sum (runDust (dustState 1.0 0.02 0.0 0.1))
+          dense = VU.sum (runDust (dustState 1.0 0.02 0.0 3.0))
+      dense `shouldSatisfy` (< bare)
 
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column

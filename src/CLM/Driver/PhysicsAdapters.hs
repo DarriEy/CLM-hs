@@ -11,6 +11,7 @@ module CLM.Driver.PhysicsAdapters
     wiredPhysicsPipeline
   , initCNDecompPools
   , cndvStep
+  , dustEmissionStep
     -- * Individual adapters (PhysicsStep signature)
   , dayLengthStep
   , activeLayerStep
@@ -131,6 +132,10 @@ import CLM.BioGeoChem.CNDriver
 import CLM.Types.DGVSData (DGVSData(..), DGVEcophysCon(..))
 import CLM.BioGeoChem.CNDVStep
   ( CNDVStepInput(..), cndvStepAdvance, dgvmPftBioclim, isWoodyPFT )
+import CLM.BioGeoChem.DustEmission
+  ( DustEmisInput(..), DustEmisOutput(..), calcDustEmission
+  , calcSaltationFactor, calcOverlapFactor, defaultDustSizeParams
+  , DustSizeParams(..), ndst, dstSrcNbr )
 import CLM.BioGeoChem.DecompBGC
   ( DecompCascadeConData(..)
   , InitCascadeInput(..), InitCascadeOutput(..), initDecompCascadeBGC
@@ -291,6 +296,7 @@ wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
   , ppCNPostDrainage     = cnPostDrainageStep
   , ppCNBalanceCheck     = cnBalanceCheckStep
   , ppCNDV               = cndvStep
+  , ppDustEmission       = dustEmissionStep
   , ppHydrologyDrainage  = hydrologyDrainageStep
   , ppWaterBalance       = waterBalanceStep
   , ppEnergyBalance      = energyBalanceStep
@@ -356,6 +362,67 @@ cndvStep _cfg ctx st
       , csi_twmax     = VU.map (\(_,_,_,e) -> e) bioclim  -- pftpar31
       , csi_is_tree   = isTree
       }
+
+-- | Precomputed dust size-bin overlap matrix (source mode x sink bin), built
+-- once from the default lognormal source parameters (Zender et al. 2003).
+dustOverlapMatrix :: VU.Vector Double
+dustOverlapMatrix =
+  let p   = defaultDustSizeParams
+      vma = dsp_dmt_vma_src p
+      gsd = dsp_gsd_anl_src p
+      mfr = dsp_mss_frc_src p
+      grd = dsp_dmt_grd p
+  in VU.generate (dstSrcNbr * ndst) $ \idx ->
+       let (m, n) = idx `divMod` ndst
+       in calcOverlapFactor (vma VU.! m) (gsd VU.! m) (mfr VU.! m)
+                            (grd VU.! n) (grd VU.! (n + 1))
+
+-- | Dust emission step (Zender et al. 2003): wind-driven mobilization of
+-- size-resolved soil dust into the atmosphere, written to the lnd2atm dust
+-- flux vector. Inputs come from the friction-velocity, soil, water, and canopy
+-- state; the dry threshold friction velocity is derived from the saltation
+-- factor. Dust is suppressed under snow cover. The source erodibility
+-- (mbl_bsn_fct) uses a placeholder of 1.0 — the real value comes from a
+-- geomorphic source dataset the port does not carry — so the flux magnitude is
+-- indicative; its wind/moisture/bare-fraction dependence is faithful.
+dustEmissionStep :: PhysicsStep
+dustEmissionStep _cfg ctx st =
+  let fvel  = clmFrictionVel st
+      soil  = clmSoilState st
+      water = clmWaterState st
+      can   = clmCanopyState st
+      wdiag = clmWaterDiagBulk st
+      hd v def = if VU.null v then def else v VU.! 0
+      ustar = hd (fvel_ustar_patch fvel) 0.0
+      u10   = hd (fvel_u10_patch fvel) 0.0
+      rho   = hd (tcForcRho ctx) 1.2
+      elai  = hd (cstate_elai_patch can) 0.0
+      esai  = hd (cstate_esai_patch can) 0.0
+      laisai = elai + esai
+      gwcThr = hd (sstate_gwc_thr_col soil) 0.1
+      bd     = hd (sstate_bd_col soil) 1500.0
+      volw   = hd (h2osoi_vol_col water) 0.2
+      -- gravimetric water content = volumetric * rho_water / dry bulk density
+      gwc    = if bd > 0.0 then volw * 1000.0 / bd else 0.0
+      fracSno  = hd (wdiag_frac_sno_col wdiag) 0.0
+      fracBare = max 0.0 (min 1.0 (1.0 - elai))
+      -- dry threshold friction velocity from the saltation factor (Zender 2003)
+      uThrDry  = calcSaltationFactor 75.0e-6 2650.0 9.80616 (max 0.1 rho) 1.5e-5
+      out = calcDustEmission DustEmisInput
+        { dei_u_star      = ustar
+        , dei_u10         = u10
+        , dei_gwc_thr     = gwcThr
+        , dei_gwc         = gwc
+        , dei_mbl_bsn_fct = 1.0
+        , dei_laisai      = laisai
+        , dei_frac_bare   = fracBare
+        , dei_rho_atm     = rho
+        , dei_ovr_src_snk = dustOverlapMatrix
+        , dei_u_thr_dry   = uThrDry
+        }
+      snowScale = max 0.0 (1.0 - fracSno)
+      flux = VU.map (* snowScale) (deo_flx_mss_vrt_dst out)
+  in st { clmLnd2Atm = (clmLnd2Atm st) { l2a_flxdst_grc = flux } }
 
 -- ============================================================================
 -- Helpers

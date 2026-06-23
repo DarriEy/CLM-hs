@@ -403,6 +403,10 @@ data PhysicsPipeline = PhysicsPipeline
     -- Phase 9c: Annual dynamic vegetation (CNDV). Fires only on the year
     -- boundary (gated by tcIsBegCurrYear at the call site); a no-op otherwise.
   , ppCNDV                 :: !PhysicsStep
+    -- Phase 9d: Surface aerosol/biogenic emissions to the atmosphere (dust, VOC).
+    -- Diagnostic surface fluxes written to the lnd2atm coupling vectors.
+  , ppDustEmission         :: !PhysicsStep
+  , ppVOCEmission          :: !PhysicsStep
     -- Phase 9: Hydrology drainage
   , ppHydrologyDrainage    :: !PhysicsStep
     -- Phase 10: Balance and diagnostics
@@ -448,6 +452,8 @@ defaultPhysicsPipeline = PhysicsPipeline
   , ppCNPostDrainage     = idStep
   , ppCNBalanceCheck     = idStep
   , ppCNDV               = idStep
+  , ppDustEmission       = idStep
+  , ppVOCEmission        = idStep
   , ppHydrologyDrainage  = idStep
   , ppWaterBalance       = idStep
   , ppEnergyBalance      = idStep
@@ -702,10 +708,14 @@ clmDrvBoundaries cfg pipeline ctx drvState st0 =
     -- establishment/light/mortality driver on tcIsBegCurrYear.
     st23c = apply (ppCNDV pipeline) st23b
 
+    -- Phase 9d: Surface emissions (dust, VOC) to the atmosphere.
+    st23d = apply (ppDustEmission pipeline) st23c
+    st23e = apply (ppVOCEmission pipeline) st23d
+
     -- Phase 11: Albedo for next step
     st24 = if tcDoAlb ctx
-           then apply (ppSurfaceAlbedo pipeline) st23c
-           else st23c
+           then apply (ppSurfaceAlbedo pipeline) st23e
+           else st23e
 
     -- Advance driver state
     drvState' = advanceDriverState drvState (tcDtime ctx)
