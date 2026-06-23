@@ -17,7 +17,7 @@ import CLM.Driver.CLMDriver
 import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
-  , aggregateLnd2Atm, cndvStep, dustEmissionStep )
+  , aggregateLnd2Atm, cndvStep, dustEmissionStep, vocEmissionStep )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -1865,6 +1865,36 @@ main = hspec $ do
       let bare  = VU.sum (runDust (dustState 1.0 0.02 0.0 0.1))
           dense = VU.sum (runDust (dustState 1.0 0.02 0.0 3.0))
       dense `shouldSatisfy` (< bare)
+
+  describe "VOC emission (MEGAN isoprene, wired #voc)" $ do
+    -- Warm, leafy column with bright PAR -> isoprene emits.
+    let vocState tVeg elai = defaultCLMState
+          { clmTemp        = defaultTemperatureData { t_veg_patch = tVeg }
+          , clmCanopyState = defaultCanopyStateData
+              { cstate_elai_patch    = VU.singleton elai
+              , cstate_elai240_patch = VU.singleton elai }
+          , clmSoilState   = defaultSoilStateData { sstate_watsat_col = VU.singleton 0.4 }
+          , clmWaterState  = defaultWaterStateData { h2osoi_vol_col = VU.singleton 0.3 }
+          }
+        vocCtx par = defaultTimestepContext
+          { tcForcSolad = VU.singleton (par * 0.8)
+          , tcForcSolai = VU.singleton (par * 0.2) }
+        runVOC par tVeg elai =
+          l2a_flxvoc_grc (clmLnd2Atm (vocEmissionStep defaultDriverConfig (vocCtx par) (vocState tVeg elai)))
+
+    it "emits isoprene from a warm leafy canopy in daylight" $ do
+      let f = runVOC 500.0 298.0 3.0
+      VU.length f `shouldBe` 1
+      VU.sum f `shouldSatisfy` (> 0.0)
+
+    it "emits no isoprene in darkness (light-dependent)" $ do
+      VU.sum (runVOC 0.0 298.0 3.0) `shouldBe` 0.0
+
+    it "emits no isoprene with no leaf area" $ do
+      VU.sum (runVOC 500.0 298.0 0.0) `shouldBe` 0.0
+
+    it "emits more isoprene at warmer leaf temperature" $ do
+      VU.sum (runVOC 500.0 305.0 3.0) `shouldSatisfy` (> VU.sum (runVOC 500.0 295.0 3.0))
 
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column

@@ -12,6 +12,7 @@ module CLM.Driver.PhysicsAdapters
   , initCNDecompPools
   , cndvStep
   , dustEmissionStep
+  , vocEmissionStep
     -- * Individual adapters (PhysicsStep signature)
   , dayLengthStep
   , activeLayerStep
@@ -136,6 +137,9 @@ import CLM.BioGeoChem.DustEmission
   ( DustEmisInput(..), DustEmisOutput(..), calcDustEmission
   , calcSaltationFactor, calcOverlapFactor, defaultDustSizeParams
   , DustSizeParams(..), ndst, dstSrcNbr )
+import CLM.BioGeoChem.VOCEmission
+  ( VOCDriverInput(..), VOCDriverOutput(..), vocEmissionDriver )
+import CLM.Types.Atm2LndData (Atm2LndData(..))
 import CLM.BioGeoChem.DecompBGC
   ( DecompCascadeConData(..)
   , InitCascadeInput(..), InitCascadeOutput(..), initDecompCascadeBGC
@@ -297,6 +301,7 @@ wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
   , ppCNBalanceCheck     = cnBalanceCheckStep
   , ppCNDV               = cndvStep
   , ppDustEmission       = dustEmissionStep
+  , ppVOCEmission        = vocEmissionStep
   , ppHydrologyDrainage  = hydrologyDrainageStep
   , ppWaterBalance       = waterBalanceStep
   , ppEnergyBalance      = energyBalanceStep
@@ -423,6 +428,59 @@ dustEmissionStep _cfg ctx st =
       snowScale = max 0.0 (1.0 - fracSno)
       flux = VU.map (* snowScale) (deo_flx_mss_vrt_dst out)
   in st { clmLnd2Atm = (clmLnd2Atm st) { l2a_flxdst_grc = flux } }
+
+-- | Biogenic VOC (isoprene) emission step (MEGAN; Guenther et al. 2006 / Heald
+-- 2009): drives the ported 'vocEmissionDriver' off the live vegetation
+-- temperature, incident PAR, LAI, soil wetness, and CO2, writing the emission
+-- rate (ug/m2/hr) to the lnd2atm VOC flux vector.
+--
+-- Honest limitations: this wires a single representative compound (isoprene)
+-- with standard MEGAN2.1 light-dependent constants and a representative
+-- emission factor (the per-PFT emission factors come from MEGAN parameter files
+-- the port does not carry); the 24-hr / 240-hr running means are stubbed with
+-- the current values (the port has no rolling-average history yet), so the
+-- light/temperature response is instantaneous rather than acclimated. The
+-- gamma-factor structure and the LAI / soil-moisture / leaf-age / CO2
+-- dependences are faithful.
+vocEmissionStep :: PhysicsStep
+vocEmissionStep _cfg ctx st =
+  let temp = clmTemp st
+      can  = clmCanopyState st
+      soil = clmSoilState st
+      water = clmWaterState st
+      atm  = clmAtm2Lnd st
+      hd v def = if VU.null v then def else v VU.! 0
+      tVeg = t_veg_patch temp
+      -- incident PAR (umol/m2/s) from the visible solar band (~4.6 umol per W/m2)
+      solad = hd (tcForcSolad ctx) 0.0
+      solai = hd (tcForcSolai ctx) 0.0
+      par = (solad + solai) * 4.6
+      elai = hd (cstate_elai_patch can) 0.0
+      elai240 = hd (cstate_elai240_patch can) 0.0
+      watsat = hd (sstate_watsat_col soil) 0.4
+      volw = hd (h2osoi_vol_col water) 0.2
+      wetness = if watsat > 0.0 then max 0.0 (min 1.0 (volw / watsat)) else 0.5
+      pco2 = hd (a2l_forc_pco2_grc atm) 0.0
+      pbot = hd (a2l_forc_pbot_not_downscaled_grc atm) 0.0
+      co2ppm = if pco2 > 0.0 && pbot > 0.0 then 1.0e6 * pco2 / pbot else 367.0
+      -- leaf-age fractions from the LAI trend (Fortran VOCEmissionMod:959-977)
+      elaiPrev = 2.0 * elai240 - elai
+      (fnew, fmat, fold)
+        | elai240 <= 0.0 || elai <= 0.0 = (0.0, 1.0, 0.0)
+        | elaiPrev > elai = let d = (elaiPrev - elai) / elaiPrev in (0.0, 1.0 - d, d)
+        | elaiPrev < elai = let r = elaiPrev / elai in (1.0 - r, r, 0.0)
+        | otherwise       = (0.0, 1.0, 0.0)
+      out = vocEmissionDriver VOCDriverInput
+        { vdi_t_veg = tVeg, vdi_t_veg24 = tVeg, vdi_t_veg240 = tVeg
+        , vdi_par = par, vdi_par24 = par, vdi_par240 = par
+        , vdi_lai = elai, vdi_co2_ppm = co2ppm, vdi_soil_wetness = wetness
+        , vdi_fnew = fnew, vdi_fgro = 0.0, vdi_fmat = fmat, vdi_fold = fold
+        , vdi_epsilon = 600.0   -- representative isoprene EF (ug/m2/hr); PFT-specific in MEGAN
+        , vdi_LDF = 1.0, vdi_betaT = 0.13, vdi_ct1 = 95.0, vdi_ct2 = 230.0, vdi_Ceo = 2.0
+        , vdi_Anew = 0.05, vdi_Agro = 0.6, vdi_Amat = 1.0, vdi_Aold = 0.9
+        , vdi_is_isoprene = True
+        }
+  in st { clmLnd2Atm = (clmLnd2Atm st) { l2a_flxvoc_grc = VU.singleton (vdo_emission out) } }
 
 -- ============================================================================
 -- Helpers
