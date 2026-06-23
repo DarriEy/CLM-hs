@@ -90,8 +90,13 @@ WIRED in Phase 3 (now run free-running on the soil column): fire (CNFireLi2014/C
 methane (ch4Mod — net surface flux on the lnd2atm diagnostic), carbon isotopes C13/C14
 (CNCIsoFluxMod/CNC14DecayMod — ratio-diagnostic conservative with bulk pools, since CLMState
 has no prognostic isotope field).
-Still dead code (0 driver references): dynamic vegetation (CNDV), wood products / harvest,
-annual updates, dust & VOC emissions. DEFERRED — crop allocation/phenology: the run has no
+WIRED in Phase 4 (2026-06): dynamic vegetation (CNDV) — ppCNDV step runs every timestep
+(faithful agdd/agddtw/t_a10/t_mo/prec365/annsum_npp accumulators + 20-yr means) and the
+annual Light→Establishment→Mortality driver on the year boundary; per-PFT bioclimatic limits
+from an LPJ/CLM-DGVM table; activated by use_cndv (seeds clmDGVS). See ROADMAP item 8 for the
+documented limitations (no Fortran reference; LPJ pftpar stand-in; pre-established cold start).
+Still dead code (0 driver references): wood products / harvest, annual updates, dust & VOC
+emissions. DEFERRED — crop allocation/phenology: the run has no
 crop landunit (lun_itype [1,5]) or crop PFT (pch_itype [0,1,12,0]; crops are index 15+), so
 wiring it would be dead code; deferred to Phase 4 (multi-landunit / crop PFT). (Per-layer
 plant N uptake — SoilBiogeochemNitrogenUptakeMod — WIRED in Phase 2; the implicit matrix C/N
@@ -115,7 +120,7 @@ SoilTemperature 998 vs 2,974) — core algorithm without full option/edge-case c
 | Area | Real status |
 |------|-------------|
 | Biogeophys core kernels (1 soil column) | mostly real (~40 modules) |
-| CN/BGC | ~⅓ wired (alloc/MR/Ncomp/decomp); fire/mortality/CNDV/isotopes/products/crop/phenology-onset NOT wired |
+| CN/BGC | ~½ wired (alloc/MR/Ncomp/decomp/fire/mortality/isotopes/phenology-onset/CNDV); wood products/harvest, annual updates, dust & VOC, crop NOT wired |
 | soilbiogeochem | ~60–70%; missing matrix solver + N uptake |
 | dyn_subgrid | 0% |
 | Restart | **real, bit-identical round-trip** (native binary) + **reads Fortran `clm2.r.*.nc`** into sane state; warm-start-run parity pending |
