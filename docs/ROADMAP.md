@@ -104,9 +104,11 @@ bitwise correctness.
      ground the tree canopy leaves, capped at fpc_grass_max = 1−min(fpc_tree,0.95); the tree
      canopy is re-capped at 0.95 after establishment — so combined cover stays ≤ 1. The full
      Light→survival→Mortality→Establishment (woody + grass) loop. 17 unit+integration tests.
-     REMAINING (can't close here): no dynamic-veg Fortran reference exists
-     (sanity/conservation-validated only); the exact pftpar20/28-31 come from a NetCDF param
-     file the port doesn't load yet (the LPJ table stands in, overridable once pftcon is wired);
+     The real per-PFT bioclimatic constants (pftpar20/28-31) are now loaded from clm5_params.nc
+     via `readDGVEcophysCon` (DGVEcophysCon on CLMState); `cndvStep` uses them when present and
+     falls back to the LPJ table otherwise (scripts/extract_cndv_pftpar.py regenerates the
+     pftcon_pftpar*.bin). REMAINING (can't close here): no dynamic-veg Fortran reference exists
+     (sanity/conservation-validated only);
      the running means are the steady-state equivalent of CLM's boxcar runmean (no ring buffer);
      establishment is not coupled to prescribed sapling carbon pools (Fortran hardcodes
      leafcmax=1/deadstemc=0.1, so nind growth is self-contained); and the carbon-driven

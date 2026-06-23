@@ -96,7 +96,8 @@ import CLM.Types.SoilBGCNitrogenStateData (SoilBGCNitrogenStateData(..), default
 import CLM.Types.SoilBGCCarbonFluxData (SoilBGCCarbonFluxData(..), defaultSoilBGCCarbonFluxData)
 import CLM.Types.SoilBGCNitrogenFluxData (SoilBGCNitrogenFluxData(..), defaultSoilBGCNitrogenFluxData)
 import CLM.Types.SoilBGCStateData (SoilBGCStateData(..), defaultSoilBGCStateData)
-import CLM.Types.DGVSData         (DGVSData(..), defaultDGVSData)
+import CLM.Types.DGVSData         (DGVSData(..), defaultDGVSData
+                                  , DGVEcophysCon(..), defaultDGVEcophysCon)
 import CLM.Infrastructure.Filters (FilterSet(..), defaultFilterSet)
 
 -- ============================================================================
@@ -266,6 +267,10 @@ data CLMState = CLMState
   , clmCNDVYear      :: !Int              -- ^ Simulation year index for CNDV
                                           --   (kyr); incremented at each year
                                           --   boundary by the CNDV step.
+  , clmDGVEcophys    :: !DGVEcophysCon    -- ^ Per-PFT CNDV ecophysiological
+                                          --   constants (pftpar20/28-31). Empty
+                                          --   ⇒ cndvStep falls back to the
+                                          --   built-in LPJ bioclimatic table.
     -- Calibration parameters (injected by SiteCalibration, read by hydrology)
   , clmP_baseflow_scalar :: !Double
   , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
@@ -332,6 +337,7 @@ defaultCLMState = CLMState
   , clmNDecompPools  = 0
   , clmDGVS          = defaultDGVSData
   , clmCNDVYear      = 1
+  , clmDGVEcophys    = defaultDGVEcophysCon
   , clmP_baseflow_scalar = 0.01
   , clmP_fff        = 0.5
   , clmP_fmax       = 0.5

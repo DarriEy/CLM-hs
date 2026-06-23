@@ -25,7 +25,8 @@ import CLM.BioGeoChem.CNProducts
   , productPoolUpdate, kprod1, kprod10, kprod100 )
 import qualified CLM.Infrastructure.InitSubgrid as IS
 import qualified CLM.Infrastructure.SubgridAverage as SA
-import CLM.Types.DGVSData (DGVSData(..))
+import CLM.Types.DGVSData (DGVSData(..), DGVEcophysCon(..), defaultDGVEcophysCon)
+import CLM.Infrastructure.ReadParams (readDGVEcophysCon)
 import CLM.BioGeoChem.CNDVStep
   ( CNDVStepInput(..), cndvStepAdvance, seedDGVS, tkfrz
   , dgvmPftBioclim, isWoodyPFT )
@@ -1781,6 +1782,31 @@ main = hspec $ do
       let st' = cndvStep defaultDriverConfig (cndvCtx True) (cndvState { clmCNActive = False })
       dgvs_agdd_patch (clmDGVS st') VU.! 0 `shouldBe` 0.0
       clmCNDVYear st' `shouldBe` 1
+
+    it "uses loaded per-PFT ecophysiological constants over the LPJ fallback" $ do
+      -- A loaded DGVEcophysCon with an unreachable tcmin (9999.9) for PFT 0
+      -- must kill the patch (survival fails), whereas the LPJ fallback (no cold
+      -- limit for unknown PFTs) would let it survive.
+      let econ = defaultDGVEcophysCon
+            { dgveco_tcmin  = VU.singleton 9999.9
+            , dgveco_tcmax  = VU.singleton 1000.0
+            , dgveco_gddmin = VU.singleton 0.0
+            , dgveco_twmax  = VU.singleton 1000.0
+            }
+          stLoaded = cndvState { clmDGVEcophys = econ
+                               , clmPatchIvt   = VU.singleton 0 }
+          d = cndvStep defaultDriverConfig (cndvCtx True) stLoaded
+      dgvs_nind_patch (clmDGVS d) VU.! 0 `shouldBe` 0.0   -- excluded by real tcmin
+
+    it "reads the real CNDV pftpar constants from the binary params" $ do
+      econ <- readDGVEcophysCon "test/data/params"
+      -- needleleaf evergreen boreal tree (PFT 2): tcmin=-32.5, twmax=23, gddmin=600
+      dgveco_tcmin econ VU.! 2 `shouldBe` (-32.5)
+      dgveco_twmax econ VU.! 2 `shouldBe` 23.0
+      dgveco_gddmin econ VU.! 2 `shouldBe` 600.0
+      -- needleleaf evergreen temperate tree (PFT 1): tcmax=22, crownarea_max=15
+      dgveco_tcmax econ VU.! 1 `shouldBe` 22.0
+      dgveco_crownarea_max econ VU.! 1 `shouldBe` 15.0
 
     it "PFT bioclimatic table differentiates boreal trees, grasses, crops" $ do
       -- boreal needleleaf evergreen (ivt 2): a real warmest-month limit (23C)

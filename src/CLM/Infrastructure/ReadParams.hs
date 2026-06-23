@@ -34,6 +34,8 @@ module CLM.Infrastructure.ReadParams
     -- * PFT constants
   , PFTConstants(..)
   , defaultPFTConstants
+    -- * Dynamic vegetation (CNDV) ecophysiological constants
+  , readDGVEcophysCon
     -- * Snow layer constants
   , SnowLayerConstants(..)
   , defaultSnowLayerConstants
@@ -48,6 +50,7 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 
 import CLM.Infrastructure.BinaryIO
   ( readFloat64Vector, readFloat64Scalar )
+import CLM.Types.DGVSData (DGVEcophysCon(..), defaultDGVEcophysCon)
 
 -- ---------------------------------------------------------------------------
 -- initVertical scalar parameters
@@ -588,6 +591,31 @@ readCanopyFluxesParamsBinary dir = do
     }
 
 -- | Read PFT constants from binary files.
+-- | Read the CNDV (dynamic global vegetation) per-PFT ecophysiological
+-- constants from the binary param files (pftpar20/28/29/30/31, extracted from
+-- clm5_params.nc). Returns 'defaultDGVEcophysCon' (empty vectors) when the
+-- files are absent, so callers fall back to the built-in LPJ table.
+--
+-- pftpar20 -> crownarea_max, pftpar28 -> tcmin, pftpar29 -> tcmax,
+-- pftpar30 -> gddmin, pftpar31 -> twmax. Values are indexed by PFT type
+-- (index 0 = bare ground). Fill values (9999.9 for tcmin, 1000 for tcmax/twmax)
+-- are loaded as-is; the CNDV survival/establishment logic treats them correctly
+-- (twmax >= 999 = no warmth limit; an out-of-range tcmin excludes the PFT).
+readDGVEcophysCon :: FilePath -> IO DGVEcophysCon
+readDGVEcophysCon dir = do
+  crownarea_max <- readPftVecOpt dir "pftcon_pftpar20"
+  tcmin         <- readPftVecOpt dir "pftcon_pftpar28"
+  tcmax         <- readPftVecOpt dir "pftcon_pftpar29"
+  gddmin        <- readPftVecOpt dir "pftcon_pftpar30"
+  twmax         <- readPftVecOpt dir "pftcon_pftpar31"
+  return $! defaultDGVEcophysCon
+    { dgveco_crownarea_max = crownarea_max
+    , dgveco_tcmin         = tcmin
+    , dgveco_tcmax         = tcmax
+    , dgveco_gddmin        = gddmin
+    , dgveco_twmax         = twmax
+    }
+
 readPFTConstantsBinary :: FilePath -> IO PFTConstants
 readPFTConstantsBinary dir = do
   let rdv name = readPftVecOpt dir ("pftcon_" ++ name)

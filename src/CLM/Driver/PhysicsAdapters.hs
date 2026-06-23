@@ -128,7 +128,7 @@ import CLM.BioGeoChem.CNDriver
   ( CNDriverConfig(..), defaultCNDriverConfig
   , CNDriverInput(..), CNDriverResult(..)
   , CNLeachingInput(..), cnDriverNoLeaching, cnDriverLeaching )
-import CLM.Types.DGVSData (DGVSData(..))
+import CLM.Types.DGVSData (DGVSData(..), DGVEcophysCon(..))
 import CLM.BioGeoChem.CNDVStep
   ( CNDVStepInput(..), cndvStepAdvance, dgvmPftBioclim, isWoodyPFT )
 import CLM.BioGeoChem.DecompBGC
@@ -328,9 +328,19 @@ cndvStep _cfg ctx st
     -- ivt 7, for natural veg when the type vector is absent).
     ivts     = if VU.length (clmPatchIvt st) == np
                then clmPatchIvt st else VU.replicate np 7
-    -- Bioclimatic limits resolved per patch from the PFT type (LPJ/CLM-DGVM
-    -- table; see CNDVStep.dgvmPftBioclim).
-    bioclim  = VU.map dgvmPftBioclim ivts
+    -- Bioclimatic limits resolved per patch from the PFT type. Prefer the real
+    -- per-PFT constants loaded from clm5_params.nc (pftpar28-31) when present;
+    -- otherwise fall back to the built-in LPJ/CLM-DGVM table.
+    econ     = clmDGVEcophys st
+    haveEcon = not (VU.null (dgveco_tcmin econ))
+    resolve ivt
+      | haveEcon && ivt >= 0 && ivt < VU.length (dgveco_tcmin econ) =
+          ( dgveco_tcmin econ  VU.! ivt
+          , dgveco_tcmax econ  VU.! ivt
+          , dgveco_gddmin econ VU.! ivt
+          , dgveco_twmax econ  VU.! ivt )
+      | otherwise = dgvmPftBioclim ivt
+    bioclim  = VU.map resolve ivts
     isTree   = VU.map isWoodyPFT ivts
     inp = CNDVStepInput
       { csi_is_annual = isAnnual

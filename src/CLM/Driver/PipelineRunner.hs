@@ -72,7 +72,8 @@ import CLM.Infrastructure.BinaryIO
   , writeFloat64Vector
   , readManifestDims, ManifestDims(..) )
 import CLM.Infrastructure.ReadParams
-  ( readParametersBinary, AllParams(..), PFTConstants(..) )
+  ( readParametersBinary, AllParams(..), PFTConstants(..), readDGVEcophysCon )
+import CLM.Types.DGVSData (DGVEcophysCon(..), defaultDGVEcophysCon)
 import CLM.Infrastructure.NetCDF
   ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D, ncReadDoubleScalar
   , ncDimLen, ncWriteTimeseries )
@@ -139,15 +140,17 @@ defaultPipelineConfig = PipelineConfig
 
 -- | Seed the dynamic-vegetation (CNDV) state for a single natural-veg patch
 -- when dynamic vegetation is enabled; otherwise leave clmDGVS empty (which makes
--- the wired cndvStep a no-op). The simplified CNDV driver runs survival /
--- light-competition / mortality on a pre-established stand — sapling
--- establishment that grows nind is not yet ported — so cold start begins with a
--- modest established stand rather than bare ground. The seed temperature is
--- neutral; the first year's accumulation populates t_mo_min / tmomin20.
-seedCNDV :: PipelineConfig -> CLMState -> CLMState
-seedCNDV cfg st
+-- the wired cndvStep a no-op). Also installs the per-PFT ecophysiological
+-- constants ('DGVEcophysCon', from clm5_params.nc) so the step uses the real
+-- bioclimatic limits; if those files are absent the vectors are empty and
+-- cndvStep falls back to the built-in LPJ table. Cold start begins with a
+-- modest established stand; the first year's accumulation populates
+-- t_mo_min / tmomin20.
+seedCNDV :: PipelineConfig -> DGVEcophysCon -> CLMState -> CLMState
+seedCNDV cfg econ st
   | pcUseCndv cfg = st { clmDGVS = seedDGVS 1 (tkfrz + 5.0) 0.1 0.5
-                       , clmCNDVYear = 1 }
+                       , clmCNDVYear = 1
+                       , clmDGVEcophys = econ }
   | otherwise     = st
 
 -- ============================================================================
@@ -1285,7 +1288,10 @@ runPipeline cfg = do
   let drvCfg = defaultDriverConfig
       pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
-  go (seedCNDV cfg st0) (seedCNDV cfg st0) defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
+  econ <- if pcUseCndv cfg then readDGVEcophysCon (dir </> "params")
+                           else return defaultDGVEcophysCon
+  let st0c = seedCNDV cfg econ st0
+  go st0c st0c defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
     go !base !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime !pl
       | step > total = return (reverse results)
@@ -1415,7 +1421,9 @@ runCLMForQrunoff cfg = do
   let drvCfg = defaultDriverConfig
       pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
-  goQ (seedCNDV cfg st0) defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
+  econ <- if pcUseCndv cfg then readDGVEcophysCon (dir </> "params")
+                           else return defaultDGVEcophysCon
+  goQ (seedCNDV cfg econ st0) defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
   where
     goQ !st !drvSt !fr !step !qAcc !total !drvCfg !dtime !pl
       | step > total = return (reverse qAcc)
