@@ -19,7 +19,10 @@
 --
 -- Establishment is NOT coupled to prescribed sapling carbon pools (Fortran
 -- hardcodes leafcmax=1, deadstemc=0.1 at establishment), so nind/fpcgrid growth
--- is self-contained. Grass establishment (non-woody fill) is not yet ported.
+-- is self-contained. Woody PFTs recruit via the sapling rate; grasses (nind=1,
+-- crownarea=1) fill the ground the tree canopy leaves, capped at
+-- fpc_grass_max = 1 - min(fpc_tree, 0.95). The carbon-driven (slatop/LAI) grass
+-- FPC is simplified to "fill available space up to the grass cap".
 --
 -- Fortran: CNDVDriverMod.F90, CNDVType.F90 (UpdateAccVars),
 --          CNDVEstablishmentMod.F90, CNDVLightMod.F90.
@@ -49,7 +52,7 @@ import CLM.Types.DGVSData (DGVSData(..), defaultDGVSData)
 import CLM.BioGeoChem.CNDV
   ( EstablishmentInput(..), EstablishmentOutput(..), calcEstablishment
   , MortalityInput(..), MortalityOutput(..), calcMortality
-  , lightCompetition )
+  , lightCompetition, fpcTreeMax )
 
 -- =========================================================================
 -- Constants
@@ -81,10 +84,11 @@ twmaxOff = 999.0
 estabMax :: Double
 estabMax = 0.24
 
--- | Seed gridcell FPC for a newly-establishing woody patch
--- (Fortran CNDVEstablishmentMod.F90:218).
-seedFpcWoody :: Double
+-- | Seed gridcell FPC for a newly-establishing woody / grass patch
+-- (Fortran CNDVEstablishmentMod.F90:218,220).
+seedFpcWoody, seedFpcGrass :: Double
 seedFpcWoody = 0.000844
+seedFpcGrass = 0.05
 
 -- =========================================================================
 -- PFT bioclimatic limits
@@ -266,15 +270,56 @@ cndvAnnual !inp !d =
                 -- newly (re)establishing woody patch: seed FPC (Fortran:218)
                 else (estabGrid, seedFpcWoody)
       !grown = [ growEstab i | i <- [0 .. n - 1] ]
-      !nindE = VU.fromList [ fst g | g <- grown ]
-      !fpcE  = VU.fromList [ snd g | g <- grown ]
+      !nindPostE = VU.fromList [ fst g | g <- grown ]
+      !fpcPostE  = VU.fromList [ snd g | g <- grown ]
+
+      -- Re-cap the tree canopy at 0.95 AFTER establishment (which can re-inflate
+      -- it above the post-light value); scale tree nind & fpc proportionally
+      -- (Fortran CNDVEstablishmentMod.F90:321-335).
+      !fpcTreePre = sum [ fpcPostE VU.! i
+                        | i <- [0 .. n - 1], isTree VU.! i, nindPostE VU.! i > 0.0 ]
+      !treeScale = if fpcTreePre > fpcTreeMax then fpcTreeMax / fpcTreePre else 1.0
+      !nindE = VU.imap (\i nv -> if isTree VU.! i then nv * treeScale else nv) nindPostE
+      !fpcE  = VU.imap (\i fv -> if isTree VU.! i then fv * treeScale else fv) fpcPostE
+
+      -- Step 5: grass (non-woody) establishment. Grasses carry no recruitment
+      -- rate or real individual density: nind=1, crownarea=1, and they fill the
+      -- ground the tree canopy leaves, capped at fpc_grass_max = 1 - min(tree,
+      -- 0.95) and shared among the present grass PFTs (Fortran
+      -- CNDVEstablishmentMod.F90:337-373 / CNDVLightMod.F90:148-202). The
+      -- carbon-driven (slatop/LAI) FPC is simplified to "fill available space".
+      present0 i = dgvs_nind_patch d VU.! i > 0.0
+      grassActive i = not (isTree VU.! i)
+                      && (if present0 i then rSurvive (results !! i)
+                                         else rEstab (results !! i))
+      !fpcTreeFinal = sum [ fpcE VU.! i
+                          | i <- [0 .. n - 1], isTree VU.! i, nindE VU.! i > 0.0 ]
+      !fpcGrassMax = max 0.0 (1.0 - min fpcTreeFinal fpcTreeMax)
+      !nGrass = length [ () | i <- [0 .. n - 1], grassActive i ]
+      !grassShare = if nGrass > 0 then fpcGrassMax / fromIntegral nGrass else 0.0
+      finalize i =
+        if isTree VU.! i then (nindE VU.! i, fpcE VU.! i)  -- woody already done
+        else if grassActive i
+             -- an established grass fills its share of open ground; a brand-new
+             -- grass seeds at 0.05 (capped to the available share).
+             then let fpcG = if present0 i then grassShare
+                             else min grassShare seedFpcGrass
+                  in (1.0, fpcG)
+             else (0.0, 0.0)                                -- grass removed
+      !final = [ finalize i | i <- [0 .. n - 1] ]
+      !nindF = VU.fromList [ fst g | g <- final ]
+      !fpcF  = VU.fromList [ snd g | g <- final ]
+      -- grass crown area is 1 by convention; leave woody crown area untouched
+      !crown' = VU.imap (\i ca -> if not (isTree VU.! i) && grassActive i then 1.0 else ca)
+                  (dgvs_crownarea_patch d)
 
   in d { dgvs_annsum_npp_patch = annsum
        , dgvs_heatstress_patch = heat
        , dgvs_tmomin20_patch = tmomin20'
        , dgvs_agdd20_patch = agdd20'
-       , dgvs_nind_patch = nindE
-       , dgvs_fpcgrid_patch = fpcE
+       , dgvs_nind_patch = nindF
+       , dgvs_fpcgrid_patch = fpcF
+       , dgvs_crownarea_patch = crown'
        , dgvs_greffic_patch = greff'
        , dgvs_fpcgridold_patch = dgvs_fpcgrid_patch d
        -- present_patch is a Bool vector omitted from DGVSData by convention;
@@ -294,6 +339,7 @@ data PatchAnnual = PatchAnnual
   , rPresent :: !Bool
   , rGreffic :: !Double
   , rEstab   :: !Bool    -- ^ passed the bioclimatic establishment filter
+  , rSurvive :: !Bool    -- ^ passed the bioclimatic survival filter
   }
 
 patchAnnual :: CNDVStepInput -> DGVSData -> Int
@@ -347,6 +393,7 @@ patchAnnual !inp !d !i !annsum !heat !fpcL !nindL =
      , rPresent = not killed && present0
      , rGreffic = greffic
      , rEstab = eso_estab eo
+     , rSurvive = survived
      }
 
 -- =========================================================================

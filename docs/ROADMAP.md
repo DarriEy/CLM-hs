@@ -100,14 +100,17 @@ bitwise correctness.
      seeds `clmDGVS` at cold start with a single natural-veg stand; unseeded ⇒ `cndvStep`
      is a no-op. Sapling establishment is ported (`estab_rate = 0.24·(1−e^(5·(fpc_tree−1)))/
      n_estab`, `nind += estab_rate·(1−fpc_tree)`), so woody PFTs passing the bioclimatic
-     filter grow `nind`/`fpcgrid` into the open canopy — the full establish→compete→mortality
-     loop. 15 unit+integration tests. REMAINING (can't close here): no dynamic-veg Fortran
-     reference exists (sanity/conservation-validated only); the exact pftpar20/28-31 come from
-     a NetCDF param file the port doesn't load yet (the LPJ table stands in, overridable once
-     pftcon is wired); the running means are the steady-state equivalent of CLM's boxcar
-     runmean (no ring buffer); establishment is not coupled to prescribed sapling carbon pools
-     (Fortran hardcodes leafcmax=1/deadstemc=0.1, so nind growth is self-contained); and grass
-     (non-woody) establishment fill is not yet ported.
+     filter grow `nind`/`fpcgrid` into the open canopy. Grasses (nind=1, crownarea=1) fill the
+     ground the tree canopy leaves, capped at fpc_grass_max = 1−min(fpc_tree,0.95); the tree
+     canopy is re-capped at 0.95 after establishment — so combined cover stays ≤ 1. The full
+     Light→survival→Mortality→Establishment (woody + grass) loop. 17 unit+integration tests.
+     REMAINING (can't close here): no dynamic-veg Fortran reference exists
+     (sanity/conservation-validated only); the exact pftpar20/28-31 come from a NetCDF param
+     file the port doesn't load yet (the LPJ table stands in, overridable once pftcon is wired);
+     the running means are the steady-state equivalent of CLM's boxcar runmean (no ring buffer);
+     establishment is not coupled to prescribed sapling carbon pools (Fortran hardcodes
+     leafcmax=1/deadstemc=0.1, so nind growth is self-contained); and the carbon-driven
+     (slatop/LAI) grass FPC is simplified to "fill available space up to the grass cap".
    - **Crop** — unported (see above).
 9. **Carbon isotopes (C13/C14)** — DONE (8e3d0d2). Wired CNCIsoFluxMod/CNC14DecayMod into
    cnBalanceCheckStep: GPP discrimination, respiration at source ratio, C14 decay. Honest

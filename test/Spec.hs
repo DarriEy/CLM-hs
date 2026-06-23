@@ -1706,6 +1706,30 @@ main = hspec $ do
       -- near-full canopy: almost no recruitment, so nind does not climb above seed
       dgvs_nind_patch d VU.! 0 `shouldSatisfy` (< 0.51)
 
+    it "grass fills open ground (nind=1, fpc grows toward the grass cap)" $ do
+      -- A present grass with no trees fills toward fpc_grass_max = 1.
+      let grassStand = (seedDGVS 1 (tkfrz + 8.0) 1.0 0.05)
+            { dgvs_t_mo_min_patch = VU.singleton (tkfrz + 8.0) }
+          inp = (mkInput 1 True 2 (tkfrz + 10.0)) { csi_is_tree = VU.singleton False }
+          d = cndvStepAdvance inp grassStand
+      dgvs_nind_patch d VU.! 0 `shouldBe` 1.0          -- grasses: nind fixed at 1
+      dgvs_fpcgrid_patch d VU.! 0 `shouldSatisfy` (\f -> f > 0.05 && f <= 1.0)
+
+    it "tree + grass: combined FPC stays bounded, grass takes the canopy gap" $ do
+      -- Patch 0 = tree (FPC 0.8), patch 1 = grass; total cover must stay <= 1.
+      let mix = (seedDGVS 2 (tkfrz + 8.0) 0.1 0.05)
+            { dgvs_t_mo_min_patch = VU.replicate 2 (tkfrz + 8.0)
+            , dgvs_nind_patch     = VU.fromList [0.1, 1.0]
+            , dgvs_fpcgrid_patch  = VU.fromList [0.8, 0.05]
+            }
+          inp = (mkInput 2 True 2 (tkfrz + 10.0)) { csi_is_tree = VU.fromList [True, False] }
+          d = cndvStepAdvance inp mix
+          treeFpc = dgvs_fpcgrid_patch d VU.! 0
+          grassFpc = dgvs_fpcgrid_patch d VU.! 1
+      treeFpc `shouldSatisfy` (<= 0.95 + 1.0e-9)        -- tree canopy capped
+      (treeFpc + grassFpc) `shouldSatisfy` (<= 1.0 + 1.0e-9)
+      grassFpc `shouldSatisfy` (> 0.0)                  -- grass occupies the gap
+
     it "runs a stable accumulate -> annual -> reset cycle over a simulated year" $ do
       -- 364 daily accumulation steps at 12C, then one year-boundary step.
       let afterYear   = foldl (\d _ -> cndvStepAdvance (mkInput 1 False 2 (tkfrz + 12.0)) d)
