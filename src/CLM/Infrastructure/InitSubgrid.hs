@@ -350,7 +350,7 @@ clmPtrsCompdown bounds grc0 lun0 col0 pch = (grc3, lun3, col2)
             }
           colAcc'' = colAcc'
             { colNpatches = colNpatches colAcc' VU.//
-                [(c - 1, colPatchf colAcc'' ! (c - 1) - colPatchi colAcc'' ! (c - 1) + 1)]
+                [(c - 1, colPatchf colAcc' ! (c - 1) - colPatchi colAcc' ! (c - 1) + 1)]
             }
           -- Update landunit patchi/patchf
           lunAcc' = lunAcc
@@ -361,7 +361,7 @@ clmPtrsCompdown bounds grc0 lun0 col0 pch = (grc3, lun3, col2)
             }
           lunAcc'' = lunAcc'
             { lunNpatches = lunNpatches lunAcc' VU.//
-                [(l - 1, lunPatchf lunAcc'' ! (l - 1) - lunPatchi lunAcc'' ! (l - 1) + 1)]
+                [(l - 1, lunPatchf lunAcc' ! (l - 1) - lunPatchi lunAcc' ! (l - 1) + 1)]
             }
       in  (colAcc'', lunAcc'')
 
@@ -377,7 +377,7 @@ clmPtrsCompdown bounds grc0 lun0 col0 pch = (grc3, lun3, col2)
             }
           lunAcc'' = lunAcc'
             { lunNcolumns = lunNcolumns lunAcc' VU.//
-                [(l - 1, lunColf lunAcc'' ! (l - 1) - lunColi lunAcc'' ! (l - 1) + 1)]
+                [(l - 1, lunColf lunAcc' ! (l - 1) - lunColi lunAcc' ! (l - 1) + 1)]
             }
       in  lunAcc''
 

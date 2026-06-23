@@ -23,6 +23,8 @@ import CLM.BioGeoChem.CNProducts
   ( CNProductsState(..), CNProductsFluxes(..)
   , ProductUpdateInput(..), ProductUpdateOutput(..)
   , productPoolUpdate, kprod1, kprod10, kprod100 )
+import qualified CLM.Infrastructure.InitSubgrid as IS
+import qualified CLM.Infrastructure.SubgridAverage as SA
 import CLM.Types.Lnd2AtmData (Lnd2AtmData(..))
 import CLM.Infrastructure.DataStream
   ( mkDataStream, interpStream, streamLength, dataStreamFromVectors
@@ -1571,6 +1573,47 @@ main = hspec $ do
       let soilOut = clmWaterState (glacierSMBStep defaultDriverConfig ctx (mkCol 1 12000.0 5.0))
       h2osno_col soilOut `shouldBe` 12000.0
       h2osoi_liq_col soilOut VU.! nls `shouldBe` 5.0
+
+  describe "Subgrid hierarchy + averaging (#12 Option B core)" $ do
+    -- Instantiate the ported-but-0%-used subgrid machinery for a mixed gridcell:
+    -- 1 gridcell -> { soil landunit (area wt 0.6) -> soil column -> 1 patch,
+    --                 lake landunit (area wt 0.4) -> lake column -> 1 patch }.
+    -- Exercises InitSubgrid (addLandunit/Column/Patch + clmPtrsCompdown down-pointers
+    -- + clmPtrsCheck) and SubgridAverage (c2g column->gridcell, p2c patch->column) —
+    -- the genuine "filters/down-pointers" core of array-vectorization. The full
+    -- per-physics CLMState array rewrite is separate (see ROADMAP #12).
+    let bounds = IS.BoundsType 1 1 1 2 1 2 1 2
+        grc0 = IS.defaultGridcellData 1
+        lun0 = IS.defaultLandunitData 2
+        col0 = IS.defaultSubgridColumnData 2
+        pch0 = IS.defaultSubgridPatchData 2
+        (lunA, l1) = IS.addLandunit lun0 0 1 IS.istsoil 0.6
+        (lunB, l2) = IS.addLandunit lunA 1 1 IS.istdlak 0.4
+        (colA, c1) = IS.addColumn col0 lunB 0 l1 1 1.0 False
+        (colB, c2) = IS.addColumn colA lunB 1 l2 1 1.0 False
+        (pchA, _)  = IS.addPatch pch0 colB lunB 0 c1 1 1.0 0
+        (pchB, _)  = IS.addPatch pchA colB lunB 1 c2 0 1.0 0
+        (grcF, lunF, colF) = IS.clmPtrsCompdown bounds grc0 lunB colB pchB
+
+    it "builds a consistent gridcell->landunit->column->patch hierarchy" $
+      IS.clmPtrsCheck bounds grcF lunF colF pchB `shouldBe` Nothing
+
+    it "c2g aggregates columns to the gridcell by area weight" $ do
+      -- c2g weights by colWtgcell (weight relative to gridcell). clmPtrsCompdown
+      -- fills down-pointers but not the down-propagated weights, so set them here:
+      -- colWtgcell = lun.wtgcell * col.wtlunit = {0.6*1.0, 0.4*1.0}.
+      let colW = colF { IS.colWtgcell = VU.fromList [0.6, 0.4] }
+          carr = VU.fromList [10.0, 20.0]   -- soil column = 10, lake column = 20
+          g = SA.c2g1d carr bounds SA.C2LUnity SA.L2GUnity colW lunF
+      VU.length g `shouldBe` 1
+      abs (g VU.! 0 - (0.6 * 10.0 + 0.4 * 20.0)) `shouldSatisfy` (< 1.0e-9)
+
+    it "p2c aggregates patches to their parent columns" $ do
+      let parr = VU.fromList [5.0, 7.0]     -- patch in col1 = 5, patch in col2 = 7
+          c = SA.p2c1d parr bounds SA.ScaleUnity pchB
+      VU.length c `shouldBe` 2
+      abs (c VU.! 0 - 5.0) `shouldSatisfy` (< 1.0e-9)
+      abs (c VU.! 1 - 7.0) `shouldSatisfy` (< 1.0e-9)
 
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column
