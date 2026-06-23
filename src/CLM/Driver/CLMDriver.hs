@@ -98,6 +98,7 @@ import CLM.Types.SoilBGCNitrogenFluxData (SoilBGCNitrogenFluxData(..), defaultSo
 import CLM.Types.SoilBGCStateData (SoilBGCStateData(..), defaultSoilBGCStateData)
 import CLM.Types.DGVSData         (DGVSData(..), defaultDGVSData
                                   , DGVEcophysCon(..), defaultDGVEcophysCon)
+import CLM.BioGeoChem.CNProducts  (CNProductsState(..))
 import CLM.Infrastructure.Filters (FilterSet(..), defaultFilterSet)
 
 -- ============================================================================
@@ -271,6 +272,9 @@ data CLMState = CLMState
                                           --   constants (pftpar20/28-31). Empty
                                           --   ⇒ cndvStep falls back to the
                                           --   built-in LPJ bioclimatic table.
+  , clmProducts      :: !CNProductsState  -- ^ Wood/crop product pools (1/10/100-yr).
+                                          --   Decays each step; gains await a
+                                          --   land-cover-change / harvest driver.
     -- Calibration parameters (injected by SiteCalibration, read by hydrology)
   , clmP_baseflow_scalar :: !Double
   , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
@@ -338,6 +342,7 @@ defaultCLMState = CLMState
   , clmDGVS          = defaultDGVSData
   , clmCNDVYear      = 1
   , clmDGVEcophys    = defaultDGVEcophysCon
+  , clmProducts      = CNProductsState 0.0 0.0 0.0
   , clmP_baseflow_scalar = 0.01
   , clmP_fff        = 0.5
   , clmP_fmax       = 0.5
@@ -399,6 +404,7 @@ data PhysicsPipeline = PhysicsPipeline
     -- Phase 8b: Biogeochemistry (CN mode only)
   , ppCNPreDrainage        :: !PhysicsStep
   , ppCNPostDrainage       :: !PhysicsStep
+  , ppCNProducts           :: !PhysicsStep
   , ppCNBalanceCheck       :: !PhysicsStep
     -- Phase 9c: Annual dynamic vegetation (CNDV). Fires only on the year
     -- boundary (gated by tcIsBegCurrYear at the call site); a no-op otherwise.
@@ -450,6 +456,7 @@ defaultPhysicsPipeline = PhysicsPipeline
   , ppSnowAging          = idStep
   , ppCNPreDrainage      = idStep
   , ppCNPostDrainage     = idStep
+  , ppCNProducts         = idStep
   , ppCNBalanceCheck     = idStep
   , ppCNDV               = idStep
   , ppDustEmission       = idStep
@@ -696,7 +703,9 @@ clmDrvBoundaries cfg pipeline ctx drvState st0 =
     st21 = apply (ppHydrologyDrainage pipeline) st20b
 
     -- Phase 9b: CN biogeochemistry post-drainage
-    st21b = apply (ppCNPostDrainage pipeline) st21
+    st21b0 = apply (ppCNPostDrainage pipeline) st21
+    -- Phase 9b': Wood/crop product pools (decay + harvest/LUC gains)
+    st21b = apply (ppCNProducts pipeline) st21b0
 
     -- Phase 10: Balance checks
     st22 = apply (ppWaterBalance pipeline) st21b

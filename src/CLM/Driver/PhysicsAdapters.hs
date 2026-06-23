@@ -13,6 +13,7 @@ module CLM.Driver.PhysicsAdapters
   , cndvStep
   , dustEmissionStep
   , vocEmissionStep
+  , cnProductsStep
     -- * Individual adapters (PhysicsStep signature)
   , dayLengthStep
   , activeLayerStep
@@ -140,6 +141,9 @@ import CLM.BioGeoChem.DustEmission
 import CLM.BioGeoChem.VOCEmission
   ( VOCDriverInput(..), VOCDriverOutput(..), vocEmissionDriver )
 import CLM.Types.Atm2LndData (Atm2LndData(..))
+import CLM.BioGeoChem.CNProducts
+  ( CNProductsState(..), CNProductsFluxes(..)
+  , ProductUpdateInput(..), ProductUpdateOutput(..), productPoolUpdate )
 import CLM.BioGeoChem.DecompBGC
   ( DecompCascadeConData(..)
   , InitCascadeInput(..), InitCascadeOutput(..), initDecompCascadeBGC
@@ -298,6 +302,7 @@ wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
   , ppSnowAging          = snowAgingStep snicarOpt
   , ppCNPreDrainage      = cnPreDrainageStep
   , ppCNPostDrainage     = cnPostDrainageStep
+  , ppCNProducts         = cnProductsStep
   , ppCNBalanceCheck     = cnBalanceCheckStep
   , ppCNDV               = cndvStep
   , ppDustEmission       = dustEmissionStep
@@ -481,6 +486,25 @@ vocEmissionStep _cfg ctx st =
         , vdi_is_isoprene = True
         }
   in st { clmLnd2Atm = (clmLnd2Atm st) { l2a_flxvoc_grc = VU.singleton (vdo_emission out) } }
+
+-- | Wood/crop product pools step (CNProductsMod): advances the 1/10/100-year
+-- product pools by their first-order decay and any gain fluxes. The gains
+-- (dynamic land-cover change, gross-unrepresented, harvest) are all zero here
+-- because the land-cover-change / harvest drivers (dynSubgrid / CNHarvest) are
+-- not yet ported — so in this static single-column run the pools only decay
+-- (and stay at zero unless seeded). The decay dynamics and the gain plumbing
+-- are wired and ready for a harvest driver.
+cnProductsStep :: PhysicsStep
+cnProductsStep _cfg ctx st
+  | not (clmCNActive st) = st
+  | otherwise = st { clmProducts = puo_state out }
+  where
+    noGains = CNProductsFluxes 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+    out = productPoolUpdate ProductUpdateInput
+      { pui_state  = clmProducts st
+      , pui_fluxes = noGains
+      , pui_dt     = tcDtime ctx
+      }
 
 -- ============================================================================
 -- Helpers

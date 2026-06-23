@@ -17,7 +17,8 @@ import CLM.Driver.CLMDriver
 import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
-  , aggregateLnd2Atm, cndvStep, dustEmissionStep, vocEmissionStep )
+  , aggregateLnd2Atm, cndvStep, dustEmissionStep, vocEmissionStep
+  , cnProductsStep )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -1895,6 +1896,30 @@ main = hspec $ do
 
     it "emits more isoprene at warmer leaf temperature" $ do
       VU.sum (runVOC 500.0 305.0 3.0) `shouldSatisfy` (> VU.sum (runVOC 500.0 295.0 3.0))
+
+  describe "Wood/crop products step (wired #products)" $ do
+    -- Gains need an (unported) LUC/harvest driver, so the wired step decays a
+    -- seeded pool. Verify the decay runs through the pipeline adapter.
+    let prodState = defaultCLMState
+          { clmCNActive = True
+          , clmProducts = CNProductsState 100.0 1000.0 5000.0 }
+        prodCtx = defaultTimestepContext { tcDtime = 1800.0 }
+        runProd st = clmProducts (cnProductsStep defaultDriverConfig prodCtx st)
+
+    it "decays the seeded product pools each step (no gains)" $ do
+      let p = runProd prodState
+      cps_cropprod1 p `shouldSatisfy` (\x -> x < 100.0 && x > 99.0)
+      cps_prod10 p    `shouldSatisfy` (\x -> x < 1000.0 && x > 999.0)
+      cps_prod100 p   `shouldSatisfy` (\x -> x < 5000.0 && x > 4999.0)
+
+    it "decay matches the first-order pool * k * dt law" $ do
+      let p = runProd prodState
+      abs (cps_prod10 p  - 1000.0 * (1.0 - kprod10  * 1800.0)) `shouldSatisfy` (< 1.0e-9)
+      abs (cps_prod100 p - 5000.0 * (1.0 - kprod100 * 1800.0)) `shouldSatisfy` (< 1.0e-9)
+
+    it "is a no-op when CN is inactive" $ do
+      let p = runProd (prodState { clmCNActive = False })
+      cps_prod10 p `shouldBe` 1000.0
 
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column
