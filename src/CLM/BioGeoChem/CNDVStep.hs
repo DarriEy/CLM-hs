@@ -12,8 +12,14 @@
 --     within-year NPP sum, and the annual max leaf C.
 --   * Year boundary (csi_is_annual): finalize annsum_npp, advance the
 --     20-year running means tmomin20/agdd20 with the (19*old + new)/20
---     weighting, run Light -> Establishment -> Mortality, then reset the
---     annual accumulators (agdd, agddtw, t_mo_min, leafcmax, tempsum_npp).
+--     weighting, run Light -> survival -> Mortality -> sapling Establishment
+--     (which grows nind/fpcgrid for woody PFTs into the open canopy), then
+--     reset the annual accumulators (agdd, agddtw, t_mo_min, leafcmax,
+--     tempsum_npp).
+--
+-- Establishment is NOT coupled to prescribed sapling carbon pools (Fortran
+-- hardcodes leafcmax=1, deadstemc=0.1 at establishment), so nind/fpcgrid growth
+-- is self-contained. Grass establishment (non-woody fill) is not yet ported.
 --
 -- Fortran: CNDVDriverMod.F90, CNDVType.F90 (UpdateAccVars),
 --          CNDVEstablishmentMod.F90, CNDVLightMod.F90.
@@ -69,6 +75,16 @@ rampAgddtw = 300.0
 -- month upper limit (Fortran uses 999).
 twmaxOff :: Double
 twmaxOff = 999.0
+
+-- | Maximum sapling establishment rate (indiv/m2/yr). Fortran: estab_max,
+-- CNDVEstablishmentMod.F90:95.
+estabMax :: Double
+estabMax = 0.24
+
+-- | Seed gridcell FPC for a newly-establishing woody patch
+-- (Fortran CNDVEstablishmentMod.F90:218).
+seedFpcWoody :: Double
+seedFpcWoody = 0.000844
 
 -- =========================================================================
 -- PFT bioclimatic limits
@@ -220,19 +236,45 @@ cndvAnnual !inp !d =
       !fpcAfterLight = VU.generate n (\i -> let (_, f, _) = lcOut !! i in f)
       !nindAfterLight = VU.generate n (\i -> let (_, _, nn) = lcOut !! i in nn)
 
-      -- Step 2 & 3: per-patch establishment (survival filter) then mortality.
+      -- Step 2 & 3: per-patch survival filter then mortality.
       results = [ patchAnnual inp d i annsum heat fpcAfterLight nindAfterLight
                 | i <- [0 .. n - 1] ]
       !nind' = VU.fromList [ rNind r | r <- results ]
       !fpc'  = VU.fromList [ rFpc r  | r <- results ]
       !greff' = VU.fromList [ rGreffic r | r <- results ]
 
+      -- Step 4: sapling establishment (Fortran CNDVEstablishmentMod.F90:249-313).
+      -- Woody PFTs passing the bioclimatic estab filter add individuals into the
+      -- available canopy gap; the establishment rate slows as the tree canopy
+      -- fills and is shared equally among establishing PFTs.
+      !fpcTreeTotal = sum [ fpc' VU.! i
+                          | i <- [0 .. n - 1], isTree VU.! i, nind' VU.! i > 0.0 ]
+      !nEstab = length [ () | i <- [0 .. n - 1], isTree VU.! i, rEstab (results !! i) ]
+      !estabGrid = if nEstab > 0 && fpcTreeTotal < 1.0
+                   then let !rate = estabMax * (1.0 - exp (5.0 * (fpcTreeTotal - 1.0)))
+                                    / fromIntegral nEstab
+                        in rate * (1.0 - fpcTreeTotal)
+                   else 0.0
+      growEstab i =
+        let !nv = nind' VU.! i
+            !fv = fpc' VU.! i
+            !doEstab = isTree VU.! i && rEstab (results !! i) && estabGrid > 0.0
+        in if not doEstab then (nv, fv)
+           else if nv > 0.0
+                -- existing stand: add individuals, scale FPC by per-individual cover
+                then (nv + estabGrid, min 1.0 (fv + estabGrid * (fv / nv)))
+                -- newly (re)establishing woody patch: seed FPC (Fortran:218)
+                else (estabGrid, seedFpcWoody)
+      !grown = [ growEstab i | i <- [0 .. n - 1] ]
+      !nindE = VU.fromList [ fst g | g <- grown ]
+      !fpcE  = VU.fromList [ snd g | g <- grown ]
+
   in d { dgvs_annsum_npp_patch = annsum
        , dgvs_heatstress_patch = heat
        , dgvs_tmomin20_patch = tmomin20'
        , dgvs_agdd20_patch = agdd20'
-       , dgvs_nind_patch = nind'
-       , dgvs_fpcgrid_patch = fpc'
+       , dgvs_nind_patch = nindE
+       , dgvs_fpcgrid_patch = fpcE
        , dgvs_greffic_patch = greff'
        , dgvs_fpcgridold_patch = dgvs_fpcgrid_patch d
        -- present_patch is a Bool vector omitted from DGVSData by convention;
@@ -251,6 +293,7 @@ data PatchAnnual = PatchAnnual
   , rFpc     :: !Double
   , rPresent :: !Bool
   , rGreffic :: !Double
+  , rEstab   :: !Bool    -- ^ passed the bioclimatic establishment filter
   }
 
 patchAnnual :: CNDVStepInput -> DGVSData -> Int
@@ -303,6 +346,7 @@ patchAnnual !inp !d !i !annsum !heat !fpcL !nindL =
      , rFpc = fpc2
      , rPresent = not killed && present0
      , rGreffic = greffic
+     , rEstab = eso_estab eo
      }
 
 -- =========================================================================

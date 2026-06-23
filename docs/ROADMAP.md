@@ -98,13 +98,16 @@ bitwise correctness.
      (tcmin/tcmax/gddmin/twmax) resolved per-patch from a canonical LPJ/CLM-DGVM table
      (`dgvmPftBioclim`). Live activation: `use_cndv` (RunConfig) → `pcUseCndv` (PipelineConfig)
      seeds `clmDGVS` at cold start with a single natural-veg stand; unseeded ⇒ `cndvStep`
-     is a no-op. 13 unit+integration tests. REMAINING (can't close here): no dynamic-veg
-     Fortran reference exists (sanity/conservation-validated only); the exact pftpar20/28-31
-     come from a NetCDF param file the port doesn't load yet (the LPJ table stands in and
-     would be overridden once pftcon is wired); the running means are the steady-state
-     equivalent of CLM's boxcar runmean (no ring buffer); and sapling establishment that
-     grows `nind` is not ported, so cold start seeds a pre-established stand rather than
-     bare ground (the driver does survival/competition/mortality only).
+     is a no-op. Sapling establishment is ported (`estab_rate = 0.24·(1−e^(5·(fpc_tree−1)))/
+     n_estab`, `nind += estab_rate·(1−fpc_tree)`), so woody PFTs passing the bioclimatic
+     filter grow `nind`/`fpcgrid` into the open canopy — the full establish→compete→mortality
+     loop. 15 unit+integration tests. REMAINING (can't close here): no dynamic-veg Fortran
+     reference exists (sanity/conservation-validated only); the exact pftpar20/28-31 come from
+     a NetCDF param file the port doesn't load yet (the LPJ table stands in, overridable once
+     pftcon is wired); the running means are the steady-state equivalent of CLM's boxcar
+     runmean (no ring buffer); establishment is not coupled to prescribed sapling carbon pools
+     (Fortran hardcodes leafcmax=1/deadstemc=0.1, so nind growth is self-contained); and grass
+     (non-woody) establishment fill is not yet ported.
    - **Crop** — unported (see above).
 9. **Carbon isotopes (C13/C14)** — DONE (8e3d0d2). Wired CNCIsoFluxMod/CNC14DecayMod into
    cnBalanceCheckStep: GPP discrimination, respiration at source ratio, C14 decay. Honest

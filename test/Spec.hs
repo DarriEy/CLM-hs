@@ -1682,6 +1682,30 @@ main = hspec $ do
       -- kyr==2 sets tmomin20 = t_mo_min directly (not the running blend)
       abs (dgvs_tmomin20_patch d VU.! 0 - (tkfrz + 8.0)) `shouldSatisfy` (< 1.0e-9)
 
+    it "sapling establishment grows nind into an open canopy on favorable years" $ do
+      -- Open canopy (low FPC) + warm + ample precip + positive NPP -> establish.
+      let openStand = (seedDGVS 1 (tkfrz + 8.0) 0.05 0.1)
+            { dgvs_t_mo_min_patch    = VU.singleton (tkfrz + 8.0)  -- tmomin20 ~ 8C
+            , dgvs_prec365_patch     = VU.singleton 1.0e-5         -- ample precip
+            , dgvs_tempsum_npp_patch = VU.singleton 1.0e-6         -- positive annual NPP
+            }
+          d = cndvStepAdvance (mkInput 1 True 2 (tkfrz + 10.0)) openStand
+      -- establishment added individuals beyond the seeded 0.05 (net of mortality)
+      dgvs_nind_patch d VU.! 0 `shouldSatisfy` (> 0.05)
+      -- and grew canopy cover, staying bounded
+      dgvs_fpcgrid_patch d VU.! 0 `shouldSatisfy` (\f -> f > 0.1 && f <= 1.0)
+
+    it "establishment is suppressed when the tree canopy is already full" $ do
+      -- fpcgrid ~ 1 leaves almost no gap, so the establishment rate collapses.
+      let fullStand = (seedDGVS 1 (tkfrz + 8.0) 0.5 0.99)
+            { dgvs_t_mo_min_patch    = VU.singleton (tkfrz + 8.0)
+            , dgvs_prec365_patch     = VU.singleton 1.0e-5
+            , dgvs_tempsum_npp_patch = VU.singleton 1.0e-6
+            }
+          d = cndvStepAdvance (mkInput 1 True 2 (tkfrz + 10.0)) fullStand
+      -- near-full canopy: almost no recruitment, so nind does not climb above seed
+      dgvs_nind_patch d VU.! 0 `shouldSatisfy` (< 0.51)
+
     it "runs a stable accumulate -> annual -> reset cycle over a simulated year" $ do
       -- 364 daily accumulation steps at 12C, then one year-boundary step.
       let afterYear   = foldl (\d _ -> cndvStepAdvance (mkInput 1 False 2 (tkfrz + 12.0)) d)
