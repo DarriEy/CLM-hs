@@ -1761,6 +1761,9 @@ soilTemperatureFullStep _cfg ctx st =
   in st { clmTemp = temp'
         , clmWaterState = ws'
         , clmEnergyFlux = ef { eflx_gnet_patch_vec = eflxGnetVec }
+        -- carry the phase-change snow melt flux for the next step's frac_sno
+        -- depletion (SL2012); see snowWaterStep.
+        , clmQflxSnomelt = sto_qflx_snomelt stOutput
         }
 
 -- ============================================================================
@@ -1910,15 +1913,15 @@ snowWaterStep _cfg ctx st =
       n_melt = clmP_n_melt_coef st / max 10.0 (clmTopoStd st)
       accum_factor = 0.1 :: Double
       int_snow_max = 2000.0 :: Double
-      -- NOTE: the snowmelt arg is 0.0 here, which disables the SL2012 DEPLETION
-      -- curve so frac_sno can only ratchet up (saturating to ~0.96 vs Fortran
-      -- ~0.11). The real fix is to pass the previous-step snow melt flux
-      -- (qflx_snomelt, computed in SoilTemperature's phase change but currently
-      -- discarded) so the depletion fires during melt events. See ROADMAP.
+      -- Previous-step snow melt [mm] (= qflx_snomelt [kg/m2/s] * dt), carried
+      -- from the soil-temperature phase change. A positive value activates the
+      -- SL2012 DEPLETION curve so frac_sno can drop during melt events instead
+      -- of ratcheting up to ~1.
+      snowmelt_prev = max 0.0 (clmQflxSnomelt st) * dtime
       (frac_sno_sl, frac_sno_eff_sl, snow_depth_sl) =
         updateSnowDepthAndFracSL2012
           n_melt accum_factor int_snow_max
-          h2osno_total_prev 0.0 old_int_snow
+          h2osno_total_prev snowmelt_prev old_int_snow
           new_snow_mass bifall old_snow_depth old_frac_sno
           1 False True
       int_snow_new =

@@ -222,6 +222,10 @@ data CLMState = CLMState
     -- Filters and snow layer count
   , clmFilters     :: !FilterSet
   , clmSnl         :: !Int              -- ^ Number of snow layers (0 to -nlevsno)
+  , clmQflxSnomelt :: !Double           -- ^ Snow melt flux [kg/m2/s] from the
+                                        --   soil-temperature phase change; carried
+                                        --   so the next step's frac_sno depletion
+                                        --   (SL2012) can fire during melt events.
     -- CN Biogeochemistry state
   , clmCNActive    :: !Bool             -- ^ Whether CN biogeochemistry is active
   , clmLeafC       :: !Double           -- ^ Leaf carbon pool (gC/m2)
@@ -336,6 +340,7 @@ defaultCLMState = CLMState
   , clmUrbanParams  = defaultUrbanParamsData
   , clmFilters      = defaultFilterSet
   , clmSnl          = 0
+  , clmQflxSnomelt  = 0.0
   , clmCNActive     = False
   , clmLeafC        = 0.0
   , clmFrootC       = 0.0
