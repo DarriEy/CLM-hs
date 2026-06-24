@@ -505,23 +505,44 @@ vocEmissionStep _cfg ctx st =
         , clmTVeg24 = tVeg24, clmTVeg240 = tVeg240
         , clmPar24 = par24, clmPar240 = par240 }
 
--- | Wood/crop product pools step (CNProductsMod): advances the 1/10/100-year
--- product pools by their first-order decay and any gain fluxes. The gains
--- (dynamic land-cover change, gross-unrepresented, harvest) are all zero here
--- because the land-cover-change / harvest drivers (dynSubgrid / CNHarvest) are
--- not yet ported — so in this static single-column run the pools only decay
--- (and stay at zero unless seeded). The decay dynamics and the gain plumbing
--- are wired and ready for a harvest driver.
+-- | Wood/crop product pools step (CNProductsMod + a minimal wood harvest).
+-- Advances the 1/10/100-year product pools by their first-order decay plus the
+-- harvest gain. At the year boundary a prescribed fraction (clmHarvestFrac) of
+-- the stem carbon is harvested: the wood-product fractions (pprod10/pprod100)
+-- flow into the product pools and the remainder (slash) goes to the litter
+-- pool, conserving carbon; the live/dead stem pools are reduced accordingly.
+--
+-- clmHarvestFrac defaults to 0 (no harvest) so static runs only decay; a real
+-- run would set it from a land-use harvest timeseries. The pprod10/pprod100
+-- split uses representative constants (the per-PFT values live in the pft
+-- parameter file).
 cnProductsStep :: PhysicsStep
 cnProductsStep _cfg ctx st
   | not (clmCNActive st) = st
-  | otherwise = st { clmProducts = puo_state out }
+  | otherwise = stH { clmProducts = puo_state out }
   where
+    dt = tcDtime ctx
     noGains = CNProductsFluxes 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+    hf = clmHarvestFrac st
+    pprod10  = 0.25
+    pprod100 = 0.025
+    (gains, stH)
+      | tcIsBegCurrYear ctx && hf > 0.0 =
+          let wood    = hf * (clmLiveStemC st + clmDeadStemC st)
+              toP10   = wood * pprod10
+              toP100  = wood * pprod100
+              toSlash = wood * (1.0 - pprod10 - pprod100)
+              g = noGains { cpf_hrv_prod10_gain  = toP10  / dt
+                          , cpf_hrv_prod100_gain = toP100 / dt }
+              st' = st { clmLiveStemC = clmLiveStemC st * (1.0 - hf)
+                       , clmDeadStemC = clmDeadStemC st * (1.0 - hf)
+                       , clmLitterC   = clmLitterC st + toSlash }
+          in (g, st')
+      | otherwise = (noGains, st)
     out = productPoolUpdate ProductUpdateInput
-      { pui_state  = clmProducts st
-      , pui_fluxes = noGains
-      , pui_dt     = tcDtime ctx
+      { pui_state  = clmProducts stH
+      , pui_fluxes = gains
+      , pui_dt     = dt
       }
 
 -- | CN annual-update step (CNAnnualUpdateMod): every step it advances the

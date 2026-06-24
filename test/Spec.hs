@@ -1962,6 +1962,37 @@ main = hspec $ do
       let p = runProd (prodState { clmCNActive = False })
       cps_prod10 p `shouldBe` 1000.0
 
+    -- Annual wood harvest drives the product gains (the upstream blocker).
+    let harvState = defaultCLMState
+          { clmCNActive    = True
+          , clmLiveStemC   = 500.0
+          , clmDeadStemC   = 5000.0
+          , clmLitterC     = 300.0
+          , clmHarvestFrac = 0.1
+          , clmProducts    = CNProductsState 0.0 0.0 0.0 }
+        harvCtx = defaultTimestepContext { tcDtime = 1800.0, tcIsBegCurrYear = True }
+        harvested = cnProductsStep defaultDriverConfig harvCtx harvState
+
+    it "harvests wood into the product pools at the year boundary" $ do
+      -- wood = 0.1*(500+5000)=550; prod10 = 550*0.25, prod100 = 550*0.025
+      abs (cps_prod10 (clmProducts harvested) - 137.5) `shouldSatisfy` (< 1.0e-6)
+      abs (cps_prod100 (clmProducts harvested) - 13.75) `shouldSatisfy` (< 1.0e-6)
+      -- stem pools reduced by the harvest fraction
+      clmLiveStemC harvested `shouldBe` 450.0
+      clmDeadStemC harvested `shouldBe` 4500.0
+
+    it "conserves carbon: stem loss = products + slash-to-litter" $ do
+      let stemLoss  = (500.0 + 5000.0) - (clmLiveStemC harvested + clmDeadStemC harvested)
+          prodGain  = cps_prod10 (clmProducts harvested) + cps_prod100 (clmProducts harvested)
+          slashGain = clmLitterC harvested - 300.0
+      abs (stemLoss - (prodGain + slashGain)) `shouldSatisfy` (< 1.0e-6)
+
+    it "does not harvest mid-year (only at the year boundary)" $ do
+      let midYear = cnProductsStep defaultDriverConfig
+                      (harvCtx { tcIsBegCurrYear = False }) harvState
+      cps_prod10 (clmProducts midYear) `shouldBe` 0.0
+      clmLiveStemC midYear `shouldBe` 500.0
+
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column
     -- driver: its gain fluxes come from dynamic land-cover change (dyn_subgrid,

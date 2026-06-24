@@ -273,8 +273,11 @@ data CLMState = CLMState
                                           --   ⇒ cndvStep falls back to the
                                           --   built-in LPJ bioclimatic table.
   , clmProducts      :: !CNProductsState  -- ^ Wood/crop product pools (1/10/100-yr).
-                                          --   Decays each step; gains await a
-                                          --   land-cover-change / harvest driver.
+                                          --   Decays each step; gains from the
+                                          --   prescribed annual wood harvest.
+  , clmHarvestFrac   :: !Double           -- ^ Prescribed annual wood-harvest
+                                          --   fraction [0,1]. 0 = no harvest;
+                                          --   a land-use timeseries would set it.
     -- CN annual-update diagnostics (CNAnnualUpdate): a within-year counter and
     -- 2m-temperature accumulator promoted to an annual average at year end.
   , clmAnnsumCounter :: !Double           -- ^ within-year counter [s]
@@ -354,6 +357,7 @@ defaultCLMState = CLMState
   , clmCNDVYear      = 1
   , clmDGVEcophys    = defaultDGVEcophysCon
   , clmProducts      = CNProductsState 0.0 0.0 0.0
+  , clmHarvestFrac   = 0.0
   , clmAnnsumCounter = 0.0
   , clmTempSumT2m    = 0.0
   , clmAnnAvgT2m     = 0.0
