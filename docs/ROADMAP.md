@@ -337,10 +337,19 @@ The highest-leverage work is now **closing the validation gap** — converting
    `qflx_snomelt` IS computed in `SoilTemperature.phaseChange` but
    `soilTemperatureFullStep` discards it. Confirmed by experiment: forcing the
    depletion path on drops `frac_sno` 0.96→0.52 and raises absorbed solar toward
-   Fortran. **FIX (next):** surface `qflx_snomelt` from the soil-temp step → a new
-   CLMState field → pass it (previous step) into `snowWaterStep`. Unlike the inert
-   n_melt fix, this *changes behavior*, so measure the Julia-parity shift (Fortran is
-   ground truth).
+   Fortran. **snowmelt fix done (commit 2a4fd45):** `clmQflxSnomelt` carries the
+   phase-change melt flux from `soilTemperatureFullStep` into `snowWaterStep`'s
+   depletion. Correct but does NOT close the winter gap — deep Bow winter has no melt
+   (`qflx_snomelt=0`), so `frac_sno` still ratchets up. Julia diagnostic shifted 59→60
+   field-days (honest-tolerances test still passes); kept as faithful.
+   **REAL winter driver = `int_snow` spin-up.** Fortran's spun-up Jan-1 state has
+   `int_snow`≈580 mm (season-long accumulation+sublimation; `smr=h2osno/int_snow`≈0.15 →
+   `frac_sno`≈0.11), while the cold-started port has `int_snow`≈`h2osno` (`smr`≈1 →
+   `frac_sno`≈1). This is a **spin-up / cold-start limitation**, not a physics bug — much
+   of the "winter residual" is the port starting Jan-1 bare vs Fortran's mature snowpack.
+   **NEXT (if pursued):** snow spin-up (run a prior winter to build `int_snow`) or
+   warm-start from the restart's `INT_SNOW`, and investigate why a matched-snow warm-start
+   *worsens* TG (a secondary coupled issue — possibly the canopy-turbulence residual).
 3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
    urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
    its Fortran reference (`clm_glacier_run`, etc.).
