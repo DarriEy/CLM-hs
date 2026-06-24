@@ -411,7 +411,7 @@ decompRateConstantsBGC inp =
                    then log (minpsi_v / pv) / log (minpsi_v / maxpsi_v)
                    else 0.0
 
-      -- O2 scalar (simplified: always 1.0)
+      -- O2 scalar: always 1.0
       o_scalar = VU.replicate size2 1.0
 
       -- Depth scalar
