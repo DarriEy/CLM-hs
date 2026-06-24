@@ -298,7 +298,32 @@ no longer in the installed Fortran source).
 
 ## Recommended next concrete step
 
-Phase 1, items 1–4: snow percolation + growth respiration + gap mortality, then make
-the balance/precision checks real so they *gate* those changes. That makes the one
-column we actually run close its budgets — the smallest unit of genuine, checkable
-progress, and the honest foundation everything else needs.
+(Updated 2026-06.) Phases 1–4 are essentially done: the single soil column closes
+its budgets, the CN/BGC path is ~⅔ wired (now incl. CNDV, dust, VOC, wood
+products+harvest, CN annual update — all data-driven from `clm5_params.nc`/MEGAN
+via the column's actual PFT), the mixed soil+lake gridcell loop routes its
+aggregation through the real `c2g`, and the soil column now has a Fortran h0
+parity test (TG tracks to ~2% with the known winter SH/snow residual). The
+original "Phase 1 items 1–4" step below is complete.
+
+The highest-leverage work is now **closing the validation gap** — converting
+"sanity/conservation-validated" into "Fortran-parity-validated" across regimes:
+
+1. **Extend soil-column h0 parity** beyond the 10-day winter window — run the
+   full year vs `clm_parity_run` clm2.h0, and add summer/shoulder-season windows,
+   to characterize the TG/SH/LH residual seasonally (the winter SH/snow gap is the
+   known weak point). This is the cheapest high-value step: the machinery (h0
+   reader, forcing alignment, daily diagnostics) now exists.
+2. **Diagnose the winter SH/snow residual** that the parity test quantifies (the
+   ~5 K worst-case TG divergence) — the long-standing trajectory residual vs the
+   Julia port, now also measured against Fortran.
+3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
+   urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
+   its Fortran reference (`clm_glacier_run`, etc.).
+4. **Streams**: LAI / crop-calendar / urban-tv readers on the `DataStream` core.
+
+Deferred (large / out of scope): crop (unported, needs a crop landunit), the
+matrix C/N solver, and Phase 5 (dyn_subgrid, FATES, MPI). Regenerating
+instrumented Fortran references across regimes/landunits remains the structural
+blocker for tight parity everywhere, but the per-landunit h0 tapes that DO exist
+(soil/lake/glacier) are now the practical parity targets.
