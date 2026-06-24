@@ -1249,7 +1249,7 @@ runMixedGridcell
   -> Int       -- ^ forcing step offset
   -> Int       -- ^ number of steps
   -> IO [((Double, Double), (Double, Double), (Double, Double))]
-runMixedGridcell dir wNatveg wLake lakedepth dtime off nsteps = do
+runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
   (st0, forcing, albConst) <- initCLMStateFromDir dir
   chParams  <- readCanopyHydroParamsFromDir dir
   snicarOpt <- readSnicarOptics dir
@@ -1278,7 +1278,7 @@ runMixedGridcell dir wNatveg wLake lakedepth dtime off nsteps = do
           VU.! 0
       soil0    = st0
       lake0    = st0
-        { clmColumn = (clmColumn st0) { lakedepth = lakedepth }
+        { clmColumn = (clmColumn st0) { lakedepth = lakeDepth }
         , clmSnl = 0
         , clmTemp = (clmTemp st0)
             { t_grnd_col = 277.0, t_soisno_col = VU.replicate ntot 277.0 }
