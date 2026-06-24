@@ -2121,6 +2121,16 @@ main = hspec $ do
           VU.length tVeg `shouldSatisfy` (> 0)
           abs (tVeg VU.! 0 - 283.0) `shouldSatisfy` (< 1.0e-12)
 
+    it "populates clmPatchIvt from the dominant natural PFT in surfdata" $ do
+      hasData <- doesFileExist "test/data/surfdata/wt_nat_patch.bin"
+      if not hasData
+        then pendingWith "natural-PFT weights not available"
+        else do
+          (st, _, _) <- initCLMStateFromDir "test/data"
+          -- Bow at Banff: wt_nat_patch is 60% needleleaf evergreen temperate
+          -- tree (PFT 1), 35% c3 arctic grass, 5% bare -> dominant PFT is 1.
+          clmPatchIvt st `shouldBe` VU.singleton 1
+
   describe "Pipeline integration (vs Julia reference)" $ do
     it "runs 10 days without crashing" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"

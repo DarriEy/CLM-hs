@@ -252,6 +252,10 @@ initCLMStateFromDir dir = do
   frac_sno_raw <- readOptionalVector (dir </> "coldstart" </> "frac_sno.bin") VU.empty
   frac_sno_eff_raw <- readOptionalVector (dir </> "coldstart" </> "frac_sno_eff.bin") VU.empty
   zbedrock_raw <- readOptionalVector (dir </> "surfdata" </> "zbedrock.bin") VU.empty
+  -- Natural-PFT weights (index = PFT type): the single runtime patch is
+  -- represented by the dominant natural PFT, so per-PFT CN parameters (MEGAN EF,
+  -- pprod, CNDV bioclimatic limits) resolve to the column's actual vegetation.
+  wtNatPatch_raw <- readOptionalVector (dir </> "surfdata" </> "wt_nat_patch.bin") VU.empty
 
   elai_raw <- readFloat64Vector (dir </> "coldstart" </> "elai.bin")
   esai_raw <- readFloat64Vector (dir </> "coldstart" </> "esai.bin")
@@ -446,6 +450,9 @@ initCLMStateFromDir dir = do
             , wdiag_dqgdT_col = VU.singleton 0.0
             }
         , clmSnl = snlInit
+        , clmPatchIvt = if VU.null wtNatPatch_raw
+                        then VU.empty
+                        else VU.singleton (VU.maxIndex wtNatPatch_raw)
         }
 
   soil_color_raw <- readInt64Vector (dir </> "surfdata" </> "soil_color.bin")
