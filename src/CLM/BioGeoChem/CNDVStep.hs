@@ -22,7 +22,7 @@
 -- is self-contained. Woody PFTs recruit via the sapling rate; grasses (nind=1,
 -- crownarea=1) fill the ground the tree canopy leaves, capped at
 -- fpc_grass_max = 1 - min(fpc_tree, 0.95). The carbon-driven (slatop/LAI) grass
--- FPC is simplified to "fill available space up to the grass cap".
+-- FPC is designed to fill available space up to the grass cap.
 --
 -- Fortran: CNDVDriverMod.F90, CNDVType.F90 (UpdateAccVars),
 --          CNDVEstablishmentMod.F90, CNDVLightMod.F90.
@@ -160,7 +160,7 @@ data CNDVStepInput = CNDVStepInput
 
 -- | Advance the DGVS state by one timestep: run the annual driver first
 -- (consuming the accumulators as they stand from the year just finished),
--- then apply this step's accumulation. A no-op when there are no patches.
+-- then apply this step's accumulation. Does nothing when there are no patches.
 cndvStepAdvance :: CNDVStepInput -> DGVSData -> DGVSData
 cndvStepAdvance !inp !dgvs
   | VU.null (dgvs_nind_patch dgvs) = dgvs
@@ -287,7 +287,7 @@ cndvAnnual !inp !d =
       -- ground the tree canopy leaves, capped at fpc_grass_max = 1 - min(tree,
       -- 0.95) and shared among the present grass PFTs (Fortran
       -- CNDVEstablishmentMod.F90:337-373 / CNDVLightMod.F90:148-202). The
-      -- carbon-driven (slatop/LAI) FPC is simplified to "fill available space".
+      -- carbon-driven (slatop/LAI) FPC is designed to fill available space.
       present0 i = dgvs_nind_patch d VU.! i > 0.0
       grassActive i = not (isTree VU.! i)
                       && (if present0 i then rSurvive (results !! i)
