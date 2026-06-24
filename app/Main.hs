@@ -95,6 +95,8 @@ main = do
     ["--run", dir] -> runMode dir 30
     ["--pipeline", dir, ndaysStr] -> pipelineMode dir (read ndaysStr)
     ["--pipeline", dir] -> pipelineMode dir 30
+    ["--pipeline-warm", dir, ndaysStr, restart] ->
+      pipelineModeWarm dir (read ndaysStr) (Just restart)
     _ -> demoMode
 
 -- ============================================================================
@@ -102,7 +104,11 @@ main = do
 -- ============================================================================
 
 pipelineMode :: FilePath -> Int -> IO ()
-pipelineMode dir ndays = do
+pipelineMode dir ndays = pipelineModeWarm dir ndays Nothing
+
+-- | Pipeline run, optionally warm-started from a Fortran clm2.r restart.
+pipelineModeWarm :: FilePath -> Int -> Maybe FilePath -> IO ()
+pipelineModeWarm dir ndays restart = do
   putStrLn "=============================================="
   putStrLn " CLM-hs Pipeline Runner"
   putStrLn "=============================================="
@@ -112,6 +118,7 @@ pipelineMode dir ndays = do
     , pcNdays   = ndays
     , pcVerbose = True
     , pcOutputCSV = csvPath
+    , pcFortranRestart = restart
     }
   writeDailyCSV csvPath dailies
   putStrLn $ "\nCompleted " ++ show (length dailies) ++ " days via pipeline."

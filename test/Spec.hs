@@ -2469,33 +2469,42 @@ main = hspec $ do
         coldD <- runPipeline base
         warmD <- runPipeline base { pcFortranRestart = Just rp }
         eNc <- ncOpen h0
-        tgRRes <- case eNc of
+        rdRes <- case eNc of
           Left e -> return (Left ("ncOpen h0 failed: " ++ e))
-          Right nc -> do { r <- ncReadDouble1D nc "TG"; ncClose nc; return r }
-        case tgRRes of
+          Right nc -> do
+            tg <- ncReadDouble1D nc "TG"
+            fs <- ncReadDouble1D nc "FSNO"
+            ncClose nc
+            return $ (,) <$> tg <*> fs
+        case rdRes of
           Left e -> pendingWith e
-          Right tgR -> do
+          Right (tgR, fsnoR) -> do
             let reldiff a b = abs (a - b) / (1.0 + abs b)
                 maxR ds = maximum [ reldiff (dd_t_grnd d) (tgR VU.! i)
                                   | (i, d) <- zip [0 ..] ds, i < VU.length tgR ]
                 cold = maxR coldD
                 warm = maxR warmD
+                coldD1 = head coldD
+                warmD1 = head warmD
             length warmD `shouldBe` ndays
-            -- Finding: warm-start (matched Fortran snow IC) is WORSE than cold
-            -- start, not better. The winter residual is therefore NOT an
-            -- initial-condition artifact: giving the port the snowpack from day 1
-            -- exposes a snow-cover-fraction (frac_sno) / albedo bug immediately.
-            -- The port's frac_sno saturates to ~0.96 (SL2012 accumulation curve)
-            -- vs Fortran's ~0.11 at the same SWE, raising the albedo and cutting
-            -- absorbed solar. (Deriving n_melt from std_elev was verified correct
-            -- but INERT here: n_melt only shapes the SL2012 depletion curve, and
-            -- winter is accumulation-dominated. The remaining driver is the
-            -- accumulation saturation / a likely SL2012-vs-NiuYang2007 method
-            -- mismatch with the tall-canopy roughness.)
+            -- THE SYNTHESIS (two coupled bugs that partially cancel):
+            --  1. The warm-start reproduces Fortran's correct LOW day-1 snow
+            --     cover (frac_sno ~0.11, vs the cold-start's ~0.96) -- so the
+            --     snow IC and frac_sno are right.
+            abs (dd_frac_sno warmD1 - (fsnoR VU.! 0)) `shouldSatisfy` (< 0.05)
+            --  2. ...yet with that CORRECT (mostly bare) snow cover the surface
+            --     over-cools by >5 K relative to the cold-start: the wrong-high
+            --     frac_sno was MASKING a bare-ground / canopy surface-energy-
+            --     balance over-cooling (the SH/ustar canopy-turbulence residual).
+            --     So warm-start is WORSE overall, and a frac_sno-only fix would
+            --     expose the over-cooling. Both bugs must be fixed together.
+            dd_t_grnd warmD1 `shouldSatisfy` (< dd_t_grnd coldD1 - 5.0)
             warm `shouldSatisfy` (> cold)
-            pendingWith ("max rel TG over " ++ show ndays ++ " days vs Fortran h0: "
-                         ++ "cold-start=" ++ show cold ++ ", warm-start=" ++ show warm
-                         ++ " (warm-start worse => snow-physics bug, not IC)")
+            pendingWith ("warm-start day1: frac_sno=" ++ show (dd_frac_sno warmD1)
+                         ++ " (Fortran " ++ show (fsnoR VU.! 0) ++ "), TG="
+                         ++ show (dd_t_grnd warmD1) ++ " vs cold-start TG="
+                         ++ show (dd_t_grnd coldD1)
+                         ++ " -> correct snow cover but surface over-cools (masked SH bug)")
 
     it "Day 1 T_GRND matches Julia reference within 0.10K" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"
