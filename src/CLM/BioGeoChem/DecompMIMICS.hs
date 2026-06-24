@@ -150,7 +150,7 @@ idx2 nc c j = c + nc * j
 pctToFrac :: Double
 pctToFrac = 0.01
 
--- | Initialize MIMICS cascade (simplified).
+-- | Initialize MIMICS cascade.
 initDecompCascadeMIMICS :: InitMIMICSInput -> InitMIMICSOutput
 initDecompCascadeMIMICS inp =
   let !nc   = imi_nc inp
