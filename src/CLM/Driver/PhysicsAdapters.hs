@@ -397,9 +397,9 @@ dustOverlapMatrix =
 -- flux vector. Inputs come from the friction-velocity, soil, water, and canopy
 -- state; the dry threshold friction velocity is derived from the saltation
 -- factor. Dust is suppressed under snow cover. The source erodibility
--- (mbl_bsn_fct) uses a placeholder of 1.0 — the real value comes from a
--- geomorphic source dataset the port does not carry — so the flux magnitude is
--- indicative; its wind/moisture/bare-fraction dependence is faithful.
+-- (mbl_bsn_fct) is 1.0 — which is exactly CLM's default when the optional
+-- Zender soil-erodibility stream is disabled (DustEmisZender2003.F90:175); a
+-- geomorphic source dataset (mbl_bsn_fct_geo) would refine it but is optional.
 dustEmissionStep :: PhysicsStep
 dustEmissionStep _cfg ctx st =
   let fvel  = clmFrictionVel st
