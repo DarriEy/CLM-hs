@@ -275,6 +275,11 @@ data CLMState = CLMState
   , clmProducts      :: !CNProductsState  -- ^ Wood/crop product pools (1/10/100-yr).
                                           --   Decays each step; gains await a
                                           --   land-cover-change / harvest driver.
+    -- CN annual-update diagnostics (CNAnnualUpdate): a within-year counter and
+    -- 2m-temperature accumulator promoted to an annual average at year end.
+  , clmAnnsumCounter :: !Double           -- ^ within-year counter [s]
+  , clmTempSumT2m    :: !Double           -- ^ within-year sum of 2m air temp [K]
+  , clmAnnAvgT2m     :: !Double           -- ^ finalized annual mean 2m air temp [K]
     -- Calibration parameters (injected by SiteCalibration, read by hydrology)
   , clmP_baseflow_scalar :: !Double
   , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
@@ -343,6 +348,9 @@ defaultCLMState = CLMState
   , clmCNDVYear      = 1
   , clmDGVEcophys    = defaultDGVEcophysCon
   , clmProducts      = CNProductsState 0.0 0.0 0.0
+  , clmAnnsumCounter = 0.0
+  , clmTempSumT2m    = 0.0
+  , clmAnnAvgT2m     = 0.0
   , clmP_baseflow_scalar = 0.01
   , clmP_fff        = 0.5
   , clmP_fmax       = 0.5
@@ -405,6 +413,7 @@ data PhysicsPipeline = PhysicsPipeline
   , ppCNPreDrainage        :: !PhysicsStep
   , ppCNPostDrainage       :: !PhysicsStep
   , ppCNProducts           :: !PhysicsStep
+  , ppCNAnnualUpdate       :: !PhysicsStep
   , ppCNBalanceCheck       :: !PhysicsStep
     -- Phase 9c: Annual dynamic vegetation (CNDV). Fires only on the year
     -- boundary (gated by tcIsBegCurrYear at the call site); a no-op otherwise.
@@ -457,6 +466,7 @@ defaultPhysicsPipeline = PhysicsPipeline
   , ppCNPreDrainage      = idStep
   , ppCNPostDrainage     = idStep
   , ppCNProducts         = idStep
+  , ppCNAnnualUpdate     = idStep
   , ppCNBalanceCheck     = idStep
   , ppCNDV               = idStep
   , ppDustEmission       = idStep
@@ -705,7 +715,9 @@ clmDrvBoundaries cfg pipeline ctx drvState st0 =
     -- Phase 9b: CN biogeochemistry post-drainage
     st21b0 = apply (ppCNPostDrainage pipeline) st21
     -- Phase 9b': Wood/crop product pools (decay + harvest/LUC gains)
-    st21b = apply (ppCNProducts pipeline) st21b0
+    st21b1 = apply (ppCNProducts pipeline) st21b0
+    -- Phase 9b'': CN annual-update accumulators (annual mean 2m temperature)
+    st21b = apply (ppCNAnnualUpdate pipeline) st21b1
 
     -- Phase 10: Balance checks
     st22 = apply (ppWaterBalance pipeline) st21b

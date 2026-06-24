@@ -95,8 +95,14 @@ WIRED in Phase 4 (2026-06): dynamic vegetation (CNDV) — ppCNDV step runs every
 annual Light→Establishment→Mortality driver on the year boundary; per-PFT bioclimatic limits
 from an LPJ/CLM-DGVM table; activated by use_cndv (seeds clmDGVS). See ROADMAP item 8 for the
 documented limitations (no Fortran reference; LPJ pftpar stand-in; pre-established cold start).
-Still dead code (0 driver references): wood products / harvest, annual updates, dust & VOC
-emissions. DEFERRED — crop allocation/phenology: the run has no
+ALSO WIRED in Phase 4 (2026-06): dust emission (ppDustEmission — Zender 2003, flux→l2a_flxdst,
+real wind/moisture/bare-fraction dependence; erodibility placeholder), biogenic VOC
+(ppVOCEmission — MEGAN isoprene, flux→l2a_flxvoc; representative EF, 24/240-hr means stubbed),
+wood/crop products (ppCNProducts — first-order decay of the 1/10/100-yr pools; gains await an
+unported LUC/harvest driver, so pools only decay), and CN annual update (ppCNAnnualUpdate —
+annual mean 2m temperature via the ported annualCounter/annualPatch functions; other annual
+sums have no ported consumer yet). Still dead code (0 driver references): none of the previously
+listed CN modules remain unwired. DEFERRED — crop allocation/phenology: the run has no
 crop landunit (lun_itype [1,5]) or crop PFT (pch_itype [0,1,12,0]; crops are index 15+), so
 wiring it would be dead code; deferred to Phase 4 (multi-landunit / crop PFT). (Per-layer
 plant N uptake — SoilBiogeochemNitrogenUptakeMod — WIRED in Phase 2; the implicit matrix C/N

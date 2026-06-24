@@ -18,7 +18,7 @@ import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
   , aggregateLnd2Atm, cndvStep, dustEmissionStep, vocEmissionStep
-  , cnProductsStep )
+  , cnProductsStep, cnAnnualUpdateStep )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -1896,6 +1896,28 @@ main = hspec $ do
 
     it "emits more isoprene at warmer leaf temperature" $ do
       VU.sum (runVOC 500.0 305.0 3.0) `shouldSatisfy` (> VU.sum (runVOC 500.0 295.0 3.0))
+
+  describe "CN annual update step (wired #annual)" $ do
+    let auState = defaultCLMState { clmCNActive = True }
+        auCtx dt = defaultTimestepContext { tcDtime = dt, tcForcT = VU.singleton 290.0 }
+        runAU dt st = cnAnnualUpdateStep defaultDriverConfig (auCtx dt) st
+
+    it "accumulates the counter and 2m temperature each step" $ do
+      let st' = runAU 1800.0 auState
+      clmAnnsumCounter st' `shouldBe` 1800.0
+      clmTempSumT2m st'    `shouldBe` 290.0
+      clmAnnAvgT2m st'     `shouldBe` 0.0      -- not finalized mid-year
+
+    it "promotes to the annual mean and resets at the year boundary" $ do
+      -- one step of dt = seconds-per-year crosses the boundary
+      let st' = runAU (365.0 * 86400.0) auState
+      abs (clmAnnAvgT2m st' - 290.0) `shouldSatisfy` (< 1.0e-9)
+      clmAnnsumCounter st' `shouldBe` 0.0
+      clmTempSumT2m st'    `shouldBe` 0.0
+
+    it "is a no-op when CN is inactive" $ do
+      let st' = runAU 1800.0 (auState { clmCNActive = False })
+      clmAnnsumCounter st' `shouldBe` 0.0
 
   describe "Wood/crop products step (wired #products)" $ do
     -- Gains need an (unported) LUC/harvest driver, so the wired step decays a

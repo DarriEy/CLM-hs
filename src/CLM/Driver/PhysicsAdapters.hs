@@ -14,6 +14,7 @@ module CLM.Driver.PhysicsAdapters
   , dustEmissionStep
   , vocEmissionStep
   , cnProductsStep
+  , cnAnnualUpdateStep
     -- * Individual adapters (PhysicsStep signature)
   , dayLengthStep
   , activeLayerStep
@@ -144,6 +145,9 @@ import CLM.Types.Atm2LndData (Atm2LndData(..))
 import CLM.BioGeoChem.CNProducts
   ( CNProductsState(..), CNProductsFluxes(..)
   , ProductUpdateInput(..), ProductUpdateOutput(..), productPoolUpdate )
+import CLM.BioGeoChem.CNAnnualUpdate
+  ( AnnualCounterInput(..), AnnualCounterOutput(..), annualCounterUpdate
+  , AnnualPatchInput(..), AnnualPatchOutput(..), annualPatchUpdate )
 import CLM.BioGeoChem.DecompBGC
   ( DecompCascadeConData(..)
   , InitCascadeInput(..), InitCascadeOutput(..), initDecompCascadeBGC
@@ -303,6 +307,7 @@ wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
   , ppCNPreDrainage      = cnPreDrainageStep
   , ppCNPostDrainage     = cnPostDrainageStep
   , ppCNProducts         = cnProductsStep
+  , ppCNAnnualUpdate     = cnAnnualUpdateStep
   , ppCNBalanceCheck     = cnBalanceCheckStep
   , ppCNDV               = cndvStep
   , ppDustEmission       = dustEmissionStep
@@ -505,6 +510,45 @@ cnProductsStep _cfg ctx st
       , pui_fluxes = noGains
       , pui_dt     = tcDtime ctx
       }
+
+-- | CN annual-update step (CNAnnualUpdateMod): every step it advances the
+-- within-year counter and accumulates the 2m air temperature; at the year
+-- boundary (when the counter reaches seconds-per-year) it promotes the
+-- accumulated temperature to an annual mean and resets, using the ported
+-- 'annualCounterUpdate' and 'annualPatchUpdate'.
+--
+-- Honest scope: of CNAnnualUpdate's promoted quantities, only the annual mean
+-- 2m temperature is a live diagnostic here. The other annual sums (NPP,
+-- litfall, potential GPP, retranslocated N) are handled elsewhere (NPP by the
+-- CNDV step) or have no ported consumer yet (allocation/decomp), so they are
+-- not threaded.
+cnAnnualUpdateStep :: PhysicsStep
+cnAnnualUpdateStep _cfg ctx st
+  | not (clmCNActive st) = st
+  | otherwise = st
+      { clmAnnsumCounter = counter'
+      , clmTempSumT2m    = tempSum'
+      , clmAnnAvgT2m     = annAvg'
+      }
+  where
+    dt   = tcDtime ctx
+    secspyear = 365.0 * 86400.0
+    t2m  = if VU.null (tcForcT ctx) then 273.15 else tcForcT ctx VU.! 0
+    cOut = annualCounterUpdate AnnualCounterInput
+      { aci_counter = clmAnnsumCounter st, aci_dt = dt, aci_secspyear = secspyear }
+    tempSumStep = clmTempSumT2m st + t2m
+    (annAvg', tempSum', counter')
+      | aco_end_of_year cOut =
+          let nsteps = max 1.0 (secspyear / dt)
+              apo = annualPatchUpdate AnnualPatchInput
+                { api_tempsum_potential_gpp = 0.0
+                , api_tempmax_retransn      = 0.0
+                , api_tempavg_t2m           = tempSumStep / nsteps
+                , api_tempsum_npp           = 0.0
+                , api_tempsum_litfall       = 0.0
+                , api_dt                    = dt }
+          in (apo_annavg_t2m apo, 0.0, aco_counter cOut)
+      | otherwise = (clmAnnAvgT2m st, tempSumStep, aco_counter cOut)
 
 -- ============================================================================
 -- Helpers
