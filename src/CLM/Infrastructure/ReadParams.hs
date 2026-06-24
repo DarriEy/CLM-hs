@@ -36,6 +36,10 @@ module CLM.Infrastructure.ReadParams
   , defaultPFTConstants
     -- * Dynamic vegetation (CNDV) ecophysiological constants
   , readDGVEcophysCon
+    -- * MEGAN VOC emission factors and wood-product partitions
+  , readMeganIsopreneEF
+  , readPprod10
+  , readPprod100
     -- * Snow layer constants
   , SnowLayerConstants(..)
   , defaultSnowLayerConstants
@@ -615,6 +619,20 @@ readDGVEcophysCon dir = do
     , dgveco_gddmin        = gddmin
     , dgveco_twmax         = twmax
     }
+
+-- | Read per-PFT isoprene emission factors (ug/m2/hr) from megan_isoprene_ef.bin
+-- (extracted from the MEGAN2.1 emission-factor file, CLM-indexed with bare = 0).
+-- Empty when absent ⇒ the VOC step falls back to a representative constant.
+readMeganIsopreneEF :: FilePath -> IO (VU.Vector Double)
+readMeganIsopreneEF dir = readPftVecOpt dir "megan_isoprene_ef"
+
+-- | Read per-PFT deadstem-to-10yr-product fraction (pprod10, from clm5_params).
+readPprod10 :: FilePath -> IO (VU.Vector Double)
+readPprod10 dir = readPftVecOpt dir "pftcon_pprod10"
+
+-- | Read per-PFT deadstem-to-100yr-product fraction (pprod100, from clm5_params).
+readPprod100 :: FilePath -> IO (VU.Vector Double)
+readPprod100 dir = readPftVecOpt dir "pftcon_pprod100"
 
 readPFTConstantsBinary :: FilePath -> IO PFTConstants
 readPFTConstantsBinary dir = do

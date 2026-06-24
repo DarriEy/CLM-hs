@@ -72,7 +72,8 @@ import CLM.Infrastructure.BinaryIO
   , writeFloat64Vector
   , readManifestDims, ManifestDims(..) )
 import CLM.Infrastructure.ReadParams
-  ( readParametersBinary, AllParams(..), PFTConstants(..), readDGVEcophysCon )
+  ( readParametersBinary, AllParams(..), PFTConstants(..), readDGVEcophysCon
+  , readMeganIsopreneEF, readPprod10, readPprod100 )
 import CLM.Types.DGVSData (DGVEcophysCon(..), defaultDGVEcophysCon)
 import CLM.Infrastructure.NetCDF
   ( NcFile, ncOpen, ncClose, ncReadDouble1D, ncReadDouble2D, ncReadDoubleScalar
@@ -152,6 +153,20 @@ seedCNDV cfg econ st
                        , clmCNDVYear = 1
                        , clmDGVEcophys = econ }
   | otherwise     = st
+
+-- | Load the per-PFT CN parameter tables (MEGAN isoprene emission factors and
+-- the wood-product partitions) onto the state when CN is enabled. Empty vectors
+-- (files absent) leave the VOC / products steps on their representative-constant
+-- fallbacks.
+loadCNParams :: PipelineConfig -> FilePath -> CLMState -> IO CLMState
+loadCNParams cfg dir st
+  | not (pcUseCN cfg) = return st
+  | otherwise = do
+      let pdir = dir </> "params"
+      megEF <- readMeganIsopreneEF pdir
+      pp10  <- readPprod10 pdir
+      pp100 <- readPprod100 pdir
+      return st { clmMeganEF = megEF, clmPprod10 = pp10, clmPprod100 = pp100 }
 
 -- ============================================================================
 -- Canopy-hydrology parameters from the CLM parameter file
@@ -1290,7 +1305,7 @@ runPipeline cfg = do
 
   econ <- if pcUseCndv cfg then readDGVEcophysCon (dir </> "params")
                            else return defaultDGVEcophysCon
-  let st0c = seedCNDV cfg econ st0
+  st0c <- loadCNParams cfg dir (seedCNDV cfg econ st0)
   go st0c st0c defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
     go !base !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime !pl
@@ -1423,7 +1438,8 @@ runCLMForQrunoff cfg = do
 
   econ <- if pcUseCndv cfg then readDGVEcophysCon (dir </> "params")
                            else return defaultDGVEcophysCon
-  goQ (seedCNDV cfg econ st0) defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
+  st0c <- loadCNParams cfg dir (seedCNDV cfg econ st0)
+  goQ st0c defaultDriverState forcing 1 [] totalSteps drvCfg dtime pipeline
   where
     goQ !st !drvSt !fr !step !qAcc !total !drvCfg !dtime !pl
       | step > total = return (reverse qAcc)

@@ -491,12 +491,18 @@ vocEmissionStep _cfg ctx st =
         | elaiPrev > elai = let d = (elaiPrev - elai) / elaiPrev in (0.0, 1.0 - d, d)
         | elaiPrev < elai = let r = elaiPrev / elai in (1.0 - r, r, 0.0)
         | otherwise       = (0.0, 1.0, 0.0)
+      -- per-PFT isoprene emission factor from the loaded MEGAN table; fall back
+      -- to a representative constant when the table or PFT type is absent.
+      megEF = clmMeganEF st
+      ivt   = if VU.null (clmPatchIvt st) then -1 else clmPatchIvt st VU.! 0
+      epsilon = if not (VU.null megEF) && ivt >= 0 && ivt < VU.length megEF
+                then megEF VU.! ivt else 600.0
       out = vocEmissionDriver VOCDriverInput
         { vdi_t_veg = tVeg, vdi_t_veg24 = tVeg24, vdi_t_veg240 = tVeg240
         , vdi_par = par, vdi_par24 = par24, vdi_par240 = par240
         , vdi_lai = elai, vdi_co2_ppm = co2ppm, vdi_soil_wetness = wetness
         , vdi_fnew = fnew, vdi_fgro = 0.0, vdi_fmat = fmat, vdi_fold = fold
-        , vdi_epsilon = 600.0   -- representative isoprene EF (ug/m2/hr); PFT-specific in MEGAN
+        , vdi_epsilon = epsilon   -- per-PFT isoprene EF (ug/m2/hr) from the MEGAN table
         , vdi_LDF = 1.0, vdi_betaT = 0.13, vdi_ct1 = 95.0, vdi_ct2 = 230.0, vdi_Ceo = 2.0
         , vdi_Anew = 0.05, vdi_Agro = 0.6, vdi_Amat = 1.0, vdi_Aold = 0.9
         , vdi_is_isoprene = True
@@ -524,8 +530,13 @@ cnProductsStep _cfg ctx st
     dt = tcDtime ctx
     noGains = CNProductsFluxes 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
     hf = clmHarvestFrac st
-    pprod10  = 0.25
-    pprod100 = 0.025
+    -- per-PFT wood-product partitions from the loaded clm5_params table; fall
+    -- back to representative constants when the table or PFT type is absent.
+    ivt = if VU.null (clmPatchIvt st) then -1 else clmPatchIvt st VU.! 0
+    look v def = if not (VU.null v) && ivt >= 0 && ivt < VU.length v
+                 then v VU.! ivt else def
+    pprod10  = look (clmPprod10 st) 0.25
+    pprod100 = look (clmPprod100 st) 0.025
     (gains, stH)
       | tcIsBegCurrYear ctx && hf > 0.0 =
           let wood    = hf * (clmLiveStemC st + clmDeadStemC st)

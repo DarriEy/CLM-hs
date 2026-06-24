@@ -289,6 +289,12 @@ data CLMState = CLMState
   , clmTVeg240       :: !Double           -- ^ 240-hr running mean leaf temp [K]
   , clmPar24         :: !Double           -- ^ 24-hr running mean PAR [umol/m2/s]
   , clmPar240        :: !Double           -- ^ 240-hr running mean PAR [umol/m2/s]
+    -- Per-PFT parameter tables (loaded from clm5_params.nc / the MEGAN factor
+    -- file; CLM-indexed with bare ground = 0). Empty ⇒ the VOC / products steps
+    -- fall back to representative constants.
+  , clmMeganEF       :: !(VU.Vector Double) -- ^ isoprene emission factor [ug/m2/hr]
+  , clmPprod10       :: !(VU.Vector Double) -- ^ deadstem -> 10-yr product fraction
+  , clmPprod100      :: !(VU.Vector Double) -- ^ deadstem -> 100-yr product fraction
     -- Calibration parameters (injected by SiteCalibration, read by hydrology)
   , clmP_baseflow_scalar :: !Double
   , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
@@ -365,6 +371,9 @@ defaultCLMState = CLMState
   , clmTVeg240       = 0.0
   , clmPar24         = 0.0
   , clmPar240        = 0.0
+  , clmMeganEF       = VU.empty
+  , clmPprod10       = VU.empty
+  , clmPprod100      = VU.empty
   , clmP_baseflow_scalar = 0.01
   , clmP_fff        = 0.5
   , clmP_fmax       = 0.5

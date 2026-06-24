@@ -29,7 +29,8 @@ import CLM.BioGeoChem.CNProducts
 import qualified CLM.Infrastructure.InitSubgrid as IS
 import qualified CLM.Infrastructure.SubgridAverage as SA
 import CLM.Types.DGVSData (DGVSData(..), DGVEcophysCon(..), defaultDGVEcophysCon)
-import CLM.Infrastructure.ReadParams (readDGVEcophysCon)
+import CLM.Infrastructure.ReadParams
+  ( readDGVEcophysCon, readMeganIsopreneEF, readPprod10, readPprod100 )
 import CLM.BioGeoChem.CNDVStep
   ( CNDVStepInput(..), cndvStepAdvance, seedDGVS, tkfrz
   , dgvmPftBioclim, isWoodyPFT )
@@ -1916,6 +1917,21 @@ main = hspec $ do
                   ((vocState 300.0 3.0) { clmTVeg24 = clmTVeg24 st1 })
       clmTVeg24 st2 `shouldSatisfy` (\t -> t > 290.0 && t < 300.0)
 
+    it "reads the real per-PFT MEGAN isoprene emission factors" $ do
+      ef <- readMeganIsopreneEF "test/data/params"
+      ef VU.! 1 `shouldBe` 600.0      -- needleleaf evergreen temperate tree
+      ef VU.! 7 `shouldBe` 10000.0    -- broadleaf deciduous temperate tree
+      ef VU.! 0 `shouldBe` 0.0        -- bare ground
+
+    it "uses the per-PFT emission factor (broadleaf emits far more than needleleaf)" $ do
+      ef <- readMeganIsopreneEF "test/data/params"
+      let emit ivt = VU.sum (l2a_flxvoc_grc (clmLnd2Atm (vocEmissionStep defaultDriverConfig (vocCtx 500.0)
+                       ((vocState 305.0 3.0) { clmMeganEF = ef, clmPatchIvt = VU.singleton ivt }))))
+          eNdl = emit 1   -- EF 600
+          eBdl = emit 7   -- EF 10000
+      -- emission scales linearly with the emission factor (~16.7x)
+      (eBdl / eNdl) `shouldSatisfy` (\r -> r > 16.0 && r < 17.5)
+
   describe "CN annual update step (wired #annual)" $ do
     let auState = defaultCLMState { clmCNActive = True }
         auCtx dt = defaultTimestepContext { tcDtime = dt, tcForcT = VU.singleton 290.0 }
@@ -1992,6 +2008,17 @@ main = hspec $ do
                       (harvCtx { tcIsBegCurrYear = False }) harvState
       cps_prod10 (clmProducts midYear) `shouldBe` 0.0
       clmLiveStemC midYear `shouldBe` 500.0
+
+    it "uses the real per-PFT wood-product partitions (pprod10/pprod100)" $ do
+      pp10  <- readPprod10 "test/data/params"
+      pp100 <- readPprod100 "test/data/params"
+      -- needleleaf evergreen temperate (PFT 1): pprod10=0.3, pprod100=0.1
+      let hs = harvState { clmPprod10 = pp10, clmPprod100 = pp100
+                         , clmPatchIvt = VU.singleton 1 }
+          p = clmProducts (cnProductsStep defaultDriverConfig harvCtx hs)
+      -- wood = 0.1*(500+5000)=550; prod10 = 550*0.3, prod100 = 550*0.1
+      abs (cps_prod10 p - 165.0) `shouldSatisfy` (< 1.0e-6)
+      abs (cps_prod100 p - 55.0) `shouldSatisfy` (< 1.0e-6)
 
   describe "CNProducts (wood/crop product pools)" $ do
     -- The ported CNProducts module is not wired into the live single-column
