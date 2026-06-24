@@ -121,6 +121,9 @@ data PipelineConfig = PipelineConfig
   , pcOutputCSV   :: !FilePath
   , pcUseCN       :: !Bool       -- ^ Enable CN biogeochemistry
   , pcUseCndv     :: !Bool       -- ^ Enable dynamic vegetation (seed clmDGVS)
+  , pcFortranRestart :: !(Maybe FilePath)
+    -- ^ Warm-start: overlay a Fortran @clm2.r.*.nc@ restart (column 0) onto the
+    -- cold-start base before running, so the snow/soil IC matches a Fortran run.
   , pcRestartRoundtripDay :: !(Maybe Int)
     -- ^ Test hook: at the end of this day, write the full prognostic state to
     -- a restart directory and immediately read it back onto a /pristine/
@@ -138,6 +141,7 @@ defaultPipelineConfig = PipelineConfig
   , pcOutputCSV = ""
   , pcUseCN = False
   , pcUseCndv = False
+  , pcFortranRestart = Nothing
   , pcRestartRoundtripDay = Nothing
   }
 
@@ -1331,9 +1335,13 @@ runPipeline cfg = do
   let drvCfg = defaultDriverConfig
       pipeline = wiredPhysicsPipeline albConst chParams snicarOpt
 
+  -- Optional warm-start: overlay a Fortran restart so the snow/soil IC matches.
+  st0w <- case pcFortranRestart cfg of
+            Nothing -> return st0
+            Just rp -> either (const st0) id <$> readFortranRestart 0 rp st0
   econ <- if pcUseCndv cfg then readDGVEcophysCon (dir </> "params")
                            else return defaultDGVEcophysCon
-  st0c <- loadCNParams cfg dir (seedCNDV cfg econ st0)
+  st0c <- loadCNParams cfg dir (seedCNDV cfg econ st0w)
   go st0c st0c defaultDriverState forcing 1 zeroDailyDiag [] totalSteps stepsPerDay drvCfg dtime pipeline
   where
     go !base !st !drvSt !fr !step !dayAcc !results !total !spd !drvCfg !dtime !pl

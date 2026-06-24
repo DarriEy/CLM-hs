@@ -2452,6 +2452,43 @@ main = hspec $ do
             --  (c) even the worst quarter stays within a loose bound.
             maximum [ qmax q | q <- [0 .. 3] ] `shouldSatisfy` (< 0.12)
 
+    it "soil h0 parity: warm-start snow IC vs cold-start (#soil-parity-warmstart)" $ do
+      let h0 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.h0.2003-01-01-00000.nc"
+          rp = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.r.2003-01-01-00000.nc"
+          ndays = 18 :: Int
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      hasH0   <- doesFileExist h0
+      hasRp   <- doesFileExist rp
+      if not hasData then pendingWith "test/data not available"
+      else if not (hasH0 && hasRp) then pendingWith "Fortran soil h0/restart not available"
+      else do
+        let base = defaultPipelineConfig { pcDataDir = "test/data", pcNdays = ndays, pcVerbose = False }
+        coldD <- runPipeline base
+        warmD <- runPipeline base { pcFortranRestart = Just rp }
+        eNc <- ncOpen h0
+        tgRRes <- case eNc of
+          Left e -> return (Left ("ncOpen h0 failed: " ++ e))
+          Right nc -> do { r <- ncReadDouble1D nc "TG"; ncClose nc; return r }
+        case tgRRes of
+          Left e -> pendingWith e
+          Right tgR -> do
+            let reldiff a b = abs (a - b) / (1.0 + abs b)
+                maxR ds = maximum [ reldiff (dd_t_grnd d) (tgR VU.! i)
+                                  | (i, d) <- zip [0 ..] ds, i < VU.length tgR ]
+                cold = maxR coldD
+                warm = maxR warmD
+            length warmD `shouldBe` ndays
+            -- Finding: warm-start (matched Fortran snow IC) is WORSE than cold
+            -- start, not better. The winter residual is therefore NOT an
+            -- initial-condition artifact: giving the port the snowpack from day 1
+            -- exposes the snow-cover-fraction (frac_sno) / albedo bug immediately
+            -- (snowWaterStep hardcodes n_melt=1.0 instead of deriving it from the
+            -- topographic std_elev; Bow std_elev=500 -> n_melt should be ~0.4).
+            warm `shouldSatisfy` (> cold)
+            pendingWith ("max rel TG over " ++ show ndays ++ " days vs Fortran h0: "
+                         ++ "cold-start=" ++ show cold ++ ", warm-start=" ++ show warm
+                         ++ " (warm-start worse => snow-physics bug, not IC)")
+
     it "Day 1 T_GRND matches Julia reference within 0.10K" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"
       if not hasData
