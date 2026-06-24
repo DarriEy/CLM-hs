@@ -1910,6 +1910,11 @@ snowWaterStep _cfg ctx st =
       n_melt = clmP_n_melt_coef st / max 10.0 (clmTopoStd st)
       accum_factor = 0.1 :: Double
       int_snow_max = 2000.0 :: Double
+      -- NOTE: the snowmelt arg is 0.0 here, which disables the SL2012 DEPLETION
+      -- curve so frac_sno can only ratchet up (saturating to ~0.96 vs Fortran
+      -- ~0.11). The real fix is to pass the previous-step snow melt flux
+      -- (qflx_snomelt, computed in SoilTemperature's phase change but currently
+      -- discarded) so the depletion fires during melt events. See ROADMAP.
       (frac_sno_sl, frac_sno_eff_sl, snow_depth_sl) =
         updateSnowDepthAndFracSL2012
           n_melt accum_factor int_snow_max
