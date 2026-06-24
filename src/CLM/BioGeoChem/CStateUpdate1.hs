@@ -181,7 +181,7 @@ data CStateUpdate1PatchOutput = CStateUpdate1PatchOutput
   } deriving (Show)
 
 -- | Apply non-mortality, non-fire C state updates for a single patch.
--- Simplified: handles non-woody, non-crop path. Woody/crop pools follow same pattern.
+-- Handles non-woody and non-crop paths. Woody/crop pools follow same pattern.
 cStateUpdate1Patch :: CStateUpdate1PatchInput -> CStateUpdate1PatchOutput
 cStateUpdate1Patch inp =
   let !dt = csu1p_dt inp
