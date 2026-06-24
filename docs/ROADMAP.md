@@ -309,14 +309,16 @@ original "Phase 1 items 1–4" step below is complete.
 The highest-leverage work is now **closing the validation gap** — converting
 "sanity/conservation-validated" into "Fortran-parity-validated" across regimes:
 
-1. **Extend soil-column h0 parity** beyond the 10-day winter window — run the
-   full year vs `clm_parity_run` clm2.h0, and add summer/shoulder-season windows,
-   to characterize the TG/SH/LH residual seasonally (the winter SH/snow gap is the
-   known weak point). This is the cheapest high-value step: the machinery (h0
-   reader, forcing alignment, daily diagnostics) now exists.
-2. **Diagnose the winter SH/snow residual** that the parity test quantifies (the
-   ~5 K worst-case TG divergence) — the long-standing trajectory residual vs the
-   Julia port, now also measured against Fortran.
+1. **Soil-column h0 seasonal map — DONE (2026-06).** A 360-day free run vs
+   `clm_parity_run` clm2.h0 bins the TG rel residual by quarter: Q1(JFM)
+   0.080|0.023, Q2(AMJ) 0.064|0.016, Q3(JAS) 0.045|0.015, Q4(OND) 0.087|0.023
+   (max|mean). Summer tracks tightly (1.5% mean); the cold quarters are ~2x worse
+   and the residual dips in summer — so it is seasonal physics, not just drift.
+2. **Diagnose the winter SH/snow residual** the map localizes (Q1/Q4 ~8-9% max
+   TG): the cold-season trajectory divergence is now quantified against Fortran,
+   not just the Julia port. This is the concrete weak point to attack — likely in
+   the snow thermal path / sensible-heat exchange under snow (cf. the
+   `snow-layer-day8-crash` and `julia-trajectory-residual` findings).
 3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
    urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
    its Fortran reference (`clm_glacier_run`, etc.).
