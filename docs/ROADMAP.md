@@ -328,10 +328,19 @@ The highest-leverage work is now **closing the validation gap** — converting
    *depletion* curve, and Bow winter is accumulation-dominated, so `frac_sno`
    saturates to ~0.96 via the *accumulation* curve regardless. No Julia-parity
    breakage (the tradeoff did not materialize) and no Fortran improvement; kept as
-   a correctness fix. **NEXT:** the `frac_sno` accumulation saturation itself —
-   hypothesis: Fortran Bow uses NiuYang2007 (`tanh(snowdp/(2.5·z0))` with the tall-
-   canopy roughness → ~0.11) while the port uses SwensonLawrence2012 (accumulation-
-   saturating). A snow-cover *method* mismatch, not a parameter.
+   a correctness fix.
+   **Method investigation done (commit 3f40389) — NOT a method mismatch.** Fortran
+   Bow's lnd_in sets `snow_cover_fraction_method='SwensonLawrence2012'`, the same as
+   the port. The real bug: `snowWaterStep` calls `updateSnowDepthAndFracSL2012` with
+   the **snowmelt arg hardcoded to 0.0**, so SL2012's depletion curve never fires and
+   `frac_sno` is a one-way ratchet (→ ~0.96 vs Fortran ~0.11). The melt flux
+   `qflx_snomelt` IS computed in `SoilTemperature.phaseChange` but
+   `soilTemperatureFullStep` discards it. Confirmed by experiment: forcing the
+   depletion path on drops `frac_sno` 0.96→0.52 and raises absorbed solar toward
+   Fortran. **FIX (next):** surface `qflx_snomelt` from the soil-temp step → a new
+   CLMState field → pass it (previous step) into `snowWaterStep`. Unlike the inert
+   n_melt fix, this *changes behavior*, so measure the Julia-parity shift (Fortran is
+   ground truth).
 3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
    urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
    its Fortran reference (`clm_glacier_run`, etc.).
