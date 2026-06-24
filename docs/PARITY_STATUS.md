@@ -128,7 +128,7 @@ SoilTemperature 998 vs 2,974) — core algorithm without full option/edge-case c
 | Area | Real status |
 |------|-------------|
 | Biogeophys core kernels (1 soil column) | mostly real (~40 modules) |
-| CN/BGC | ~½ wired (alloc/MR/Ncomp/decomp/fire/mortality/isotopes/phenology-onset/CNDV); wood products/harvest, annual updates, dust & VOC, crop NOT wired |
+| CN/BGC | ~⅔ wired (alloc/MR/Ncomp/decomp/fire/mortality/isotopes/phenology-onset/CNDV/products+harvest/annual-update/dust/VOC; real per-PFT MEGAN+pprod params); crop NOT wired; matrix C/N solver deferred |
 | soilbiogeochem | ~60–70%; missing matrix solver + N uptake |
 | dyn_subgrid | 0% |
 | Restart | **real, bit-identical round-trip** (native binary) + **reads Fortran `clm2.r.*.nc`** into sane state; warm-start-run parity pending |
