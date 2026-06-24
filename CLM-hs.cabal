@@ -103,6 +103,18 @@ library
                      , CLM.BioGeoChem.CIsoFlux
                      , CLM.BioGeoChem.CarbonIsotopes
                      , CLM.BioGeoChem.FATESInterface
+                     , CLM.BioGeoChem.FATES.Constants
+                     , CLM.BioGeoChem.FATES.Types
+                     , CLM.BioGeoChem.FATES.Globals
+                     , CLM.BioGeoChem.FATES.Utils
+                     , CLM.BioGeoChem.FATES.Allometry
+                     , CLM.BioGeoChem.FATES.Cohort
+                     , CLM.BioGeoChem.FATES.Patch
+                     , CLM.BioGeoChem.FATES.Vegetation
+                     , CLM.BioGeoChem.FATES.Hydraulics
+                     , CLM.BioGeoChem.FATES.Radiation
+                     , CLM.BioGeoChem.FATES.Fire
+                     , CLM.BioGeoChem.FATES.Driver
                      , CLM.BioGeoChem.CStateUpdate1
                      , CLM.BioGeoChem.CStateUpdate2
                      , CLM.BioGeoChem.CStateUpdate3
