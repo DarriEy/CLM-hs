@@ -347,9 +347,17 @@ The highest-leverage work is now **closing the validation gap** — converting
    `frac_sno`≈0.11), while the cold-started port has `int_snow`≈`h2osno` (`smr`≈1 →
    `frac_sno`≈1). This is a **spin-up / cold-start limitation**, not a physics bug — much
    of the "winter residual" is the port starting Jan-1 bare vs Fortran's mature snowpack.
-   **NEXT (if pursued):** snow spin-up (run a prior winter to build `int_snow`) or
-   warm-start from the restart's `INT_SNOW`, and investigate why a matched-snow warm-start
-   *worsens* TG (a secondary coupled issue — possibly the canopy-turbulence residual).
+   **SYNTHESIS (commit 3fd771e) — two coupled bugs that partially cancel.** A warm-start
+   from the Fortran restart (`--pipeline-warm`) reproduces the CORRECT day-1 snow cover
+   (frac_sno 0.115 ≈ Fortran 0.114, H2OSNO 75.7 ≈ 75.5) — yet TG **over-cools ~15 K**
+   (warm day-1 244.4 vs cold-start 259.8). The wrong-high cold-start frac_sno (~0.96) was
+   *masking* a bare-ground/canopy surface-energy-balance over-cooling (the SH/ustar
+   canopy-turbulence residual). As frac_sno ratchets back up over days 8-18, TG recovers.
+   So the cold-start's two bugs partially cancel, which is why every single fix was inert
+   or worsened TG. **FIX requires BOTH together:** (a) the bare-ground/canopy SH
+   over-cooling (needs a per-iteration canopy-solve dump to find where ustar/leaf-temp
+   part), and (b) the frac_sno `int_snow` spin-up — then re-measure jointly. The
+   warm-start test now encodes the coupling as a regression guard.
 3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
    urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
    its Fortran reference (`clm_glacier_run`, etc.).
