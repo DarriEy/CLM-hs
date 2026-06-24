@@ -314,11 +314,19 @@ The highest-leverage work is now **closing the validation gap** — converting
    0.080|0.023, Q2(AMJ) 0.064|0.016, Q3(JAS) 0.045|0.015, Q4(OND) 0.087|0.023
    (max|mean). Summer tracks tightly (1.5% mean); the cold quarters are ~2x worse
    and the residual dips in summer — so it is seasonal physics, not just drift.
-2. **Diagnose the winter SH/snow residual** the map localizes (Q1/Q4 ~8-9% max
-   TG): the cold-season trajectory divergence is now quantified against Fortran,
-   not just the Julia port. This is the concrete weak point to attack — likely in
-   the snow thermal path / sensible-heat exchange under snow (cf. the
-   `snow-layer-day8-crash` and `julia-trajectory-residual` findings).
+2. **Winter residual root cause — FOUND (2026-06).** A per-day diff vs the h0
+   localized it to SNOW ALBEDO: the port absorbs up to 2x less solar (FSA) under
+   full snow, with frac_sno (FSNO) saturating to ~0.96 vs Fortran ~0.11 at the
+   same SWE. Warm-starting from the Fortran snowpack (new `pcFortranRestart`) makes
+   TG *worse*, proving it is a snow-physics bug, not an IC artifact. The bug:
+   `snowWaterStep` hardcodes `n_melt = 1.0` instead of deriving the SCA shape
+   parameter from topographic `std_elev` (`initNMelt`: n_melt_coef/max(10,std_elev);
+   Bow std_elev=500 → n_melt≈0.4). This supersedes the prior canopy-turbulence
+   theory as the *dominant* winter driver.
+   **FIX (next):** thread `std_elev` into CLMState and use it for `n_melt` in
+   `snowWaterStep`. TRADEOFF to decide first: the Julia reference may share the
+   `n_melt=1.0` simplification, so the Julia-parity tests may shift as Fortran
+   parity improves — treat Fortran as ground truth.
 3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
    urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
    its Fortran reference (`clm_glacier_run`, etc.).
