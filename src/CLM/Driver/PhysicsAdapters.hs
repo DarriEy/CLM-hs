@@ -1904,7 +1904,10 @@ snowWaterStep _cfg ctx st =
         then 0.0
         else (h2osno_total_prev * snow_persist_cur) / h2osno_after + dtime
 
-      n_melt = 1.0 :: Double
+      -- SCA shape parameter from topographic std dev (Swenson-Lawrence 2012):
+      -- n_melt = n_melt_coef / max(10, std_elev). High relief (large std_elev)
+      -- lowers frac_sno at a given SWE. Default std=200 -> n_melt=1.0 (flat).
+      n_melt = clmP_n_melt_coef st / max 10.0 (clmTopoStd st)
       accum_factor = 0.1 :: Double
       int_snow_max = 2000.0 :: Double
       (frac_sno_sl, frac_sno_eff_sl, snow_depth_sl) =

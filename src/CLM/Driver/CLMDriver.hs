@@ -302,6 +302,10 @@ data CLMState = CLMState
   , clmP_e_ice      :: !Double      -- ^ Ice impedance factor
   , clmP_n_baseflow :: !Double      -- ^ Baseflow exponent
   , clmP_n_melt_coef :: !Double     -- ^ Snowmelt coefficient
+  , clmTopoStd       :: !Double     -- ^ Topographic std dev of elevation [m]
+                                    --   (std_elev); sets the snow-cover-fraction
+                                    --   SCA shape param n_melt. Default 200 →
+                                    --   n_melt=1.0 (flat) until read from surfdata.
   , clmP_interception_frac :: !Double
   , clmP_sno_z0mv   :: !Double      -- ^ Snow roughness length
   , clmP_route_k    :: !Double      -- ^ Routing residence time
@@ -380,6 +384,7 @@ defaultCLMState = CLMState
   , clmP_e_ice      = 6.0
   , clmP_n_baseflow = 1.0
   , clmP_n_melt_coef = 200.0
+  , clmTopoStd       = 200.0
   , clmP_interception_frac = 0.5
   , clmP_sno_z0mv   = 0.002
   , clmP_route_k    = 20.0

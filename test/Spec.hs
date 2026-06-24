@@ -2130,6 +2130,9 @@ main = hspec $ do
           -- Bow at Banff: wt_nat_patch is 60% needleleaf evergreen temperate
           -- tree (PFT 1), 35% c3 arctic grass, 5% bare -> dominant PFT is 1.
           clmPatchIvt st `shouldBe` VU.singleton 1
+          -- Topographic std dev read from surfdata (Bow std_elev = 500 m), which
+          -- sets the snow-cover-fraction n_melt = n_melt_coef/max(10,std_elev).
+          clmTopoStd st `shouldBe` 500.0
 
   describe "Pipeline integration (vs Julia reference)" $ do
     it "runs 10 days without crashing" $ do
@@ -2481,9 +2484,14 @@ main = hspec $ do
             -- Finding: warm-start (matched Fortran snow IC) is WORSE than cold
             -- start, not better. The winter residual is therefore NOT an
             -- initial-condition artifact: giving the port the snowpack from day 1
-            -- exposes the snow-cover-fraction (frac_sno) / albedo bug immediately
-            -- (snowWaterStep hardcodes n_melt=1.0 instead of deriving it from the
-            -- topographic std_elev; Bow std_elev=500 -> n_melt should be ~0.4).
+            -- exposes a snow-cover-fraction (frac_sno) / albedo bug immediately.
+            -- The port's frac_sno saturates to ~0.96 (SL2012 accumulation curve)
+            -- vs Fortran's ~0.11 at the same SWE, raising the albedo and cutting
+            -- absorbed solar. (Deriving n_melt from std_elev was verified correct
+            -- but INERT here: n_melt only shapes the SL2012 depletion curve, and
+            -- winter is accumulation-dominated. The remaining driver is the
+            -- accumulation saturation / a likely SL2012-vs-NiuYang2007 method
+            -- mismatch with the tall-canopy roughness.)
             warm `shouldSatisfy` (> cold)
             pendingWith ("max rel TG over " ++ show ndays ++ " days vs Fortran h0: "
                          ++ "cold-start=" ++ show cold ++ ", warm-start=" ++ show warm

@@ -262,6 +262,9 @@ initCLMStateFromDir dir = do
   -- represented by the dominant natural PFT, so per-PFT CN parameters (MEGAN EF,
   -- pprod, CNDV bioclimatic limits) resolve to the column's actual vegetation.
   wtNatPatch_raw <- readOptionalVector (dir </> "surfdata" </> "wt_nat_patch.bin") VU.empty
+  -- Topographic std dev of elevation: sets the snow-cover-fraction SCA shape
+  -- parameter n_melt (high relief -> lower frac_sno at a given SWE).
+  stdElev_raw <- readOptionalVector (dir </> "surfdata" </> "std_elev.bin") VU.empty
 
   elai_raw <- readFloat64Vector (dir </> "coldstart" </> "elai.bin")
   esai_raw <- readFloat64Vector (dir </> "coldstart" </> "esai.bin")
@@ -459,6 +462,9 @@ initCLMStateFromDir dir = do
         , clmPatchIvt = if VU.null wtNatPatch_raw
                         then VU.empty
                         else VU.singleton (VU.maxIndex wtNatPatch_raw)
+        , clmTopoStd = if VU.null stdElev_raw
+                       then clmTopoStd defaultCLMState
+                       else stdElev_raw VU.! 0
         }
 
   soil_color_raw <- readInt64Vector (dir </> "surfdata" </> "soil_color.bin")
