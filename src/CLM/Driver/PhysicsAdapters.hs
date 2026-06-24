@@ -447,11 +447,11 @@ dustEmissionStep _cfg ctx st =
 -- Honest limitations: this wires a single representative compound (isoprene)
 -- with standard MEGAN2.1 light-dependent constants and a representative
 -- emission factor (the per-PFT emission factors come from MEGAN parameter files
--- the port does not carry); the 24-hr / 240-hr running means are stubbed with
--- the current values (the port has no rolling-average history yet), so the
--- light/temperature response is instantaneous rather than acclimated. The
--- gamma-factor structure and the LAI / soil-moisture / leaf-age / CO2
--- dependences are faithful.
+-- the port does not carry). The 24-hr / 240-hr acclimation means of leaf
+-- temperature and PAR are carried as running means on CLMState (advanced here
+-- each step), so the light/temperature response is acclimated; the gamma-factor
+-- structure and the LAI / soil-moisture / leaf-age / CO2 dependences are
+-- faithful.
 vocEmissionStep :: PhysicsStep
 vocEmissionStep _cfg ctx st =
   let temp = clmTemp st
@@ -465,6 +465,17 @@ vocEmissionStep _cfg ctx st =
       solad = hd (tcForcSolad ctx) 0.0
       solai = hd (tcForcSolai ctx) 0.0
       par = (solad + solai) * 4.6
+      -- advance the 24-hr / 240-hr acclimation running means (EMA; the
+      -- steady-state equivalent of CLM's boxcar accumulators). Uninitialized
+      -- means (<= 0) are seeded with the current value to skip the cold-start
+      -- transient.
+      dt   = tcDtime ctx
+      ema period old cur = let w = dt / period
+                           in if old <= 0.0 then cur else old + (cur - old) * w
+      tVeg24  = ema 86400.0  (clmTVeg24 st)  tVeg
+      tVeg240 = ema 864000.0 (clmTVeg240 st) tVeg
+      par24   = ema 86400.0  (clmPar24 st)   par
+      par240  = ema 864000.0 (clmPar240 st)  par
       elai = hd (cstate_elai_patch can) 0.0
       elai240 = hd (cstate_elai240_patch can) 0.0
       watsat = hd (sstate_watsat_col soil) 0.4
@@ -481,8 +492,8 @@ vocEmissionStep _cfg ctx st =
         | elaiPrev < elai = let r = elaiPrev / elai in (1.0 - r, r, 0.0)
         | otherwise       = (0.0, 1.0, 0.0)
       out = vocEmissionDriver VOCDriverInput
-        { vdi_t_veg = tVeg, vdi_t_veg24 = tVeg, vdi_t_veg240 = tVeg
-        , vdi_par = par, vdi_par24 = par, vdi_par240 = par
+        { vdi_t_veg = tVeg, vdi_t_veg24 = tVeg24, vdi_t_veg240 = tVeg240
+        , vdi_par = par, vdi_par24 = par24, vdi_par240 = par240
         , vdi_lai = elai, vdi_co2_ppm = co2ppm, vdi_soil_wetness = wetness
         , vdi_fnew = fnew, vdi_fgro = 0.0, vdi_fmat = fmat, vdi_fold = fold
         , vdi_epsilon = 600.0   -- representative isoprene EF (ug/m2/hr); PFT-specific in MEGAN
@@ -490,7 +501,9 @@ vocEmissionStep _cfg ctx st =
         , vdi_Anew = 0.05, vdi_Agro = 0.6, vdi_Amat = 1.0, vdi_Aold = 0.9
         , vdi_is_isoprene = True
         }
-  in st { clmLnd2Atm = (clmLnd2Atm st) { l2a_flxvoc_grc = VU.singleton (vdo_emission out) } }
+  in st { clmLnd2Atm = (clmLnd2Atm st) { l2a_flxvoc_grc = VU.singleton (vdo_emission out) }
+        , clmTVeg24 = tVeg24, clmTVeg240 = tVeg240
+        , clmPar24 = par24, clmPar240 = par240 }
 
 -- | Wood/crop product pools step (CNProductsMod): advances the 1/10/100-year
 -- product pools by their first-order decay and any gain fluxes. The gains

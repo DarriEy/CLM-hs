@@ -1897,6 +1897,25 @@ main = hspec $ do
     it "emits more isoprene at warmer leaf temperature" $ do
       VU.sum (runVOC 500.0 305.0 3.0) `shouldSatisfy` (> VU.sum (runVOC 500.0 295.0 3.0))
 
+    it "acclimation history matters: warm 10-day history emits more than cool" $ do
+      -- same instantaneous leaf temp (305 K), different carried 24/240-hr means
+      let base = vocState 305.0 3.0
+          withHist t p s = s { clmTVeg24 = t, clmTVeg240 = t, clmPar24 = p, clmPar240 = p }
+          emit s = VU.sum (l2a_flxvoc_grc (clmLnd2Atm (vocEmissionStep defaultDriverConfig (vocCtx 500.0) s)))
+          eCool = emit (withHist 290.0 2000.0 base)
+          eWarm = emit (withHist 305.0 2000.0 base)
+      eWarm `shouldSatisfy` (> eCool)
+
+    it "advances the 24-hr running mean toward the current value" $ do
+      -- first step seeds the mean to the current temp; it is carried on state
+      let s1 = vocState 290.0 3.0
+          st1 = vocEmissionStep defaultDriverConfig (vocCtx 500.0) s1
+      abs (clmTVeg24 st1 - 290.0) `shouldSatisfy` (< 1.0e-9)   -- seeded on first step
+      -- a warmer second step nudges the 24-hr mean up but it lags the instant value
+      let st2 = vocEmissionStep defaultDriverConfig (vocCtx 500.0)
+                  ((vocState 300.0 3.0) { clmTVeg24 = clmTVeg24 st1 })
+      clmTVeg24 st2 `shouldSatisfy` (\t -> t > 290.0 && t < 300.0)
+
   describe "CN annual update step (wired #annual)" $ do
     let auState = defaultCLMState { clmCNActive = True }
         auCtx dt = defaultTimestepContext { tcDtime = dt, tcForcT = VU.singleton 290.0 }

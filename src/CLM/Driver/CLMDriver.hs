@@ -280,6 +280,12 @@ data CLMState = CLMState
   , clmAnnsumCounter :: !Double           -- ^ within-year counter [s]
   , clmTempSumT2m    :: !Double           -- ^ within-year sum of 2m air temp [K]
   , clmAnnAvgT2m     :: !Double           -- ^ finalized annual mean 2m air temp [K]
+    -- VOC (MEGAN) acclimation history: 24-hr and 240-hr running means of leaf
+    -- temperature and PAR, advanced each step by the VOC emission step.
+  , clmTVeg24        :: !Double           -- ^ 24-hr running mean leaf temp [K]
+  , clmTVeg240       :: !Double           -- ^ 240-hr running mean leaf temp [K]
+  , clmPar24         :: !Double           -- ^ 24-hr running mean PAR [umol/m2/s]
+  , clmPar240        :: !Double           -- ^ 240-hr running mean PAR [umol/m2/s]
     -- Calibration parameters (injected by SiteCalibration, read by hydrology)
   , clmP_baseflow_scalar :: !Double
   , clmP_fff        :: !Double      -- ^ TOPMODEL decay factor
@@ -351,6 +357,10 @@ defaultCLMState = CLMState
   , clmAnnsumCounter = 0.0
   , clmTempSumT2m    = 0.0
   , clmAnnAvgT2m     = 0.0
+  , clmTVeg24        = 0.0
+  , clmTVeg240       = 0.0
+  , clmPar24         = 0.0
+  , clmPar240        = 0.0
   , clmP_baseflow_scalar = 0.01
   , clmP_fff        = 0.5
   , clmP_fmax       = 0.5
