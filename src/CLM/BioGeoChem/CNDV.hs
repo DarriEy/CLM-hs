@@ -301,9 +301,9 @@ cndvDriver !inp
           ) (cdi_pfts inp)
 
         -- Step 2: Light competition
-        !lcInput = map (\(i, d, _) ->
-          (i, dgvs_fpcgrid d, dgvs_nind d, True)  -- simplified: treat all as potential trees
-          ) estabResults
+        !lcInput = map (\((i, d, _), (_, _, _, _, li)) ->
+          (i, dgvs_fpcgrid d, dgvs_nind d, lci_is_woody li)
+          ) (zip estabResults (cdi_pfts inp))
         !lcResults = lightCompetition lcInput
 
         -- Step 3: Mortality
