@@ -2404,6 +2404,54 @@ main = hspec $ do
                        ++ ", max rel FSH=" ++ show maxFsh
                        ++ ", max rel LH=" ++ show maxLh )
 
+    it "soil column h0 parity: seasonal TG residual map (#soil-parity-seasonal)" $ do
+      -- Characterize where the soil-column-vs-Fortran TG residual is worst over a
+      -- full year. runPipeline free-runs 360 days from the Bow 2003 cold start;
+      -- the per-day TG residual vs the Fortran clm_parity_run h0 is binned into
+      -- four 90-day quarters (Q1 Jan-Mar ... Q4 Oct-Dec). NOTE: this is a single
+      -- free-running trajectory, so a later quarter's residual includes
+      -- accumulated drift, not only that season's physics. The hard guard is that
+      -- the year-long run stays physically bounded; the quarter map is reported.
+      let h0 = "/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/clm_parity_run/Bow_at_Banff_lumped.clm2.h0.2003-01-01-00000.nc"
+          ndays = 360 :: Int
+      hasData <- doesDirectoryExist "test/data/coldstart"
+      hasH0   <- doesFileExist h0
+      if not hasData then pendingWith "test/data not available"
+      else if not hasH0 then pendingWith "Fortran soil h0 not available on this machine"
+      else do
+        dailies <- runPipeline defaultPipelineConfig
+          { pcDataDir = "test/data", pcNdays = ndays, pcVerbose = False }
+        eNc <- ncOpen h0
+        tgRRes <- case eNc of
+          Left e -> return (Left ("ncOpen h0 failed: " ++ e))
+          Right nc -> do { r <- ncReadDouble1D nc "TG"; ncClose nc; return r }
+        case tgRRes of
+          Left e -> pendingWith e
+          Right tgR -> do
+            -- hard: the year-long free run stays physically bounded
+            length dailies `shouldBe` ndays
+            let boundedT x = not (isNaN x) && x > 200.0 && x < 340.0
+            all (boundedT . dd_t_grnd) dailies `shouldBe` True
+            let reldiff a b = abs (a - b) / (1.0 + abs b)
+                diffs = [ reldiff (dd_t_grnd d) (tgR VU.! i)
+                        | (i, d) <- zip [0 ..] dailies, i < VU.length tgR ]
+                quarter q = take 90 (drop (q * 90) diffs)
+                qmax q = let xs = quarter q in if null xs then 0.0 else maximum xs
+                qmean q = let xs = quarter q in if null xs then 0.0 else sum xs / fromIntegral (length xs)
+            -- Measured map (2026-06), TG rel residual max|mean per quarter:
+            --   Q1(JFM) 0.080|0.023  Q2(AMJ) 0.064|0.016
+            --   Q3(JAS) 0.045|0.015  Q4(OND) 0.087|0.023
+            -- Findings, asserted as a regression guard:
+            --  (a) summer (Q3) tracks Fortran tightly — the column is faithful
+            --      when the hard winter SH/snow physics is not dominating;
+            qmean 2 `shouldSatisfy` (< 0.025)
+            qmax 2  `shouldSatisfy` (< 0.06)
+            --  (b) the residual is SEASONAL: the cold quarters (Q1/Q4) are worse
+            --      than summer (so it is not just monotonic free-run drift).
+            max (qmax 0) (qmax 3) `shouldSatisfy` (> qmax 2)
+            --  (c) even the worst quarter stays within a loose bound.
+            maximum [ qmax q | q <- [0 .. 3] ] `shouldSatisfy` (< 0.12)
+
     it "Day 1 T_GRND matches Julia reference within 0.10K" $ do
       hasData <- doesDirectoryExist "test/data/coldstart"
       if not hasData
