@@ -323,10 +323,15 @@ The highest-leverage work is now **closing the validation gap** — converting
    parameter from topographic `std_elev` (`initNMelt`: n_melt_coef/max(10,std_elev);
    Bow std_elev=500 → n_melt≈0.4). This supersedes the prior canopy-turbulence
    theory as the *dominant* winter driver.
-   **FIX (next):** thread `std_elev` into CLMState and use it for `n_melt` in
-   `snowWaterStep`. TRADEOFF to decide first: the Julia reference may share the
-   `n_melt=1.0` simplification, so the Julia-parity tests may shift as Fortran
-   parity improves — treat Fortran as ground truth.
+   **n_melt fix done + measured (commit c43a097):** threaded `std_elev` → `n_melt`
+   (Bow → 0.4). Verified correctly wired but INERT — n_melt only shapes the SL2012
+   *depletion* curve, and Bow winter is accumulation-dominated, so `frac_sno`
+   saturates to ~0.96 via the *accumulation* curve regardless. No Julia-parity
+   breakage (the tradeoff did not materialize) and no Fortran improvement; kept as
+   a correctness fix. **NEXT:** the `frac_sno` accumulation saturation itself —
+   hypothesis: Fortran Bow uses NiuYang2007 (`tanh(snowdp/(2.5·z0))` with the tall-
+   canopy roughness → ~0.11) while the port uses SwensonLawrence2012 (accumulation-
+   saturating). A snow-cover *method* mismatch, not a parameter.
 3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
    urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
    its Fortran reference (`clm_glacier_run`, etc.).
