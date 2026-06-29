@@ -233,6 +233,19 @@ or needs writing (glacier).
     multi-column gridcell data — GPU/AD-ready. Remaining non-vectorized steps
     (energyBalance c2g reduction; lake/urban/glacier dispatch; CN/dust/VOC/diagnostic)
     are by-design outside the per-column fast path.
+
+    **VECTORIZED MULTI-LANDUNIT DRIVER + c2g REDUCTION — DONE (2026-06-29):**
+    `gridDiagReduceV` aggregates a `CLMStateV` column->gridcell straight off the
+    SoA column arrays (`vt_grnd`/`vh2osno`/`veflx_sh_tot`/`veflx_lh_tot`/`vfsa`)
+    through the real area-weighted `SA.c2g1d` — the energyBalance-style c2g done as
+    ONE vectorized reduction stage (no per-column scatter). `runGridcellColumnsV`
+    is the end-to-end driver: a whole multi-landunit gridcell of soil columns
+    advances through `runVectorizedPipeline` (SoA batch) each timestep and reduces
+    to a `GridDiag` series via `gridDiagReduceV`. Proven (test) bit-identical to
+    running the same 20-step pipeline scalar per column and aggregating with the
+    same `c2g1d`, on the REAL np>1 cold-start state across 3 distinct soil columns.
+    Lake/glacier/urban gating stays on the scalar `runGridcellColumns` dispatch
+    (those kinds aren't in the 20-step per-column pipeline). Suite 246/0.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake
