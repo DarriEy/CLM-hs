@@ -23,16 +23,17 @@ import CLM.Driver.PhysicsAdapters
   , drvInitStep, soilEvapResistanceStep, fracH2oSfcStep
   , preFluxCalcsStep, snowCompactionStep, snowPercolationStep
   , waterTableStep, surfaceHumidityStep, soilHydrologyStep, soilFluxesStep
-  , baregroundFluxesStep )
+  , baregroundFluxesStep, soilTemperatureFullStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
+import CLM.Types.GridcellData (GridcellData(..))
 import CLM.Driver.Vectorized
   ( CLMStateV(..), gather, scatter, patchOffsets
   , waterBalanceStepV, hydrologyDrainageStepV
   , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV
   , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV
   , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV, soilFluxesStepV
-  , baregroundFluxesStepV )
+  , baregroundFluxesStepV, soilTemperatureFullStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2727,6 +2728,60 @@ main = hspec $ do
       map tr  vec `shouldBe` map tr  scalar
       map ram vec `shouldBe` map ram scalar
       map ust vec `shouldBe` map ust scalar
+
+    it "soilTemperatureFullStepV matches per-column soilTemperatureFullStep bit-for-bit" $ do
+      let mkGrnd  val = VU.replicate nlevgrnd val
+          ziV = VU.generate (gridN + 1) (\i -> fromIntegral i * 0.1)
+          zV  = VU.generate gridN       (\i -> fromIntegral i * 0.1 + 0.05)
+          mkCol tgrnd tsfc tsoil liq ice sabgv shGrnd evapGrnd cgrndsv cgrndlv
+                cgrndv dlradv nbed fve =
+            defaultCLMState
+              { clmSnl = 0
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col = tgrnd, t_h2osfc_col = tsfc, t_soisno_col = mkGrid tsoil }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid liq, h2osoi_ice_col = mkGrid ice
+                  , h2osno_col = 0.0, h2osfc_col = 0.0 }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = mkGrid 0.1, colZ = zV, colZi = ziV
+                  , watsat = mkGrnd 0.4, bsw = mkGrnd 6.0, sucsat = mkGrnd 200.0 }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_watsat_col = VU.empty, sstate_bsw_col = VU.empty
+                  , sstate_sucsat_col = VU.empty
+                  , sstate_tkmg_col = mkGrnd 2.5, sstate_tkdry_col = mkGrnd 0.3
+                  , sstate_csol_col = mkGrnd 2.0e6, sstate_tksatu_col = mkGrnd 2.0
+                  , sstate_thk_override_col = VU.empty, sstate_cv_override_col = VU.empty }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_eff_col = VU.singleton 0.0
+                  , wdiag_frac_h2osfc_col  = VU.singleton 0.0
+                  , wdiag_snow_depth_col   = VU.singleton 0.0 }
+              , clmGridcell = (clmGridcell defaultCLMState) { grc_nbedrock = VU.singleton nbed }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell        = VU.singleton 1.0
+                  , cstate_frac_veg_nosno_patch = VU.singleton fve }
+              , clmEnergyFlux = (clmEnergyFlux defaultCLMState)
+                  { sabg_patch_vec = VU.singleton sabgv, eflx_sh_grnd_patch_vec = VU.singleton shGrnd
+                  , cgrnds_patch_vec = VU.singleton cgrndsv, cgrndl_patch_vec = VU.singleton cgrndlv
+                  , cgrnd_patch_vec = VU.singleton cgrndv, dlrad_patch_vec = VU.singleton dlradv }
+              , clmWaterFlux = (clmWaterFlux defaultCLMState)
+                  { qflx_evap_grnd_patch_vec = VU.singleton evapGrnd } }
+          tsts = [ mkCol 280.0 280.0 281.0 5.0 1.0 120.0 20.0 6.0e-6 5.0 1.0e-6 9.0 250.0 20 1
+                 , mkCol 285.0 285.0 283.0 8.0 0.5 200.0 35.0 2.0e-5 8.0 2.0e-6 14.0 300.0 18 1
+                 , mkCol 274.0 274.0 275.0 3.0 2.0  60.0  8.0 1.0e-6 3.0 5.0e-7 5.0 200.0 25 0 ]
+          scalar = map (soilTemperatureFullStep cfg ctx) tsts
+          vec    = scatter tsts (soilTemperatureFullStepV cfg ctx (gather tsts))
+          tsoi s = VU.toList (t_soisno_col (clmTemp s))
+          tg   s = t_grnd_col (clmTemp s)
+          th   s = t_h2osfc_col (clmTemp s)
+          liq  s = VU.toList (h2osoi_liq_col (clmWaterState s))
+          gnet s = VU.toList (eflx_gnet_patch_vec (clmEnergyFlux s))
+          snm  s = clmQflxSnomelt s
+      map tsoi vec `shouldBe` map tsoi scalar
+      map tg   vec `shouldBe` map tg   scalar
+      map th   vec `shouldBe` map th   scalar
+      map liq  vec `shouldBe` map liq  scalar
+      map gnet vec `shouldBe` map gnet scalar
+      map snm  vec `shouldBe` map snm  scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
