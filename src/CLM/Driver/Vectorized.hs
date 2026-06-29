@@ -54,6 +54,7 @@ module CLM.Driver.Vectorized
   , snowLayerCombineStepV
   , snowLayerDivideStepV
   , snowAgingStepV
+  , canopyFluxesStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -88,7 +89,8 @@ import CLM.BioGeoPhys.SnowHydrology
 -- import cycle: PhysicsAdapters does not import this module.
 import CLM.Driver.PhysicsAdapters
   ( snowCompactionStep, soilHydrologyStep, soilFluxesStep, baregroundFluxesStep
-  , soilTemperatureFullStep, snowLayerCombineStep, snowLayerDivideStep, snowAgingStep )
+  , soilTemperatureFullStep, snowLayerCombineStep, snowLayerDivideStep, snowAgingStep
+  , canopyFluxesStep )
 import CLM.BioGeoPhys.SoilHydrology
   ( waterTable, WaterTableResult(..), defaultSoilHydroParams )
 import CLM.BioGeoPhys.SnowSNICAR (SnicarOptics)
@@ -252,6 +254,41 @@ data CLMStateV = CLMStateV
   , vsucsat_g      :: !(VU.Vector Double)  -- ^ sucsat resolved, stride nlevgrnd (read)
     -- snow aging --------------------------------------------------------------
   , vsnw_rds_top   :: !(VU.Vector Double)  -- ^ wdiag_snw_rds_top_col bulk top grain radius [um] (read+write)
+    -- canopy fluxes (photosynthesis / stomatal iteration over PFT patches) ----
+  , vp_rootfr        :: !(VU.Vector Double) -- ^ sstate_rootfr_patch flat, sub-stride nlevgrnd (read)
+  , vp_rootfr_off    :: !(VU.Vector Int)    -- ^ CSR offset for vp_rootfr (length nCols+1)
+  , vsstate_rootfr_col :: !(VU.Vector Double) -- ^ sstate_rootfr_col stride nlevgrnd (read; empty-for-all ⇒ empty)
+  , vp_smpso         :: !(VU.Vector Double) -- ^ sstate_smpso_patch  CSR (read)
+  , vp_smpsc         :: !(VU.Vector Double) -- ^ sstate_smpsc_patch  CSR (read)
+  , vp_htop          :: !(VU.Vector Double) -- ^ cstate_htop_patch   CSR (read)
+  , vp_z0m           :: !(VU.Vector Double) -- ^ cstate_z0m_patch    CSR (read)
+  , vp_displa        :: !(VU.Vector Double) -- ^ cstate_displa_patch CSR (read)
+  , vp_laisun        :: !(VU.Vector Double) -- ^ cstate_laisun_patch CSR (read)
+  , vp_laisha        :: !(VU.Vector Double) -- ^ cstate_laisha_patch CSR (read)
+  , vp_parsun        :: !(VU.Vector Double) -- ^ cstate_parsun_patch CSR (read)
+  , vp_parsha        :: !(VU.Vector Double) -- ^ cstate_parsha_patch CSR (read)
+  , vp_dleaf         :: !(VU.Vector Double) -- ^ cstate_dleaf_patch  CSR (read)
+  , vp_fwet          :: !(VU.Vector Double) -- ^ wdiag_fwet_patch    CSR (read)
+  , vp_fdry          :: !(VU.Vector Double) -- ^ wdiag_fdry_patch    CSR (read)
+  , vp_sabv          :: !(VU.Vector Double) -- ^ sabv_patch_vec      CSR (read)
+  , vp_ivt           :: !(VU.Vector Int)    -- ^ clmPatchIvt         CSR (read)
+  , vleaf_mr_vcm     :: !(VU.Vector Double) -- ^ cstate_leaf_mr_vcm  col scalar (read)
+  , vdayl            :: !(VU.Vector Double) -- ^ grc_dayl[0]         col scalar (read)
+  , vmax_dayl        :: !(VU.Vector Double) -- ^ grc_max_dayl[0]     col scalar (read)
+  , vcnactive        :: !(VU.Vector Bool)   -- ^ clmCNActive         col flag (read)
+  , vt_veg           :: !(VU.Vector Double) -- ^ t_veg_patch scalar  (read+write)
+  , vp_t_veg         :: !(VU.Vector Double) -- ^ t_veg_patch_vec     CSR (read+write)
+  , vliqcan          :: !(VU.Vector Double) -- ^ liqcan_patch scalar (read+write)
+  , vsnocan          :: !(VU.Vector Double) -- ^ snocan_patch scalar (read+write)
+  , vp_liqcan        :: !(VU.Vector Double) -- ^ liqcan_patch_vec    CSR (read+write)
+  , vp_snocan        :: !(VU.Vector Double) -- ^ snocan_patch_vec    CSR (read+write)
+  , vh2ocan          :: !(VU.Vector Double) -- ^ h2ocan_patch scalar (write)
+  , vp_h2ocan        :: !(VU.Vector Double) -- ^ h2ocan_patch_vec / wdiag_h2ocan_patch CSR (write)
+  , vp_psnsun        :: !(VU.Vector Double) -- ^ cstate_psnsun_patch CSR (write)
+  , vp_psnsha        :: !(VU.Vector Double) -- ^ cstate_psnsha_patch CSR (write)
+  , vp_lmrsun        :: !(VU.Vector Double) -- ^ cstate_lmrsun_patch CSR (write)
+  , vp_lmrsha        :: !(VU.Vector Double) -- ^ cstate_lmrsha_patch CSR (write)
+  , vgpp             :: !(VU.Vector Double) -- ^ clmGPP              col scalar (write)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -357,6 +394,40 @@ gather sts = CLMStateV
   , vbsw_g        = VU.concat [ padTo nlevgrnd (rslv (sstate_bsw_col    (clmSoilState s)) (bsw    (clmColumn s))) | s <- sts ]
   , vsucsat_g     = VU.concat [ padTo nlevgrnd (rslv (sstate_sucsat_col (clmSoilState s)) (sucsat (clmColumn s))) | s <- sts ]
   , vsnw_rds_top  = VU.fromList [ scal0 (wdiag_snw_rds_top_col (clmWaterDiagBulk s)) | s <- sts ]
+  , vp_rootfr        = VU.concat [ sstate_rootfr_patch (clmSoilState s) | s <- sts ]
+  , vp_rootfr_off    = patchOffsets [ VU.length (sstate_rootfr_patch (clmSoilState s)) | s <- sts ]
+  , vsstate_rootfr_col = gSg sstate_rootfr_col
+  , vp_smpso         = gPd (sstate_smpso_patch . clmSoilState)
+  , vp_smpsc         = gPd (sstate_smpsc_patch . clmSoilState)
+  , vp_htop          = gPd (cstate_htop_patch   . clmCanopyState)
+  , vp_z0m           = gPd (cstate_z0m_patch    . clmCanopyState)
+  , vp_displa        = gPd (cstate_displa_patch . clmCanopyState)
+  , vp_laisun        = gPd (cstate_laisun_patch . clmCanopyState)
+  , vp_laisha        = gPd (cstate_laisha_patch . clmCanopyState)
+  , vp_parsun        = gPd (cstate_parsun_patch . clmCanopyState)
+  , vp_parsha        = gPd (cstate_parsha_patch . clmCanopyState)
+  , vp_dleaf         = gPd (cstate_dleaf_patch  . clmCanopyState)
+  , vp_fwet          = gPd (wdiag_fwet_patch . clmWaterDiagBulk)
+  , vp_fdry          = gPd (wdiag_fdry_patch . clmWaterDiagBulk)
+  , vp_sabv          = gPd (sabv_patch_vec   . clmEnergyFlux)
+  , vp_ivt           = gPi clmPatchIvt
+  , vleaf_mr_vcm     = VU.fromList [ cstate_leaf_mr_vcm (clmCanopyState s) | s <- sts ]
+  , vdayl            = VU.fromList [ scal0 (grc_dayl     (clmGridcell s)) | s <- sts ]
+  , vmax_dayl        = VU.fromList [ scal0 (grc_max_dayl (clmGridcell s)) | s <- sts ]
+  , vcnactive        = VU.fromList [ clmCNActive s | s <- sts ]
+  , vt_veg           = VU.fromList [ t_veg_patch  (clmTemp s)       | s <- sts ]
+  , vp_t_veg         = gPd (t_veg_patch_vec . clmTemp)
+  , vliqcan          = VU.fromList [ liqcan_patch (clmWaterState s) | s <- sts ]
+  , vsnocan          = VU.fromList [ snocan_patch (clmWaterState s) | s <- sts ]
+  , vp_liqcan        = gPd (liqcan_patch_vec . clmWaterState)
+  , vp_snocan        = gPd (snocan_patch_vec . clmWaterState)
+  , vh2ocan          = VU.fromList [ h2ocan_patch (clmWaterState s) | s <- sts ]
+  , vp_h2ocan        = gPd (h2ocan_patch_vec . clmWaterState)
+  , vp_psnsun        = gPd (cstate_psnsun_patch . clmCanopyState)
+  , vp_psnsha        = gPd (cstate_psnsha_patch . clmCanopyState)
+  , vp_lmrsun        = gPd (cstate_lmrsun_patch . clmCanopyState)
+  , vp_lmrsha        = gPd (cstate_lmrsha_patch . clmCanopyState)
+  , vgpp             = VU.fromList [ clmGPP s | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -390,6 +461,7 @@ scatter bases v =
   let nlev = vNlev v
   in [ s { clmSnl = vsnl v VU.! i   -- soilHydrology meltout can flip snl -> 0
          , clmQflxSnomelt = vqflx_snomelt v VU.! i
+         , clmGPP = vgpp v VU.! i
          , clmWaterFlux    = (clmWaterFlux s)
              { qflx_evap_tot_patch = vqflx_evap_tot v VU.! i
              , qflx_surf_col       = vqflx_surf     v VU.! i
@@ -408,7 +480,9 @@ scatter bases v =
              , t_ref2m_patch     = vt_ref2m v VU.! i
              , t_ref2m_patch_vec = patchSliceD (vPatchOff v) (vp_t_ref2m v) i
              , t_grnd_col        = vt_grnd   v VU.! i
-             , t_h2osfc_col      = vt_h2osfc v VU.! i }
+             , t_h2osfc_col      = vt_h2osfc v VU.! i
+             , t_veg_patch       = vt_veg v VU.! i
+             , t_veg_patch_vec   = patchSliceD (vPatchOff v) (vp_t_veg v) i }
          , clmEnergyFlux = (clmEnergyFlux s)
              { eflx_soil_grnd_col       = veflx_soil_grnd v VU.! i
              , eflx_sh_tot_patch        = veflx_sh_tot    v VU.! i
@@ -436,7 +510,13 @@ scatter bases v =
              { h2osoi_liq_col = VU.slice (i * nlev) nlev (vh2osoi_liq v)
              , h2osoi_ice_col = VU.slice (i * nlev) nlev (vh2osoi_ice v)
              , h2osno_col     = vh2osno v VU.! i
-             , h2osfc_col     = vh2osfc v VU.! i }
+             , h2osfc_col     = vh2osfc v VU.! i
+             , liqcan_patch     = vliqcan v VU.! i
+             , snocan_patch     = vsnocan v VU.! i
+             , h2ocan_patch     = vh2ocan v VU.! i
+             , liqcan_patch_vec = patchSliceD (vPatchOff v) (vp_liqcan v) i
+             , snocan_patch_vec = patchSliceD (vPatchOff v) (vp_snocan v) i
+             , h2ocan_patch_vec = patchSliceD (vPatchOff v) (vp_h2ocan v) i }
          , clmColumn = (clmColumn s)
              { colDz = VU.slice (i * nlev)       nlev       (vcolDz v)
              , colZ  = VU.slice (i * nlev)       nlev       (vcolZ  v)
@@ -452,11 +532,18 @@ scatter bases v =
              , wdiag_dqgdT_col       = VU.singleton (vdqgdT     v VU.! i)
              , wdiag_frac_sno_col     = VU.singleton (vfrac_sno     v VU.! i)
              , wdiag_frac_sno_eff_col = VU.singleton (vfrac_sno_eff v VU.! i)
-             , wdiag_snw_rds_top_col  = VU.singleton (vsnw_rds_top  v VU.! i) }
+             , wdiag_snw_rds_top_col  = VU.singleton (vsnw_rds_top  v VU.! i)
+             , wdiag_fwet_patch       = patchSliceD (vPatchOff v) (vp_fwet v) i
+             , wdiag_fdry_patch       = patchSliceD (vPatchOff v) (vp_fdry v) i
+             , wdiag_h2ocan_patch     = patchSliceD (vPatchOff v) (vp_h2ocan v) i }
          , clmSoilState = (clmSoilState s)
              { sstate_soilbeta_col = VU.singleton (vsoilbeta v VU.! i) }
          , clmCanopyState = (clmCanopyState s)
-             { cstate_patch_wtgcell = patchSliceD (vPatchOff v) (vp_wtgcell v) i }
+             { cstate_patch_wtgcell = patchSliceD (vPatchOff v) (vp_wtgcell v) i
+             , cstate_psnsun_patch  = patchSliceD (vPatchOff v) (vp_psnsun v) i
+             , cstate_psnsha_patch  = patchSliceD (vPatchOff v) (vp_psnsha v) i
+             , cstate_lmrsun_patch  = patchSliceD (vPatchOff v) (vp_lmrsun v) i
+             , cstate_lmrsha_patch  = patchSliceD (vPatchOff v) (vp_lmrsha v) i }
          , clmSoilHydro = (clmSoilHydro s)
              { sh_zwt_col         = VU.singleton (vsh_zwt         v VU.! i)
              , sh_zwts_col        = VU.singleton (vsh_zwts        v VU.! i)
@@ -1197,3 +1284,158 @@ snowAgingStepV snicarOpt cfg ctx v =
       scal0' u = if VU.null u then 0.0 else u VU.! 0
   in v { vsnw_rds_top = VU.fromList
            [ scal0' (wdiag_snw_rds_top_col (clmWaterDiagBulk r)) | r <- results ] }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.canopyFluxesStep'. The per-patch
+-- photosynthesis + stomatal-conductance + canopy energy balance is an iterative
+-- per-column/per-patch solve, so this reuses the scalar adapter per column:
+-- rebuild a single-col CLMState carrying every read field — soil hydraulics on
+-- the full grid (nlevgrnd), the ragged per-patch canopy/physiology inputs via
+-- CSR slices (rootfr at sub-stride nlevgrnd via its OWN offset vp_rootfr_off),
+-- gridcell daylength, CN flag, PFT ivt — run 'canopyFluxesStep', re-flatten the
+-- written fluxes, leaf temps, canopy water, per-patch psn/lmr, and GPP.
+-- Bit-identical by construction; @snl@/layer structure unchanged.
+canopyFluxesStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+canopyFluxesStepV cfg ctx v =
+  let nlev = vNlev v
+      off  = vPatchOff v
+      runCol c =
+        let base = c * nlev
+            slc  = VU.slice base nlev
+            pD f = patchSliceD off (f v) c
+            pI f = patchSliceI off (f v) c
+            sliceG flat = if VU.null flat then VU.empty else VU.slice (c * nlevgrnd) nlevgrnd flat
+            st0 = defaultCLMState
+              { clmSnl      = vsnl v VU.! c
+              , clmCNActive = vcnactive v VU.! c
+              , clmPatchIvt = pI vp_ivt
+              , clmGPP      = vgpp v VU.! c
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col        = vt_grnd   v VU.! c
+                  , t_h2osfc_col      = vt_h2osfc v VU.! c
+                  , t_soisno_col      = slc (vt_soisno v)
+                  , t_veg_patch       = vt_veg   v VU.! c
+                  , t_veg_patch_vec   = pD vp_t_veg
+                  , t_ref2m_patch     = vt_ref2m v VU.! c
+                  , t_ref2m_patch_vec = pD vp_t_ref2m }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz  = slc (vcolDz v)
+                  , watsat = VU.slice (c * nlevgrnd) nlevgrnd (vwatsat_g v)
+                  , bsw    = VU.slice (c * nlevgrnd) nlevgrnd (vbsw_g    v)
+                  , sucsat = VU.slice (c * nlevgrnd) nlevgrnd (vsucsat_g v) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col   = slc (vh2osoi_liq v)
+                  , h2osoi_ice_col   = slc (vh2osoi_ice v)
+                  , liqcan_patch     = vliqcan v VU.! c
+                  , snocan_patch     = vsnocan v VU.! c
+                  , liqcan_patch_vec = pD vp_liqcan
+                  , snocan_patch_vec = pD vp_snocan }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_watsat_col   = VU.empty
+                  , sstate_bsw_col      = VU.empty
+                  , sstate_sucsat_col   = VU.empty
+                  , sstate_soilbeta_col = VU.singleton (vsoilbeta v VU.! c)
+                  , sstate_rootfr_patch = patchSliceD (vp_rootfr_off v) (vp_rootfr v) c
+                  , sstate_rootfr_col   = sliceG (vsstate_rootfr_col v)
+                  , sstate_smpso_patch  = pD vp_smpso
+                  , sstate_smpsc_patch  = pD vp_smpsc }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell            = pD vp_wtgcell
+                  , cstate_elai_patch               = pD vp_elai
+                  , cstate_esai_patch               = pD vp_esai
+                  , cstate_frac_veg_nosno_patch     = pI vp_frac_veg_nosno
+                  , cstate_frac_veg_nosno_alb_patch = pI vp_frac_veg_nosno_alb
+                  , cstate_htop_patch               = pD vp_htop
+                  , cstate_z0m_patch                = pD vp_z0m
+                  , cstate_displa_patch             = pD vp_displa
+                  , cstate_laisun_patch             = pD vp_laisun
+                  , cstate_laisha_patch             = pD vp_laisha
+                  , cstate_parsun_patch             = pD vp_parsun
+                  , cstate_parsha_patch             = pD vp_parsha
+                  , cstate_dleaf_patch              = pD vp_dleaf
+                  , cstate_leaf_mr_vcm              = vleaf_mr_vcm v VU.! c }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_qg_col           = VU.singleton (vqg        v VU.! c)
+                  , wdiag_qg_snow_col      = VU.singleton (vqg_snow   v VU.! c)
+                  , wdiag_qg_soil_col      = VU.singleton (vqg_soil   v VU.! c)
+                  , wdiag_qg_h2osfc_col    = VU.singleton (vqg_h2osfc v VU.! c)
+                  , wdiag_dqgdT_col        = VU.singleton (vdqgdT     v VU.! c)
+                  , wdiag_frac_sno_eff_col = VU.singleton (vfrac_sno_eff v VU.! c)
+                  , wdiag_frac_sno_col     = VU.singleton (vfrac_sno     v VU.! c)
+                  , wdiag_frac_h2osfc_col  = VU.singleton (vfrac_h2osfc  v VU.! c)
+                  , wdiag_snow_depth_col   = VU.singleton (vsnow_depth   v VU.! c)
+                  , wdiag_fwet_patch       = pD vp_fwet
+                  , wdiag_fdry_patch       = pD vp_fdry }
+              , clmEnergyFlux = (clmEnergyFlux defaultCLMState)
+                  { eflx_sh_tot_patch      = veflx_sh_tot  v VU.! c
+                  , eflx_sh_grnd_patch     = veflx_sh_grnd v VU.! c
+                  , eflx_lh_tot_patch      = veflx_lh_tot  v VU.! c
+                  , cgrnds_patch           = vcgrnds v VU.! c
+                  , cgrndl_patch           = vcgrndl v VU.! c
+                  , cgrnd_patch            = vcgrnd  v VU.! c
+                  , dlrad_patch            = vdlrad  v VU.! c
+                  , ulrad_patch            = vulrad  v VU.! c
+                  , sabv_patch_vec         = pD vp_sabv
+                  , eflx_sh_tot_patch_vec  = pD vp_eflx_sh_tot
+                  , eflx_sh_grnd_patch_vec = pD vp_eflx_sh_grnd
+                  , eflx_lh_tot_patch_vec  = pD vp_eflx_lh_tot
+                  , cgrnds_patch_vec       = pD vp_cgrnds
+                  , cgrndl_patch_vec       = pD vp_cgrndl
+                  , cgrnd_patch_vec        = pD vp_cgrnd
+                  , dlrad_patch_vec        = pD vp_dlrad
+                  , ulrad_patch_vec        = pD vp_ulrad }
+              , clmWaterFlux = (clmWaterFlux defaultCLMState)
+                  { qflx_evap_tot_patch      = vqflx_evap_tot  v VU.! c
+                  , qflx_evap_grnd_col       = vqflx_evap_grnd v VU.! c
+                  , qflx_tran_veg_patch      = vqflx_tran_veg  v VU.! c
+                  , qflx_evap_tot_patch_vec  = pD vp_qflx_evap_tot
+                  , qflx_evap_grnd_patch_vec = pD vp_qflx_evap_grnd
+                  , qflx_tran_veg_patch_vec  = pD vp_qflx_tran_veg }
+              , clmFrictionVel = (clmFrictionVel defaultCLMState)
+                  { fvel_ram1_patch  = pD vp_fvel_ram1
+                  , fvel_ustar_patch = pD vp_fvel_ustar }
+              , clmGridcell = (clmGridcell defaultCLMState)
+                  { grc_dayl     = VU.singleton (vdayl     v VU.! c)
+                  , grc_max_dayl = VU.singleton (vmax_dayl v VU.! c) }
+              }
+        in canopyFluxesStep cfg ctx st0
+      results = map runCol [0 .. vNumCols v - 1]
+  in v { veflx_sh_tot  = VU.fromList [ eflx_sh_tot_patch  (clmEnergyFlux r) | r <- results ]
+       , veflx_sh_grnd = VU.fromList [ eflx_sh_grnd_patch (clmEnergyFlux r) | r <- results ]
+       , veflx_lh_tot  = VU.fromList [ eflx_lh_tot_patch  (clmEnergyFlux r) | r <- results ]
+       , vcgrnds       = VU.fromList [ cgrnds_patch (clmEnergyFlux r) | r <- results ]
+       , vcgrndl       = VU.fromList [ cgrndl_patch (clmEnergyFlux r) | r <- results ]
+       , vcgrnd        = VU.fromList [ cgrnd_patch  (clmEnergyFlux r) | r <- results ]
+       , vdlrad        = VU.fromList [ dlrad_patch  (clmEnergyFlux r) | r <- results ]
+       , vulrad        = VU.fromList [ ulrad_patch  (clmEnergyFlux r) | r <- results ]
+       , vp_eflx_sh_tot  = VU.concat [ eflx_sh_tot_patch_vec  (clmEnergyFlux r) | r <- results ]
+       , vp_eflx_sh_grnd = VU.concat [ eflx_sh_grnd_patch_vec (clmEnergyFlux r) | r <- results ]
+       , vp_eflx_lh_tot  = VU.concat [ eflx_lh_tot_patch_vec  (clmEnergyFlux r) | r <- results ]
+       , vp_cgrnds       = VU.concat [ cgrnds_patch_vec (clmEnergyFlux r) | r <- results ]
+       , vp_cgrndl       = VU.concat [ cgrndl_patch_vec (clmEnergyFlux r) | r <- results ]
+       , vp_cgrnd        = VU.concat [ cgrnd_patch_vec  (clmEnergyFlux r) | r <- results ]
+       , vp_dlrad        = VU.concat [ dlrad_patch_vec  (clmEnergyFlux r) | r <- results ]
+       , vp_ulrad        = VU.concat [ ulrad_patch_vec  (clmEnergyFlux r) | r <- results ]
+       , vqflx_evap_tot  = VU.fromList [ qflx_evap_tot_patch (clmWaterFlux r) | r <- results ]
+       , vqflx_evap_grnd = VU.fromList [ qflx_evap_grnd_col  (clmWaterFlux r) | r <- results ]
+       , vqflx_tran_veg  = VU.fromList [ qflx_tran_veg_patch (clmWaterFlux r) | r <- results ]
+       , vp_qflx_evap_tot  = VU.concat [ qflx_evap_tot_patch_vec  (clmWaterFlux r) | r <- results ]
+       , vp_qflx_evap_grnd = VU.concat [ qflx_evap_grnd_patch_vec (clmWaterFlux r) | r <- results ]
+       , vp_qflx_tran_veg  = VU.concat [ qflx_tran_veg_patch_vec  (clmWaterFlux r) | r <- results ]
+       , vt_ref2m   = VU.fromList [ t_ref2m_patch (clmTemp r) | r <- results ]
+       , vt_veg     = VU.fromList [ t_veg_patch   (clmTemp r) | r <- results ]
+       , vp_t_ref2m = VU.concat   [ t_ref2m_patch_vec (clmTemp r) | r <- results ]
+       , vp_t_veg   = VU.concat   [ t_veg_patch_vec   (clmTemp r) | r <- results ]
+       , vliqcan   = VU.fromList [ liqcan_patch (clmWaterState r) | r <- results ]
+       , vsnocan   = VU.fromList [ snocan_patch (clmWaterState r) | r <- results ]
+       , vh2ocan   = VU.fromList [ h2ocan_patch (clmWaterState r) | r <- results ]
+       , vp_liqcan = VU.concat   [ liqcan_patch_vec (clmWaterState r) | r <- results ]
+       , vp_snocan = VU.concat   [ snocan_patch_vec (clmWaterState r) | r <- results ]
+       , vp_h2ocan = VU.concat   [ h2ocan_patch_vec (clmWaterState r) | r <- results ]
+       , vp_fvel_ram1  = VU.concat [ fvel_ram1_patch  (clmFrictionVel r) | r <- results ]
+       , vp_fvel_ustar = VU.concat [ fvel_ustar_patch (clmFrictionVel r) | r <- results ]
+       , vp_psnsun = VU.concat [ cstate_psnsun_patch (clmCanopyState r) | r <- results ]
+       , vp_psnsha = VU.concat [ cstate_psnsha_patch (clmCanopyState r) | r <- results ]
+       , vp_lmrsun = VU.concat [ cstate_lmrsun_patch (clmCanopyState r) | r <- results ]
+       , vp_lmrsha = VU.concat [ cstate_lmrsha_patch (clmCanopyState r) | r <- results ]
+       , vgpp = VU.fromList [ clmGPP r | r <- results ]
+       }
