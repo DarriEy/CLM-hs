@@ -520,7 +520,7 @@ lakeDiffusivity inp = LakeDiffOutput
               else let fangkm = 1.039e-8 * max n2 n2minLT ** (-0.43)
                        kme0 = km + fangkm
                    in if lakedepth_val >= depthcritLT then kme0 * mixfactLT else kme0
-      else 0.0  -- placeholder for bottom, set below
+      else 0.0  -- bottom layer (nlevlak-1) assigned in the kme_final block below
 
     -- Bottom layer copies from layer above
     kme_final = kme_interior VU.// [(nlevlak - 1, kme_interior VU.! (nlevlak - 2))]
