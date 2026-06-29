@@ -68,7 +68,7 @@ calcDynamicStemLeaf inp
   | otherwise = dsl_stem_leaf_flag inp
 
 -- =========================================================================
--- Nitrogen allocation (simplified, single patch)
+-- Nitrogen allocation (single-patch scope)
 -- =========================================================================
 
 data NAllocationInput = NAllocationInput
