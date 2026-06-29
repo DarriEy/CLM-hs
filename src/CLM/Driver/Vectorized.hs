@@ -32,6 +32,10 @@ module CLM.Driver.Vectorized
     CLMStateV(..)
   , gather
   , scatter
+    -- * Patch-indexed (CSR) layout helpers for ragged per-patch data
+  , patchOffsets
+  , patchSliceD
+  , patchSliceI
     -- * Vectorized physics steps (SoA counterparts of the scalar adapters)
   , waterBalanceStepV
   , hydrologyDrainageStepV
@@ -60,6 +64,7 @@ import CLM.Types.EnergyFluxData         (EnergyFluxData(..))
 import CLM.Types.WaterDiagnosticBulkData (WaterDiagnosticBulkData(..))
 import CLM.Types.SoilStateData          (SoilStateData(..))
 import CLM.Types.SoilHydrologyData      (SoilHydrologyData(..))
+import CLM.Types.CanopyStateData        (CanopyStateData(..))
 import CLM.BioGeoPhys.BalanceCheck
   ( waterBalanceCol, WaterBalanceColInput(..), WaterBalanceColOutput(..) )
 import CLM.BioGeoPhys.HydrologyDrainage
@@ -88,6 +93,35 @@ gridNlev = nlevsno + nlevgrnd
 -- semantics, so the flattened SoA reads are bit-identical to the scalar reads.
 padTo :: Int -> VU.Vector Double -> VU.Vector Double
 padTo n v = VU.generate n (\j -> if j < VU.length v then v VU.! j else 0.0)
+
+-- ============================================================================
+-- Patch-indexed (CSR) layout for ragged per-patch data
+-- ============================================================================
+-- Per-patch fields have a per-column patch count (the number of PFT patches on
+-- that column), which varies between columns. They are stored flat, with a
+-- compressed-sparse-row offset vector @vPatchOff@ of length @nCols+1@: column
+-- @c@ owns flat indices @[vPatchOff!c .. vPatchOff!(c+1) - 1]@, so
+-- @patchCount c = vPatchOff!(c+1) - vPatchOff!c@ (0 for a patch-less column, in
+-- which case its slice is empty — reproducing the scalar adapters' @VU.null@
+-- branch exactly). Within a column, every populated per-patch field must have
+-- length @patchCount@ (the CLM invariant); a field that is empty for ALL columns
+-- is stored as a single empty flat vector and reconstructed empty per column.
+
+-- | CSR offset vector (length @nCols+1@, prefix sums) from per-column patch counts.
+patchOffsets :: [Int] -> VU.Vector Int
+patchOffsets counts = VU.fromList (scanl (+) 0 counts)
+
+-- | Slice column @c@'s patch data out of a flat per-patch 'Double' vector.
+patchSliceD :: VU.Vector Int -> VU.Vector Double -> Int -> VU.Vector Double
+patchSliceD off arr c
+  | VU.null arr = VU.empty                       -- field absent for all columns
+  | otherwise   = VU.slice (off VU.! c) (off VU.! (c + 1) - off VU.! c) arr
+
+-- | Slice column @c@'s patch data out of a flat per-patch 'Int' vector.
+patchSliceI :: VU.Vector Int -> VU.Vector Int -> Int -> VU.Vector Int
+patchSliceI off arr c
+  | VU.null arr = VU.empty
+  | otherwise   = VU.slice (off VU.! c) (off VU.! (c + 1) - off VU.! c) arr
 
 -- | Structure-of-Arrays model state: one entry per column in every scalar
 -- vector; per-(column,layer) fields are flattened @c*gridNlev + j@ (soil-only
@@ -150,6 +184,9 @@ data CLMStateV = CLMStateV
   , vp_fmax            :: !(VU.Vector Double) -- ^ calib: max fractional saturated area (read)
   , vp_n_baseflow      :: !(VU.Vector Double) -- ^ calib: baseflow exponent (read)
   , vp_n_melt_coef     :: !(VU.Vector Double) -- ^ calib: snowmelt coefficient (read)
+    -- patch-indexed (CSR) layout ----------------------------------------------
+  , vPatchOff          :: !(VU.Vector Int)    -- ^ CSR patch offsets (length nCols+1)
+  , vp_wtgcell         :: !(VU.Vector Double) -- ^ per-patch weight rel. gridcell (cstate_patch_wtgcell), flat CSR
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -205,6 +242,8 @@ gather sts = CLMStateV
   , vp_fmax            = VU.fromList [ clmP_fmax            s | s <- sts ]
   , vp_n_baseflow      = VU.fromList [ clmP_n_baseflow      s | s <- sts ]
   , vp_n_melt_coef     = VU.fromList [ clmP_n_melt_coef     s | s <- sts ]
+  , vPatchOff          = patchOffsets [ VU.length (cstate_patch_wtgcell (clmCanopyState s)) | s <- sts ]
+  , vp_wtgcell         = VU.concat [ cstate_patch_wtgcell (clmCanopyState s) | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -261,6 +300,8 @@ scatter bases v =
              , wdiag_dqgdT_col       = VU.singleton (vdqgdT     v VU.! i) }
          , clmSoilState = (clmSoilState s)
              { sstate_soilbeta_col = VU.singleton (vsoilbeta v VU.! i) }
+         , clmCanopyState = (clmCanopyState s)
+             { cstate_patch_wtgcell = patchSliceD (vPatchOff v) (vp_wtgcell v) i }
          , clmSoilHydro = (clmSoilHydro s)
              { sh_zwt_col         = VU.singleton (vsh_zwt         v VU.! i)
              , sh_zwts_col        = VU.singleton (vsh_zwts        v VU.! i)

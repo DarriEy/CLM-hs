@@ -26,7 +26,7 @@ import CLM.Driver.PhysicsAdapters
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Driver.Vectorized
-  ( CLMStateV(..), gather, scatter
+  ( CLMStateV(..), gather, scatter, patchOffsets
   , waterBalanceStepV, hydrologyDrainageStepV
   , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV
   , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV
@@ -2340,6 +2340,28 @@ main = hspec $ do
       map (qflx_surf_col  . clmWaterFlux) sts' `shouldBe` map (qflx_surf_col  . clmWaterFlux) sts
       map (qflx_drain_col . clmWaterFlux) sts' `shouldBe` map (qflx_drain_col . clmWaterFlux) sts
       vNumCols (gather sts) `shouldBe` 3
+
+    it "patch-indexed (CSR) layout round-trips variable per-column patch counts" $ do
+      -- Three columns with DIFFERENT patch counts (1, 2, 3) — the capability the
+      -- flat c*nlev+j layout can't express. CSR offsets pack them and scatter
+      -- reconstructs each column's exact ragged per-patch vector.
+      let mkCol wts = defaultCLMState
+            { clmCanopyState = (clmCanopyState defaultCLMState)
+                { cstate_patch_wtgcell = VU.fromList wts } }
+          psts = [ mkCol [1.0], mkCol [0.6, 0.4], mkCol [0.5, 0.3, 0.2] ]
+          g    = gather psts
+          back = scatter psts g
+      -- CSR offsets = prefix sums of patch counts [1,2,3]
+      vPatchOff g `shouldBe` patchOffsets [1, 2, 3]
+      vPatchOff g `shouldBe` VU.fromList [0, 1, 3, 6]
+      -- each column's ragged patch vector is reconstructed exactly
+      map (VU.toList . cstate_patch_wtgcell . clmCanopyState) back
+        `shouldBe` [[1.0], [0.6, 0.4], [0.5, 0.3, 0.2]]
+      -- a patch-less column (count 0) round-trips to empty
+      let g0 = gather [mkCol []]
+      vPatchOff g0 `shouldBe` VU.fromList [0, 0]
+      cstate_patch_wtgcell (clmCanopyState (head (scatter [mkCol []] g0)))
+        `shouldBe` VU.empty
 
     it "waterBalanceStepV matches per-column waterBalanceStep bit-for-bit" $ do
       let scalar = map (waterBalanceStep cfg ctx) sts

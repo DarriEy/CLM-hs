@@ -201,6 +201,13 @@ or needs writing (glacier).
     stays deferred (its only live write is the gridcell `aggregateLnd2Atm` reduction —
     a `c2g`, not a per-column map). The architecture + oracle + multi-shape templates
     are done; this is multi-session mechanical cranking plus one patch-layout design.
+    **PATCH-INDEXED LAYOUT DONE (2026-06-29):** `CLMStateV` now carries a CSR
+    `vPatchOff` (length nCols+1) so ragged per-patch fields store flat with per-column
+    variable patch counts; `patchOffsets`/`patchSliceD`/`patchSliceI` helpers + a
+    `vp_wtgcell` first field, round-trip validated over columns of patch count 1/2/3
+    (and empty) — suite 234/0. This unblocks class (b): `soilFluxesStep`,
+    `soilTemperatureFullStep`, `canopyFluxesStep`, `baregroundFluxesStep` now migrate
+    by storing their `*_patch_vec` fields flat via the CSR helpers + scalar-kernel-reuse.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake
