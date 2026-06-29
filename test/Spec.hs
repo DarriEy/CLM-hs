@@ -43,7 +43,7 @@ import CLM.Driver.PipelineRunner
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
   , writeDailyNetCDF, buildTimestepContext
   , SurfdataLandunits(..), readSurfdataLandunits, runMixedGridcell
-  , runGridcellColumns, ColumnKind(..) )
+  , runGridcellColumns, ColumnKind(..), GridDiag(..) )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
 import CLM.Types.LakeStateData (LakeStateData(..))
 import CLM.BioGeoPhys.GlacierSurfaceMassBalance
@@ -2204,19 +2204,28 @@ main = hspec $ do
                  , (IS.istsoil, 0.2, SoilCol) ]
                  ld 3600.0 off nst
         length res `shouldBe` nst
-        -- gridcell aggregate is the area-weighted mean of all 3 columns
-        let okAgg ((gTG, _), cols) =
+        -- every gridcell diagnostic field is the area-weighted mean of its
+        -- columns (aggregated through the real c2g)
+        let ws = [0.5, 0.3, 0.2]
+            wmean sel cols = sum (zipWith (*) ws (map sel cols))
+            okAgg (g, cols) =
               length cols == 3
-              && abs (gTG - sum (zipWith (*) [0.5, 0.3, 0.2] (map fst cols))) < 1.0e-9
+              && abs (gd_t_grnd  g - wmean gd_t_grnd  cols) < 1.0e-9
+              && abs (gd_h2osno  g - wmean gd_h2osno  cols) < 1.0e-9
+              && abs (gd_eflx_sh g - wmean gd_eflx_sh cols) < 1.0e-9
+              && abs (gd_eflx_lh g - wmean gd_eflx_lh cols) < 1.0e-9
+              && abs (gd_fsa     g - wmean gd_fsa     cols) < 1.0e-9
         all okAgg res `shouldBe` True
         -- the two soil columns share kind + forcing, so their trajectories match
-        let twoSoilAgree (_, cols) = abs (fst (cols !! 0) - fst (cols !! 2)) < 1.0e-12
+        let twoSoilAgree (_, cols) = gd_t_grnd (cols !! 0) == gd_t_grnd (cols !! 2)
         all twoSoilAgree res `shouldBe` True
         -- equivalence: the general driver on [soil, lake] reproduces runMixedGridcell
         gen <- runGridcellColumns "test/data_bow"
                  [(IS.istsoil, 0.6, SoilCol), (IS.istdlak, 0.4, LakeCol)] ld 3600.0 off nst
         mix <- runMixedGridcell "test/data_bow" 0.6 0.4 ld 3600.0 off nst
-        let eq ((gA, cs), (gB, sB, lB)) = gA == gB && cs == [sB, lB]
+        let proj d = (gd_t_grnd d, gd_h2osno d)
+            eq ((gA, cs), (gB, sB, lB)) =
+              proj gA == gB && map proj cs == [sB, lB]
         and (map eq (zip gen mix)) `shouldBe` True
 
     it "dispatches a soil + lake + glacier gridcell (3 landunit kinds)" $ do
@@ -2231,12 +2240,31 @@ main = hspec $ do
                  ld 3600.0 off nst
         length res `shouldBe` nst
         -- all three column kinds run stably (bounded, finite) and the gridcell
-        -- aggregate is the area-weighted mean of all three.
-        let ok ((gTG, _), cols) =
+        -- T_GRND is the area-weighted mean of all three.
+        let ok (g, cols) =
               length cols == 3
-              && all (\(tg, sn) -> not (isNaN tg) && tg > 200.0 && tg < 320.0 && not (isNaN sn))
-                     cols
-              && abs (gTG - sum (zipWith (*) [0.5, 0.3, 0.2] (map fst cols))) < 1.0e-9
+              && all (\d -> let tg = gd_t_grnd d
+                            in not (isNaN tg) && tg > 200.0 && tg < 320.0
+                               && not (isNaN (gd_h2osno d))) cols
+              && abs (gd_t_grnd g - sum (zipWith (*) [0.5, 0.3, 0.2] (map gd_t_grnd cols))) < 1.0e-9
+        all ok res `shouldBe` True
+
+    it "dispatches a soil + urban gridcell (urban canyon fluxes fire)" $ do
+      hasBow <- doesDirectoryExist "test/data_bow/coldstart"
+      if not hasBow then pendingWith "test/data_bow not available"
+      else do
+        let off = 26304; nst = 6; ld = 10.0
+        res <- runGridcellColumns "test/data_bow"
+                 [ (IS.istsoil, 0.7, SoilCol)
+                 , (9,          0.3, UrbanCol) ]   -- 9 = isturb_md
+                 ld 3600.0 off nst
+        length res `shouldBe` nst
+        -- both columns run bounded/finite; gridcell aggregate is the weighted mean
+        let ok (g, cols) =
+              length cols == 2
+              && all (\d -> let tg = gd_t_grnd d
+                            in not (isNaN tg) && tg > 200.0 && tg < 340.0) cols
+              && abs (gd_t_grnd g - (0.7 * gd_t_grnd (cols !! 0) + 0.3 * gd_t_grnd (cols !! 1))) < 1.0e-9
         all ok res `shouldBe` True
 
   describe "Pipeline initialization" $ do

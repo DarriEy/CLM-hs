@@ -381,11 +381,16 @@ The highest-leverage work is now **closing the validation gap** — converting
    SWE, excess → ice) on an `istice`-marked column — the first time
    `glacierSMBStep` runs in a live multi-step driver (previously a standalone unit
    test only). Validated by a soil+lake+glacier 3-kind dispatch test (bounded,
-   finite, area-weighted aggregate; suite 219/0). REMAINING: `UrbanCol`/`WetlandCol`
-   kinds (the `urbanFluxesStep` kernel exists but needs standalone-column wiring),
-   and a per-landunit Fortran reference — glacier/urban remain
-   sanity/conservation-validated only (no non-soil/non-lake gridcell reference run
-   exists here).
+   finite, area-weighted aggregate; suite 219/0). **`UrbanCol` now wired
+   (2026-06-29):** a fourth dispatch kind runs the pipeline on an `isturb_md`-marked
+   column so the gated `urbanFluxesStep` (canyon energy balance) fires. The gridcell
+   driver also now aggregates a richer diagnostic bundle — `GridDiag`
+   {T_GRND, H2OSNO, SH, LH, FSA} — with **every field averaged column→gridcell
+   through the real `c2g`** (conservation-tested to 1e-9), so the multi-landunit cell
+   emits coupler-grade gridcell means rather than just T_GRND/H2OSNO. Suite 220/0.
+   REMAINING: `WetlandCol` (≈ soil path), a per-landunit Fortran reference
+   (glacier/urban stay sanity/conservation-validated only), and connecting the
+   `GridDiag` bundle to `aggregateLnd2Atm` / NetCDF history output.
 4. **Streams**: LAI / crop-calendar / urban-tv readers on the `DataStream` core.
 
 Deferred (large / out of scope): crop (unported, needs a crop landunit), the
