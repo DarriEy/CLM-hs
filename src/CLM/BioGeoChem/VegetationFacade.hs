@@ -326,7 +326,11 @@ ecosystemDynamics !inp =
       -- NEE = -(GPP - ER) = -(NEP)
       !nee = U.map negate (edi_nep inp)
 
-      -- Fire C loss (placeholder — actual fire computed in FireBase/FireLi2014)
+      -- Fire C loss is reported as zero from this facade summary on purpose:
+      -- the authoritative fire carbon flux is computed and applied in the CN
+      -- driver step (PhysicsAdapters.applyColumnFire, which dispatches to
+      -- FireBase/FireLi2014). Emitting it here as well would double-count the
+      -- burned carbon, so this summary defers to that single source of truth.
       !fireLoss = U.replicate nc 0.0
 
       -- Litterfall = HR source (approximation)

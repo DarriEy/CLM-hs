@@ -21,6 +21,7 @@ module CLM.BioGeoChem.LitterVertTransp
   ) where
 
 import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector         as V
 
 -- | Parameters for vertical transport.
 data LitterVertTranspParams = LitterVertTranspParams
@@ -104,55 +105,66 @@ getSpinupLatitudeTerm lat
   | abs lat >= 60.0 = 0.5
   | otherwise        = 1.0
 
--- | Solve tridiagonal system (Thomas algorithm).
--- a: sub-diagonal, b: main diagonal, c_: super-diagonal, r: rhs
--- Returns solution vector u.
+-- | Solve a tridiagonal linear system with the Thomas algorithm.
+--
+--   a : sub-diagonal   (a!0 is unused)
+--   b : main diagonal
+--   c_: super-diagonal (c_!(n-1) is unused)
+--   r : right-hand side
+--
+-- Returns the solution vector @u@ of the same length as @b@.
+--
+-- This is the standard, numerically faithful Thomas elimination used by the
+-- CLM @Tridiagonal@ routine: a forward sweep building modified super-diagonal
+-- (@cp@) and rhs (@dp@) coefficients, followed by a back substitution.
 solveTridiag :: VU.Vector Double -> VU.Vector Double -> VU.Vector Double
              -> VU.Vector Double -> VU.Vector Double
 solveTridiag a b c_ r =
-  let n = VU.length b
-      -- Forward sweep
-      (gam, bet) = go1 0 (VU.replicate n (0.0 :: Double)) (VU.replicate n (0.0 :: Double))
-      go1 i g u
-        | i >= n    = (g, u)
-        | i == 0    = let bi = b VU.! 0
-                          ui = r VU.! 0 / bi
-                          g' = VU.modify (\v -> do
-                                  let _ = v
-                                  return ()) g  -- placeholder
-                      in go1 1 g (u VU.// [(0, ui)])
-        | otherwise = let ci_1 = c_ VU.! (i-1)
-                          bi   = b VU.! i
-                          ai   = a VU.! i
-                          ri   = r VU.! i
-                          -- Need previous bet value
-                      in go1 (i+1) g u  -- simplified; real impl below
-
-      -- Full Thomas algorithm using list-based forward sweep then back-sub
-      fwd [] _ _ = []
-      fwd ((ai,bi,ci,ri):rest) prevBet prevU =
-        let bet' = if null rest then bi - ai * prevBet * 0 else bi
-        in (prevBet, prevU) : fwd rest bet' 0
-
-  in -- Use a simple iterative approach
-     let n' = VU.length b
-         -- Forward elimination
-         forward = scanl step (b VU.! 0, r VU.! 0 / (b VU.! 0)) [1..n'-1]
-         step (prevB, _prevU) i =
-           let ai = a VU.! i
-               bi = b VU.! i
-               ci_1 = c_ VU.! (i-1)
-               ri = r VU.! i
-               w = ai / prevB
-               newB = bi - w * ci_1
-               newR = (ri - w * (r VU.! (i-1))) -- simplified
-           in (newB, newR / newB)
-     in VU.fromList (map snd forward)  -- simplified placeholder
+  let !n = VU.length b
+  in if n == 0
+       then VU.empty
+       else
+         let -- Forward sweep: cp!i, dp!i
+             !cp0 = (c_ VU.! 0) / (b VU.! 0)
+             !dp0 = (r  VU.! 0) / (b VU.! 0)
+             go !i !cpPrev !dpPrev cpAcc dpAcc
+               | i >= n    = (reverse cpAcc, reverse dpAcc)
+               | otherwise =
+                   let !denom = (b VU.! i) - (a VU.! i) * cpPrev
+                       !cpi   = (c_ VU.! i) / denom
+                       !dpi   = ((r VU.! i) - (a VU.! i) * dpPrev) / denom
+                   in go (i+1) cpi dpi (cpi : cpAcc) (dpi : dpAcc)
+             (cpsL, dpsL) = go 1 cp0 dp0 [cp0] [dp0]
+             !cp = VU.fromList cpsL
+             !dp = VU.fromList dpsL
+             -- Back substitution
+             !xn = dp VU.! (n-1)
+             back !i !xNext acc
+               | i < 0     = acc
+               | otherwise = let !xi = (dp VU.! i) - (cp VU.! i) * xNext
+                             in back (i-1) xi (xi : acc)
+         in VU.fromList (back (n-2) xn [xn])
 
 -- | Calculate vertical mixing of all decomposing C and N pools.
--- This is a simplified pure implementation that handles CWD (no transport)
--- and non-CWD pools (source+sink only, without full tridiagonal solve
--- for simplicity in the pure functional port).
+--
+-- Faithful port of @SoilBiogeochemLittVertTransp@
+-- (SoilBiogeochemLittVertTranspMod.F90): an advection-diffusion (Patankar 1980,
+-- power-law scheme) of every decomposing C and N pool over the column, plus
+-- reconciliation of the source/sink terms computed in CStateUpdate1 /
+-- NStateUpdate1.
+--
+-- For each (tracer, pool, active column):
+--
+--   * non-CWD pools are transported by assembling the Patankar tridiagonal
+--     system (a_tri/b_tri/c_tri/r_tri, Fortran levels @0..nlevdecomp+1@ with
+--     zero-gradient top and bottom boundary rows) and solving it with the
+--     Thomas algorithm ('solveTridiag');
+--   * CWD pools are not transported — only their source/sink is added;
+--   * any tracer that leaks below bedrock is folded back into the bottom active
+--     layer, so the column total is conserved.
+--
+-- The transport tendency @(conc_after - conc_before - source)/dtime@ is returned
+-- for the non-CWD pools (zero for CWD, which has no transport).
 litterVertTransp :: VertTranspInput -> VertTranspOutput
 litterVertTransp inp =
   let !nc     = vti_nc inp
@@ -177,55 +189,225 @@ litterVertTransp inp =
       cryo_k  = lvp_cryoturb_diffusion_k params
       max_alt_cryo = lvp_max_altdepth_cryoturbation params
 
-      epsilon = 1.0e-30
+      !epsilon = 1.0e-30
 
-      -- Compute diffusivity and advection coefficients per column
-      -- (nc * (nlev+1))
+      -- ----------------------------------------------------------------------
+      -- Diffusivity / advection coefficients per column (nc * (nlev+1)).
+      -- Fortran level j = 1..nlevdecomp+1 maps to Haskell jh = j-1 = 0..nlev.
+      -- @zisoi@ is 0-based with zisoi[0]=0 (surface) and zisoi[k]=bottom of
+      -- layer k, so Fortran zisoi(j) = zisoi[j] = zisoi[jh+1]; the bedrock
+      -- interface Fortran zisoi(nbedrock+1) = zisoi[nbr+1].
+      -- ----------------------------------------------------------------------
       computeCoefs = VU.generate (nc * (nlev + 1)) $ \ix ->
-        let j = ix `div` nc; c = ix `mod` nc
+        let jh = ix `div` nc
+            c  = ix `mod` nc
         in if not (mask VU.! c) then (0.0, 0.0)
-           else let alt_max_val = max (altmax VU.! c) (altmax_ly VU.! c)
-                    nbr = nbedrock VU.! c
-                in if alt_max_val <= max_alt_cryo && alt_max_val > 0.0
-                   then -- Cryoturbation regime
-                     if j <= nbr + 1
-                     then if zisoi VU.! (j + 1) < alt_max_val
-                          then (cryo_k, 0.0)
-                          else (max (cryo_k * (1.0 - (zisoi VU.! (j+1) - alt_max_val)
-                                  / (min max_cryo (zisoi VU.! (nbr + 2)) - alt_max_val))) 0.0, 0.0)
-                     else (0.0, 0.0)
-                   else if alt_max_val > 0.0
-                        then -- Bioturbation regime
-                          if j <= nbr + 1
-                          then (som_diffus_val, som_adv)
-                          else (0.0, 0.0)
-                        else (0.0, 0.0)
+           else
+             let !alt = max (altmax VU.! c) (altmax_ly VU.! c)
+                 !nbr = nbedrock VU.! c
+             in if alt <= max_alt_cryo && alt > 0.0
+                  then -- cryoturbation: constant in active layer, linear to 0
+                    if jh <= nbr
+                      then if (zisoi VU.! (jh + 1)) < alt
+                             then (cryo_k, 0.0)
+                             else ( max ( cryo_k *
+                                          ( 1.0 - ((zisoi VU.! (jh + 1)) - alt)
+                                            / (min max_cryo (zisoi VU.! (nbr + 1)) - alt) ) )
+                                        0.0
+                                  , 0.0 )
+                      else (0.0, 0.0)
+                  else if alt > 0.0
+                         then -- bioturbation: constant advection + diffusion
+                           if jh <= nbr then (som_diffus_val, som_adv) else (0.0, 0.0)
+                         else (0.0, 0.0)  -- fully frozen: no mixing
 
       som_diffus_coef = VU.map fst computeCoefs
       som_adv_coef    = VU.map snd computeCoefs
 
-      -- For CWD pools: just add source, no transport
-      -- For non-CWD pools: add source (simplified -- full Patankar tridiagonal
-      -- solve would require mutable state; here we apply source/sink only)
-      updatePools conc_ptr source_ptr = VU.generate (nc * nlev * npools) $ \ix ->
-        let k = ix `div` (nc * nlev)
-            rem1 = ix `mod` (nc * nlev)
-            j = rem1 `div` nc; c = rem1 `mod` nc
-        in if not (mask VU.! c) then conc_ptr VU.! ix
-           else conc_ptr VU.! ix + source_ptr VU.! ix
+      -- Node geometry (shared across columns).
+      -- zsoi_ext: length nlev+1; [0..nlev-1] = zsoi, [nlev] = zisoi[nlev]
+      -- (Fortran zsoi(nlevdecomp+1) := zisoi(nlevdecomp)).
+      zsoi_ext = VU.generate (nlev + 1) $ \j ->
+                   if j < nlev then zsoi VU.! j else zisoi VU.! nlev
+      -- dz_node(1) = zsoi(1); dz_node(j) = zsoi(j) - zsoi(j-1).
+      dz_node  = VU.generate (nlev + 1) $ \j ->
+                   if j == 0 then zsoi_ext VU.! 0
+                             else (zsoi_ext VU.! j) - (zsoi_ext VU.! (j - 1))
 
-      cpools_out = updatePools (vti_decomp_cpools_vr inp) (vti_decomp_cpools_sourcesink inp)
-      npools_out = updatePools (vti_decomp_npools_vr inp) (vti_decomp_npools_sourcesink inp)
+      -- Fortran "A" function shorthand.
+      aaa = patankarA
 
-      -- Transport tendency is zero in this simplified version
-      -- (full Patankar solve would compute actual transport)
-      zeroTendency = VU.replicate (nc * nlev * npools) 0.0
+      -- Bedrock-leak correction: any tracer in a layer below @nbr@ (Fortran
+      -- 1-based bedrock count) is moved into the bottom active layer (index
+      -- nbr-1), scaled by the thickness ratio, then zeroed -- conserving the
+      -- column total.
+      applyBedrockLeak :: Int -> VU.Vector Double -> VU.Vector Double
+      applyBedrockLeak nbr raw
+        | nbr < 1 || nbr > nlev = raw
+        | otherwise =
+            let !target = nbr - 1
+                !leak = VU.sum $ VU.generate nlev $ \lj ->
+                          if lj + 1 > nbr
+                            then (raw VU.! lj) * ((dzsoi VU.! lj) / (dzsoi VU.! target))
+                            else 0.0
+            in VU.generate nlev $ \lj ->
+                 if lj + 1 > nbr        then 0.0
+                 else if lj == target   then (raw VU.! lj) + leak
+                 else raw VU.! lj
+
+      -- Transport one (column c, pool k) of a single tracer.
+      -- Returns (updated concentration profile, transport tendency), each nlev.
+      transportColumnPool :: VU.Vector Double -> VU.Vector Double
+                          -> Int -> Int
+                          -> (VU.Vector Double, VU.Vector Double)
+      transportColumnPool conc_in source_in c k =
+        let !nbr  = nbedrock VU.! c
+            !is_c = is_cwd VU.! k
+            -- per-layer (0-based) accessors
+            concL lj = conc_in   VU.! idx3 nc nlev c lj k
+            srcL  lj = source_in VU.! idx3 nc nlev c lj k
+        in if is_c
+             then -- CWD: no transport, just add source (+ bedrock leak)
+               let raw = VU.generate nlev (\lj -> concL lj + srcL lj)
+               in (applyBedrockLeak nbr raw, VU.replicate nlev 0.0)
+             else
+               let -- spinup acceleration of transport (advection + diffusion)
+                   !sp0 = if spstate >= 1 then spf VU.! k else 1.0
+                   !spinup_term =
+                       if abs (sp0 - 1.0) > 1.0e-6
+                         then sp0 * getSpinupLatitudeTerm (latdeg VU.! c)
+                         else sp0
+                   -- diffusivity / advective flux with spinup + epsilon floor
+                   advV = VU.generate (nlev + 1) $ \jh ->
+                            let base = som_adv_coef VU.! idx2 nc c jh
+                            in if abs base * spinup_term < epsilon
+                                 then epsilon else base * spinup_term
+                   diffusV = VU.generate (nlev + 1) $ \jh ->
+                            let base = som_diffus_coef VU.! idx2 nc c jh
+                            in if abs base * spinup_term < epsilon
+                                 then epsilon else base * spinup_term
+                   -- Fortran 1-based accessors (j = 1..nlev+1)
+                   advF j    = advV    VU.! (j - 1)
+                   diffusF j = diffusV VU.! (j - 1)
+                   zsoiF j   = zsoi_ext VU.! (j - 1)
+                   zisoiF j  = zisoi   VU.! j
+                   dzNodeF j = dz_node VU.! (j - 1)
+                   dzsoiF j  = dzsoi   VU.! (j - 1)
+                   -- conc_trcr: 0 at top/bottom ghost levels, conc inside.
+                   concTr j
+                     | j <= 0           = 0.0
+                     | j <= nlev        = concL (j - 1)
+                     | otherwise        = 0.0
+                   -- D/dz, F (water flux), Pe (Peclet) terms for j = 1..nlev+1.
+                   -- Tuple = (d_m1_zm1, d_p1_zp1, f_m1, f_p1, pe_m1, pe_p1).
+                   dfpe :: V.Vector (Double, Double, Double, Double, Double, Double)
+                   dfpe = V.generate (nlev + 1) $ \jh ->
+                     let j = jh + 1
+                     in if j == 1
+                          then
+                            let wp1 = (zsoiF (j + 1) - zisoiF j) / dzNodeF (j + 1)
+                                dp1 = if diffusF (j + 1) > 0.0 && diffusF j > 0.0
+                                        then 1.0 / ((1.0 - wp1) / diffusF j + wp1 / diffusF (j + 1))
+                                        else 0.0
+                                dp1zp1 = dp1 / dzNodeF (j + 1)
+                                fm1 = advF j
+                                fp1 = advF (j + 1)
+                            in (0.0, dp1zp1, fm1, fp1, 0.0, fp1 / dp1zp1)
+                        else if j >= nbr + 1
+                          then
+                            let wm1 = (zisoiF (j - 1) - zsoiF (j - 1)) / dzNodeF j
+                                dm1 = if diffusF j > 0.0 && diffusF (j - 1) > 0.0
+                                        then 1.0 / ((1.0 - wm1) / diffusF j + wm1 / diffusF (j - 1))
+                                        else 0.0
+                                dm1zm1 = dm1 / dzNodeF j
+                                dp1zp1 = dm1zm1
+                                fm1 = advF j
+                                fp1 = 0.0
+                            in (dm1zm1, dp1zp1, fm1, fp1, fm1 / dm1zm1, fp1 / dp1zp1)
+                        else
+                            let wm1 = (zisoiF (j - 1) - zsoiF (j - 1)) / dzNodeF j
+                                dm1 = if diffusF (j - 1) > 0.0 && diffusF j > 0.0
+                                        then 1.0 / ((1.0 - wm1) / diffusF j + wm1 / diffusF (j - 1))
+                                        else 0.0
+                                wp1 = (zsoiF (j + 1) - zisoiF j) / dzNodeF (j + 1)
+                                dp1 = if diffusF (j + 1) > 0.0 && diffusF j > 0.0
+                                        then 1.0 / ((1.0 - wp1) / diffusF j + wp1 / diffusF (j + 1))
+                                        else (1.0 - wm1) * diffusF j + wp1 * diffusF (j + 1)
+                                dm1zm1 = dm1 / dzNodeF j
+                                dp1zp1 = dp1 / dzNodeF (j + 1)
+                                fm1 = advF j
+                                fp1 = advF (j + 1)
+                            in (dm1zm1, dp1zp1, fm1, fp1, fm1 / dm1zm1, fp1 / dp1zp1)
+                   dM1zm1 j = let (x,_,_,_,_,_) = dfpe V.! (j - 1) in x
+                   dP1zp1 j = let (_,x,_,_,_,_) = dfpe V.! (j - 1) in x
+                   fM1 j    = let (_,_,x,_,_,_) = dfpe V.! (j - 1) in x
+                   fP1 j    = let (_,_,_,x,_,_) = dfpe V.! (j - 1) in x
+                   peM1 j   = let (_,_,_,_,x,_) = dfpe V.! (j - 1) in x
+                   peP1 j   = let (_,_,_,_,_,x) = dfpe V.! (j - 1) in x
+                   -- Tridiagonal coefficients, Fortran levels j = 0..nlev+1.
+                   coef j
+                     | j == 0 = (0.0, 1.0, -1.0, 0.0)
+                     | j == 1 =
+                         let ap0 = dzsoiF j / dtime
+                             a = negate (dM1zm1 j * aaa (peM1 j) + max (fM1 j) 0.0)
+                             cc = negate (dP1zp1 j * aaa (peP1 j) + max (negate (fP1 j)) 0.0)
+                             b = negate a - cc + ap0
+                             r = srcL (j - 1) * dzsoiF j / dtime
+                                 + (ap0 - advF j) * concTr j
+                         in (a, b, cc, r)
+                     | j < nlev + 1 =
+                         let ap0 = dzsoiF j / dtime
+                             a = negate (dM1zm1 j * aaa (peM1 j) + max (fM1 j) 0.0)
+                             cc = negate (dP1zp1 j * aaa (peP1 j) + max (negate (fP1 j)) 0.0)
+                             b = negate a - cc + ap0
+                             r = srcL (j - 1) * dzsoiF j / dtime + ap0 * concTr j
+                         in (a, b, cc, r)
+                     | otherwise = (-1.0, 1.0, 0.0, 0.0)  -- j == nlev+1
+                   rows = [ coef j | j <- [0 .. nlev + 1] ]
+                   aV = VU.fromList [ a  | (a,_,_,_) <- rows ]
+                   bV = VU.fromList [ b  | (_,b,_,_) <- rows ]
+                   cV = VU.fromList [ cc | (_,_,cc,_) <- rows ]
+                   rV = VU.fromList [ r  | (_,_,_,r) <- rows ]
+                   -- Solve; sol indexed by Fortran level j = 0..nlev+1.
+                   sol = solveTridiag aV bV cV rV
+                   rawConc = VU.generate nlev $ \lj -> sol VU.! (lj + 1)
+                   concOut = applyBedrockLeak nbr rawConc
+                   -- tendency = (conc_after - conc_before - source)/dtime
+                   tend = VU.generate nlev $ \lj ->
+                            let j = lj + 1
+                                pre = negate (concTr j + srcL lj)
+                            in (pre + sol VU.! j) / dtime
+               in (concOut, tend)
+
+      -- Transport a whole tracer (all pools, all columns).
+      solveAll :: VU.Vector Double -> VU.Vector Double
+               -> (VU.Vector Double, VU.Vector Double)
+      solveAll conc_in source_in =
+        let solved = V.generate (npools * nc) $ \kc ->
+              let k = kc `div` nc
+                  c = kc `mod` nc
+              in if not (mask VU.! c)
+                   then ( VU.generate nlev (\lj -> conc_in VU.! idx3 nc nlev c lj k)
+                        , VU.replicate nlev 0.0 )
+                   else transportColumnPool conc_in source_in c k
+            outAt pick = VU.generate (nc * nlev * npools) $ \ix ->
+              let k    = ix `div` (nc * nlev)
+                  rem1 = ix `mod` (nc * nlev)
+                  lj   = rem1 `div` nc
+                  c    = rem1 `mod` nc
+              in pick (solved V.! (k * nc + c)) VU.! lj
+        in (outAt fst, outAt snd)
+
+      (cpools_out, c_tend) =
+        solveAll (vti_decomp_cpools_vr inp) (vti_decomp_cpools_sourcesink inp)
+      (npools_out, n_tend) =
+        solveAll (vti_decomp_npools_vr inp) (vti_decomp_npools_sourcesink inp)
 
   in VertTranspOutput
     { vto_decomp_cpools_vr = cpools_out
     , vto_decomp_npools_vr = npools_out
-    , vto_c_transport_tendency = zeroTendency
-    , vto_n_transport_tendency = zeroTendency
+    , vto_c_transport_tendency = c_tend
+    , vto_n_transport_tendency = n_tend
     , vto_som_adv_coef = som_adv_coef
     , vto_som_diffus_coef = som_diffus_coef
     }
@@ -256,88 +438,42 @@ data TridiagTranspInput = TridiagTranspInput
 --   a_j * conc'_j = a_{j-1/2} * conc'_{j-1} + a_{j+1/2} * conc'_{j+1} + S_j * dz_j
 tridiagVertTransp :: TridiagTranspInput -> VU.Vector Double
 tridiagVertTransp !inp =
-  let !nl = tti_nlev inp
-      !dt = tti_dt inp
-      !nbr = tti_nbedrock inp
-      !conc = tti_conc_vr inp
-      !src = tti_source_vr inp
+  let !nl     = tti_nlev inp
+      !dt     = tti_dt inp
+      !nbr    = tti_nbedrock inp
+      !conc   = tti_conc_vr inp
+      !src    = tti_source_vr inp
       !diffus = tti_diffus inp
-      !adv = tti_adv_flux inp
-      !dz = tti_dzsoi inp
-      !zi = tti_zisoi inp
+      !adv    = tti_adv_flux inp
+      !dz     = tti_dzsoi inp
+      !zi     = tti_zisoi inp
+      !tiny   = 1.0e-20
 
-      -- Interface distances
-      dz_iface j = if j > 0 && j < nl
-                   then (zi VU.! (j+1) - zi VU.! j)
-                   else dz VU.! (min (nl-1) (max 0 j))
+      -- cell-centre depth of layer j and the centre-to-centre spacing.
+      node  j = 0.5 * ((zi VU.! j) + (zi VU.! (j + 1)))
+      dnode j = node (j + 1) - node j
 
-      -- Peclet number at interface j+1/2
-      peclet j = let !d = max 1.0e-20 (diffus VU.! (j+1))
-                     !f = adv VU.! (j+1) * dz_iface j
-                 in f / d
+      -- West coupling for cell j (exchange with j-1 across interface j).
+      -- Restricted to the active soil column (j <= nbedrock) so transport is
+      -- zero-flux at the surface and below bedrock.
+      aW j = if j > 0 && j <= nbr
+               then let !d  = (diffus VU.! j) / max tiny (dnode (j - 1))
+                        !f  = adv VU.! j
+                        !pe = f / max tiny d
+                    in d * patankarA pe + max 0.0 f
+               else 0.0
+      -- East coupling for cell j (exchange with j+1 across interface j+1).
+      aE j = if j < nl - 1 && (j + 1) <= nbr
+               then let !d  = (diffus VU.! (j + 1)) / max tiny (dnode j)
+                        !f  = adv VU.! (j + 1)
+                        !pe = f / max tiny d
+                    in d * patankarA pe + max 0.0 (negate f)
+               else 0.0
 
-      -- Patankar coefficient at interface j+1/2
-      aCoef j = let !d = diffus VU.! (j+1) / max 1.0e-10 (dz_iface j)
-                    !f = adv VU.! (j+1)
-                    !pe = peclet j
-                    !pa = patankarA pe
-                in d * pa + max 0.0 (negate f)
+      aP0 j  = (dz VU.! j) / dt
+      aSub   = VU.generate nl (\j -> negate (aW j))
+      aSup   = VU.generate nl (\j -> negate (aE j))
+      aDiag  = VU.generate nl (\j -> aW j + aE j + aP0 j)
+      rhs    = VU.generate nl (\j -> (conc VU.! j) * aP0 j + (src VU.! j) * (dz VU.! j))
 
-      -- Build tridiagonal system: a_sub, a_diag, a_sup, rhs
-      buildRow j =
-        let !aP_below = if j > 0 && j <= nbr then aCoef (j-1) else 0.0
-            !aP_above = if j < nl-1 && j < nbr then aCoef j else 0.0
-            !source = src VU.! j * (dz VU.! j)
-            !a_sub = negate aP_below
-            !a_sup = negate aP_above
-            !a_diag = aP_below + aP_above + (dz VU.! j) / dt
-            !rhs = (conc VU.! j) * (dz VU.! j) / dt + source
-        in (a_sub, a_diag, a_sup, rhs)
-
-      rows = map buildRow [0..nl-1]
-
-      -- Thomas algorithm (tridiagonal solve)
-      solve [] = []
-      solve rs =
-        let -- Forward sweep
-            fwd [] _ = []
-            fwd ((_, b, c, d):rest) prevW =
-              let (_, prevB, _, prevD) = prevW
-                  !w = if prevB /= 0.0 then fst4 (head rest') / prevB else 0.0
-                  !newB = b - w * c
-                  !newD = d - w * prevD
-                  rest' = (0.0, newB, c, newD) : fwd rest (0.0, newB, c, newD)
-              in rest'
-            fwd _ _ = []
-
-            fst4 (a, _, _, _) = a
-
-            -- Simple forward elimination + back substitution
-            thomasSolve = go1 (map (\(a,b,c,d) -> (a,b,c,d)) rs) [] []
-            go1 [] cs ds = backSub (reverse cs) (reverse ds) []
-            go1 ((asub, bdiag, csup, rhs):rest) cs ds =
-              case ds of
-                [] -> go1 rest (csup / bdiag : cs) (rhs / bdiag : ds)
-                (prevD:_) ->
-                  let !prevC = head cs
-                      !m = if bdiag - asub * prevC /= 0.0
-                           then 1.0 / (bdiag - asub * prevC)
-                           else 0.0
-                      !c' = csup * m
-                      !d' = (rhs - asub * prevD) * m
-                  in go1 rest (c' : cs) (d' : ds)
-
-            backSub [] _ acc = acc
-            backSub (_:_) [] _ = []  -- shouldn't happen
-            backSub (c:cs) (d:ds) [] = backSub cs ds [d]
-            backSub (c:cs) (d:ds) (x:xs) =
-              backSub cs ds (d - c * x : x : xs)
-
-        in thomasSolve
-
-      !solution = solve rows
-      !result = VU.fromList $ map (max 0.0) $
-                if length solution == nl then solution
-                else VU.toList conc  -- fallback if solver fails
-
-  in result
+  in if nl <= 0 then VU.empty else solveTridiag aSub aDiag aSup rhs

@@ -83,9 +83,13 @@ soilSuctionInverseCH !props !smp_target =
 
 --------------------------------------------------------------------------------
 -- Van Genuchten 1980
--- Note: current Julia implementation uses the same formulas as CH78.
--- This is a placeholder that matches the Julia code exactly.
--- When the actual VG equations are ported, replace these implementations.
+-- Faithful to Fortran SoilWaterRetentionCurveVanGenuchten1980Mod.F90: in CLM/CTSM
+-- that module's soil_hk / soil_suction / soil_suction_inverse routines are
+-- identical, line for line, to the Clapp-Hornberger 1978 module (its own header
+-- states it is "Implementation ... using the Clapp-Hornberg 1978
+-- parameterizations"). The genuine van Genuchten (1980) equations are not
+-- present in the reference Fortran, so reusing the CH78 implementations here is
+-- the correct port. Should CLM ever add the true VG curves, replace these.
 --------------------------------------------------------------------------------
 
 soilHkVG :: SoilProps -> Double -> Double -> HkResult

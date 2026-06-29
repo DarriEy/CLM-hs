@@ -143,7 +143,12 @@ computeHydStressSink inp =
       -- Negative flux sum
       !qflx_phs_neg = VU.foldl' (\acc v -> if v < 0 then acc + v else acc) 0.0 qflx_rootsoi
 
-      -- Per-patch redistribution (simplified)
+      -- Per-patch hydraulic redistribution flux (qflx_hydr_redist_patch).
+      -- Matches Fortran Compute_EffecRootFrac_And_VertTranSink_HydStress:
+      -- for each active vegetated patch, accumulate the per-layer root-soil
+      -- flux k_soil_root*(smp - vegwp_root - grav) over all soil layers,
+      -- summing only the negative (soil-uptake-reversed, i.e. redistribution)
+      -- contributions. Unlike the column sink this term is NOT wtcol-weighted.
       redistPatch patch =
         if not (hsp_active patch) || hsp_frac_veg_nosno patch <= 0 || hsp_wtcol patch <= 0
         then 0.0

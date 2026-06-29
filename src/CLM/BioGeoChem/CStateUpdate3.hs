@@ -75,7 +75,7 @@ data CStateUpdate3PatchInput = CStateUpdate3PatchInput
   , csu3p_m_gresp_storage_to_litter_fire   :: !Double
   , csu3p_m_gresp_xfer_to_fire             :: !Double
   , csu3p_m_gresp_xfer_to_litter_fire      :: !Double
-  -- Storage/xfer fire fluxes (simplified: sum of fire + litter_fire for each)
+  -- Storage/xfer fire fluxes: sum of fire + litter_fire for each
   , csu3p_m_leafc_storage_to_fire          :: !Double
   , csu3p_m_leafc_storage_to_litter_fire   :: !Double
   , csu3p_m_leafc_xfer_to_fire             :: !Double

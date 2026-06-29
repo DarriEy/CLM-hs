@@ -310,11 +310,9 @@ cnGapPatchToColumn inp =
       idxC2 c j = c + nc * j
       idx3C nc' c j k = c + nc' * (j + nlev * k)
 
-      -- Litter fraction helper
-      lf_f pftIdx i = pgm_lf_f pft VU.! (pftIdx + (pgm_nlitr pft) * 0 + i)
-      -- Simplified: lf_f and fr_f stored as (npft * nlitr)
-      getLfF pftIdx i = pgm_lf_f pft VU.! (pftIdx * nlitr + i)
-      getFrF pftIdx i = pgm_fr_f pft VU.! (pftIdx * nlitr + i)
+      -- Litter fraction helpers (stored as row-major 2D array of shape npft * nlitr)
+      getLfF !pftIdx !i = pgm_lf_f pft VU.! (pftIdx * nlitr + i)
+      getFrF !pftIdx !i = pgm_fr_f pft VU.! (pftIdx * nlitr + i)
 
       -- C to litter (nc * nlev * nlitr)
       c_to_litr = VU.generate (nc * nlev * nlitr) $ \ix ->

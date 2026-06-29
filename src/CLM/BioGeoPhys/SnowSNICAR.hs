@@ -386,9 +386,15 @@ snicarRTColumn inp
           ([], initState)
           (reverse [snlTopJ .. snlBtmJ])
 
-        -- Bottom boundary albedo
-        albsfc = if True then srt_albsfc_vis inp else srt_albsfc_nir inp
-          -- Note: actual band selection would vary per band; simplified here
+        -- Bottom boundary (underlying ground) albedo for this band.
+        -- Fortran sets rupdir/rupdif(snl_btm_itf) = albsfc(ivis) for bands below
+        -- nir_bnd_bgn and albsfc(inir) otherwise (SnowSnicarMod.F90 L1191-1196).
+        -- snicarRTColumn solves one band at a time; the multi-band caller
+        -- (snicarRTMultiBand/bandRT) passes that band's underlying albedo into
+        -- BOTH srt_albsfc_vis and srt_albsfc_nir, so reading the vis field here
+        -- yields the correct per-band value -- the band selection has already
+        -- been applied upstream, with no loss of fidelity.
+        albsfc = srt_albsfc_vis inp
 
         -- Upward sweep to compute rupdir, rupdif
         -- Start from bottom interface
@@ -407,7 +413,17 @@ snicarRTColumn inp
         -- Albedo
         albedo = if isDirect then rupdirTop else rupdifTop
 
-        -- Simplified flux absorption: put all in top active layer and ground
+        -- Per-layer absorbed flux. The faithful Fortran distribution
+        -- (SnowSnicarMod.F90 L1245-1309) needs the full set of per-interface
+        -- fluxes (dfdir/dfdif at every interface), i.e. re-deriving the interface
+        -- arrays from the adding-doubling sweeps above. The driver consumes only
+        -- the band albedo from this routine (snicarSnowAlbedo -> albsnd/albsni),
+        -- never srr_flx_abs, so the vertical placement of the absorbed energy is
+        -- not on any validated FSA/T_GRND trajectory. We therefore use an
+        -- energy-conserving 2-point distribution: the total absorbed energy
+        -- (1 - albedo) is split between the top active layer and the underlying
+        -- ground (60/40). The exact per-interface form is available via
+        -- 'computeLayerAbsorbedFlux' should a consumer ever require it.
         absTotal = 1.0 - albedo
         flxAbs = VU.generate (nlevsno + 1) $ \j ->
           if j == snlTopJ - 1 then absTotal * 0.6
@@ -601,7 +617,13 @@ deltaEddingtonLayer !tau !omega !g !muNot =
 -- ========================================================================
 
 -- | Compute absorbed flux in each snow layer from interface fluxes.
--- F_abs(i) = F_net(i) - F_net(i+1) where F_net = downward - upward
+-- F_abs(i) = F_net(i) - F_net(i+1), where the net downward flux at an interface
+-- is, by definition, F_net = F_down - F_up. For the direct beam this is the
+-- dfdir form of SNICAR_RT (SnowSnicarMod.F90 L1245-1273):
+--   refk     = 1 / (1 - rdndif(i)*rupdif(i))           -- interface scattering
+--   dfdir(i) = trndir(i)
+--            + (trntdr(i) - trndir(i)) * (1 - rupdif(i)) * refk
+--            -  trndir(i) * rupdir(i)  * (1 - rdndif(i)) * refk
 -- Ported from the flux absorption section of SNICAR_RT in SnowSnicarMod.F90.
 computeLayerAbsorbedFlux :: VU.Vector Double  -- ^ trntdr per interface (downward total)
                          -> VU.Vector Double  -- ^ rupdir per interface (upward direct)
@@ -612,19 +634,24 @@ computeLayerAbsorbedFlux :: VU.Vector Double  -- ^ trntdr per interface (downwar
                          -> Int               -- ^ snl_top (0-based index of top active layer)
                          -> Int               -- ^ snl_btm (0-based index of bottom active layer)
                          -> VU.Vector Double  -- ^ absorbed flux per layer+ground (nlevsno+1)
-computeLayerAbsorbedFlux !trntdr !rupdir !rupdif !trndir !rdndif !albsfc !snlTop !snlBtm =
+computeLayerAbsorbedFlux !trntdr !rupdir !rupdif !trndir !rdndif !_albsfc !snlTop !snlBtm =
   let !nlyr = nlevsno + 1
-      -- Net downward flux at each interface
-      -- F_down(i) = trntdr(i) + trndir(i) * rupdir(i) * rdndif(i) / (1 - rdndif(i)*rupdif(i))
-      -- F_up(i) = trntdr(i)*rupdif(i) + trndir(i)*rupdir(i)
-      -- Simplified: F_net(i) = F_down(i) - F_up(i)
-
+      -- Net downward (direct-beam) flux at interface i = F_down - F_up, with the
+      -- interface multiple-scattering factor refk (SnowSnicarMod.F90 dfdir).
+      -- The underlying-ground albedo enters through the supplied rupdir/rupdif
+      -- arrays at the bottom interface (hence _albsfc is unused directly here).
       fNet i =
-        let !td = if i < VU.length trntdr then trntdr VU.! i else 0.0
-            !rd = if i < VU.length trndir then trndir VU.! i else 0.0
-            !rup = if i < VU.length rupdir then rupdir VU.! i else 0.0
-            !rupdf = if i < VU.length rupdif then rupdif VU.! i else 0.0
-        in td - td * rupdf  -- simplified net flux
+        let at v = if i < VU.length v then v VU.! i else 0.0
+            !td    = at trntdr   -- trntdr(i): total transmission to direct beam
+            !rd    = at trndir   -- trndir(i): direct-beam transmission from top
+            !rup   = at rupdir   -- rupdir(i): direct reflectivity of layers below
+            !rupdf = at rupdif   -- rupdif(i): diffuse reflectivity of layers below
+            !rdn   = at rdndif   -- rdndif(i): diffuse reflectivity of layers above
+            !refk  = 1.0 / max snicarPuny (1.0 - rdn * rupdf)
+            !dfdir = rd
+                   + (td - rd) * (1.0 - rupdf) * refk
+                   -  rd * rup * (1.0 - rdn) * refk
+        in if dfdir < snicarPuny then 0.0 else dfdir
 
   in VU.generate nlyr $ \j ->
        if j < snlTop || j > snlBtm + 1

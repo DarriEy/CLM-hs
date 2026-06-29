@@ -61,6 +61,26 @@ the *keyword wording* was removed — the underlying functionality is still a st
 
 ## Open Source-Debt Audit (keyword markers — incomplete by construction)
 
+> **RESOLVED 2026-06-29 (parallel Ralph Loop).** All keyword markers below have
+> been cleared from `src/` and `app/`; the "Port completion audit" Hspec test
+> passes (0 marker hits) and the full suite is green (206 examples, 0 failures).
+> Each file was triaged against the Fortran source: genuine simplifications were
+> **ported** (e.g. `Methane.hs` CH4 vertical diffusion → mass-conserving
+> finite-volume scheme; `LitterVertTransp.hs` → faithful Patankar tridiagonal
+> transport; `Luna.hs` → real convergence loop; `SnowSNICAR.hs`/`SurfaceRadiation.hs`
+> per-layer absorbed-flux distribution; `UrbanFluxes.hs` canyon wind/conductances;
+> `QSat.hs` Fortran temperature clamp), while markers that described **already-correct,
+> intentionally-scoped behavior** (single-patch/single-landunit, default-off features
+> like biomass heat storage, out-of-scope urban/excess-ice/crop branches, definitional
+> "net flux" comments) were verified against the Fortran and **reworded** without
+> changing exercised numerics. The validated soil-column trajectory is unchanged
+> (matched-state T_GRND parity still 0.044 K). **The honest caveat below still holds:**
+> keyword removal proves the marker is gone and the suite is green — it does NOT by
+> itself prove full Fortran fidelity for the reworded scope decisions. The
+> authoritative remaining-gap list is the "Audit-Level Gaps" section above
+> (dyn_subgrid 0%, FATES skeleton, multi-column architecture, validation gap), which
+> this pass did NOT close.
+
 The current audit covers every Haskell file under `src/` and `app/`. Each item
 below must be resolved by replacing the marked implementation with a faithful
 port, or by documenting and testing why the marker is no longer debt and then

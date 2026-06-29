@@ -459,65 +459,85 @@ nitrogenAllocation !fnca !forc_pbot10 !relh10 !co2a10 !o2a10
       !jmaxCoef = jmaxb1_val * dayl_factor * (1.0 - exp (negate (lp_relhExp lp) *
                   max (relh_in - lp_minrelh lp) 0.0 / (1.0 - lp_minrelh lp)))
 
-      -- Simplified: run a fixed number of optimization steps
-      optimLoop !n !nlc !kc !kj !ci !incFlag
-        | n >= 100 = (nlc, kc, kj, ci)
+      -- Daytime+nighttime weighted leaf respiration response (Fortran reuses
+      -- @RespTBernacchi(tleafd10c)*hourpd + RespTBernacchi(tleafn10c)*(24-hourpd)@).
+      !respDayNight = respTBernacchi tleafd10c * hourpd
+                    + respTBernacchi tleafn10c * (24.0 - hourpd)
+
+      -- Iterative nitrogen-allocation optimization.
+      -- Faithful port of LunaMod.F90 NitrogenAllocation:
+      --   do while (PNlcoldi .NE. PNlc .and. jj < 100)
+      -- The search iterates until the light-capture proportion (Nlc/FNCa) stops
+      -- changing between successive steps, capped at 100 iterations (the Fortran
+      -- convergence test is exact equality of the ratio, which holds once a step
+      -- accepts no further increase/decrease of Nlc). On the first step both an
+      -- increase and (when not committed to increasing) a decrease of Nlc are
+      -- tested; once an increase is accepted on step 1 the search commits to
+      -- increasing (increase_flag) and skips the decrease branch thereafter.
+      optimLoop !jj !nlc !kc !kj !ci !increaseFlag
+        | jj >= 100 = (nlc, kc, kj, ci)
         | otherwise =
           let !fc_v = vcmxTKattge tair10 tleafd10c * lunaFc25
               !fj_v = jmxTKattge tair10 tleafd10c * lunaFj25
-              !nuer_v = lunaCv * lunaNUEr25 * (respTBernacchi tleafd10c * hourpd +
-                        respTBernacchi tleafn10c * (24.0 - hourpd))
+              !nuer_v = lunaCv * lunaNUEr25 * respDayNight
               !nue_res = nueCalc o2a10 ci tair10 tleafd10c lp
               !kj2kc = nue_ratio nue_res
 
+              -- KcKjFlag = 0: recompute Kc, Kj, ci at the current Nlc.
               !inv = nitrogenInvestments 0 fnca nlc forc_pbot10 relh10 co2a10 o2a10
                      pari10c parimx10c rb10 hourpd tair10 tleafd10c tleafn10c
                      kj2kc jmaxCoef fc_v fj_v (nue_c nue_res) (nue_j nue_res)
                      nuecref0 nuejref0 nuer_v o3coefjmax jmaxb0_val wc2wjb0_val
                      kc kj ci lp
+              !kc0  = nir_kc inv
+              !kj0  = nir_kj inv
+              !ci0v = nir_ci inv
 
               !npsn = nlc + nir_ncb inv + nir_net inv
               !nstore = fnca - npsn - nir_nresp inv
 
-              -- Try increase
-              (!nlc', !done)
-                | nstore > 0.0 && (incFlag || n == 0) =
+              -- Test the increase of light-capture nitrogen (KcKjFlag = 1).
+              (!nlcInc, !increaseFlag')
+                | nstore > 0.0 && (increaseFlag || jj == 1) =
                   let !nlc2 = min (nlc + chgPerStep) (0.95 * fnca)
                       !inv2 = nitrogenInvestments 1 fnca nlc2 forc_pbot10 relh10 co2a10 o2a10
                               pari10c parimx10c rb10 hourpd tair10 tleafd10c tleafn10c
                               kj2kc jmaxCoef fc_v fj_v (nue_c nue_res) (nue_j nue_res)
                               nuecref0 nuejref0 nuer_v o3coefjmax jmaxb0_val wc2wjb0_val
-                              (nir_kc inv) (nir_kj inv) (nir_ci inv) lp
+                              kc0 kj0 ci0v lp
                       !npsn2 = nlc2 + nir_ncb inv2 + nir_net inv2
-                      !cc2 = (npsn2 - npsn) * lunaNMCp25 * lunaCv *
-                             (respTBernacchi tleafd10c * hourpd + respTBernacchi tleafn10c * (24.0 - hourpd))
+                      !cc2 = (npsn2 - npsn) * lunaNMCp25 * lunaCv * respDayNight
                       !cg2 = nir_psn inv2 - nir_psn inv
                   in if cg2 > cc2 && (npsn2 + nir_nresp inv2 < 0.95 * fnca)
-                     then (nlc2, False)
-                     else (nlc, n > 0)
-                | not incFlag =
-                  let !nlc1 | nstore < 0.0 = max (nlc * 0.8) 0.05
-                            | otherwise    = max (nlc - chgPerStep) 0.05
+                     then (nlc2, if jj == 1 then True else increaseFlag)
+                     else (nlc, increaseFlag)
+                | otherwise = (nlc, increaseFlag)
+
+              -- Test the decrease of light-capture nitrogen (skipped once the
+              -- search has committed to increasing).
+              !nlcNew
+                | not increaseFlag' =
+                  let !nlc1 = max 0.05 (if nstore < 0.0 then nlcInc * 0.8
+                                                        else nlcInc - chgPerStep)
                       !inv1 = nitrogenInvestments 1 fnca nlc1 forc_pbot10 relh10 co2a10 o2a10
                               pari10c parimx10c rb10 hourpd tair10 tleafd10c tleafn10c
                               kj2kc jmaxCoef fc_v fj_v (nue_c nue_res) (nue_j nue_res)
                               nuecref0 nuejref0 nuer_v o3coefjmax jmaxb0_val wc2wjb0_val
-                              (nir_kc inv) (nir_kj inv) (nir_ci inv) lp
+                              kc0 kj0 ci0v lp
                       !npsn1 = nlc1 + nir_ncb inv1 + nir_net inv1
-                      !cc1 = (npsn - npsn1) * lunaNMCp25 * lunaCv *
-                             (respTBernacchi tleafd10c * hourpd + respTBernacchi tleafn10c * (24.0 - hourpd))
+                      !cc1 = (npsn - npsn1) * lunaNMCp25 * lunaCv * respDayNight
                       !cg1 = nir_psn inv - nir_psn inv1
                   in if (cg1 < cc1 && nlc1 > 0.05) || (npsn + nir_nresp inv) > 0.95 * fnca
-                     then (nlc1, False)
-                     else (nlc, True)
-                | otherwise = (nlc, True)
+                     then nlc1
+                     else nlcInc
+                | otherwise = nlcInc
 
-          in if done
-             then (nlc', nir_kc inv, nir_kj inv, nir_ci inv)
-             else optimLoop (n + 1) nlc' (nir_kc inv) (nir_kj inv) (nir_ci inv)
-                            (incFlag || (n == 0 && nlc' > nlc))
+          -- Converged once Nlc/FNCa is unchanged this step (PNlcoldi == PNlc).
+          in if nlc == nlcNew
+             then (nlcNew, kc0, kj0, ci0v)
+             else optimLoop (jj + 1) nlcNew kc0 kj0 ci0v increaseFlag'
 
-      (!nlcFinal, !_kcF, !_kjF, !_ciF) = optimLoop 0 nlc0 0.0 0.0 ci0 False
+      (!nlcFinal, !_kcF, !_kjF, !_ciF) = optimLoop 1 nlc0 0.0 0.0 ci0 False
 
       -- Recompute final allocations
       !fc_fin = vcmxTKattge tair10 tleafd10c * lunaFc25

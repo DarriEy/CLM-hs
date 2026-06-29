@@ -310,12 +310,25 @@ combineSnowAlbedo !alb_bare !alb_snow !frac_sno =
   alb_bare * (1.0 - frac_sno) + alb_snow * frac_sno
 
 --------------------------------------------------------------------------------
--- Full urban albedo (simplified single-landunit)
+-- Full urban albedo (single-landunit)
 --------------------------------------------------------------------------------
 
 -- | Compute urban albedo for a single landunit.
--- Returns absorbed solar fractions and ground albedos.
--- This is a simplified version; the full vectorized version iterates over filters.
+-- Returns absorbed solar fractions (per facet) and the canyon ground albedos.
+--
+-- This computes the full single-landunit urban canyon radiation balance
+-- (Fortran @UrbanAlbedoMod.F90@, subroutine @UrbanAlbedo@): incident direct
+-- beam and diffuse on the canyon floor and sunlit/shaded walls (Masson 2000
+-- geometry, 'incidentDirect' / 'incidentDiffuse'), followed by the
+-- multiple-reflection net-solar solve ('netSolar') for the visible and NIR
+-- bands and the direct/diffuse streams.
+--
+-- Architectural scope: the Fortran routine is vectorized over an urban-landunit
+-- filter and then scatters each per-facet reflectance onto the per-column
+-- ground-albedo arrays (@albgrd@/@albgri@), one urban column per facet
+-- (roof, sunwall, shadewall, pervious road, impervious road). This port runs a
+-- single landunit at a time; the per-column scatter is performed by the driver
+-- from the per-facet results returned here (see note on 'uar_albgrd_vis').
 urbanAlbedo :: UrbanViewFactors
             -> Double  -- ^ coszen
             -> Double  -- ^ canyon_hwr
@@ -368,7 +381,15 @@ urbanAlbedo !vf !coszen !hwr !wtp
         !sabs_roof_dif_n = 1.0 - adi_rn
 
     in UrbanAlbedoResult
-       { uar_albgrd_vis = nsr_sref_improad ns_dir_v  -- placeholder: per-column mapping done at driver level
+       -- The canyon ground albedo is the impervious-road facet reflectance to
+       -- sky (reflected per unit ground per unit incident flux). In the Fortran
+       -- per-column scatter (UrbanAlbedoMod.F90 lines 406-446) each urban column
+       -- takes the reflectance of its facet: roof -> alb_roof, sun/shade wall ->
+       -- sref_sunwall/sref_shadewall, pervious road -> sref_perroad, impervious
+       -- road -> sref_improad. Here we return the impervious-road column value
+       -- (canyon floor) as the representative single-column ground albedo; the
+       -- driver maps the remaining facets from uar_sabs_*/the roof albedos.
+       { uar_albgrd_vis = nsr_sref_improad ns_dir_v
        , uar_albgrd_nir = nsr_sref_improad ns_dir_n
        , uar_albgri_vis = nsr_sref_improad ns_dif_v
        , uar_albgri_nir = nsr_sref_improad ns_dif_n

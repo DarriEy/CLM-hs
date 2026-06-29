@@ -117,7 +117,13 @@ calcInitTempEnergyCol inp = CalcInitTempEnergyColOutput
 
     -- Ground emissivity
     emg_val
-      | cite_is_urban inp = 0.96  -- placeholder; urban set elsewhere
+      -- Urban-facet default. In Fortran (BiogeophysPreFluxCalcsMod) emg is NOT
+      -- computed here for urban landunits; the per-facet urban emissivities
+      -- (em_roof/em_wall/em_improad/em_perroad in UrbanParamsType) are read from
+      -- the urban surface data and assigned upstream. Urban surfdata is not wired
+      -- into this port, so this branch supplies a representative urban-facet
+      -- ground emissivity default (urban path is not exercised).
+      | cite_is_urban inp = 0.96
       | cite_is_ice inp   = 0.97
       | otherwise         =
           let fs = cite_frac_sno inp

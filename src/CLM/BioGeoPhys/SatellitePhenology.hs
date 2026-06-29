@@ -3,7 +3,12 @@
 -- Fortran: src/biogeochem/SatellitePhenologyMod.F90
 --
 -- Pure functions for interpolating monthly vegetation data and
--- adjusting LAI/SAI for snow burial. IO stubs for data reading.
+-- adjusting LAI/SAI for snow burial. The satellite LAI/SAI/height fields
+-- are supplied to this module as pre-loaded monthly arrays (via the
+-- prescribed-phenology inputs); 'readMonthlyVegetation' and
+-- 'readAnnualVegetation' perform the in-scope array-to-patch transformation.
+-- The external NetCDF stream reader that fetches those monthly arrays from
+-- disk lives outside this single-column scope.
 module CLM.BioGeoPhys.SatellitePhenology
   ( -- * Interpolation state
     SatellitePhenologyState(..)

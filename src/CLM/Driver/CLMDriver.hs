@@ -448,8 +448,9 @@ data PhysicsPipeline = PhysicsPipeline
   , ppCNProducts           :: !PhysicsStep
   , ppCNAnnualUpdate       :: !PhysicsStep
   , ppCNBalanceCheck       :: !PhysicsStep
-    -- Phase 9c: Annual dynamic vegetation (CNDV). Fires only on the year
-    -- boundary (gated by tcIsBegCurrYear at the call site); a no-op otherwise.
+    -- Phase 9c: Annual dynamic vegetation (CNDV). Runs every timestep to
+    -- advance the climate accumulators; the establishment/light/mortality
+    -- driver fires only on the year boundary (gated by tcIsBegCurrYear).
   , ppCNDV                 :: !PhysicsStep
     -- Phase 9d: Surface aerosol/biogenic emissions to the atmosphere (dust, VOC).
     -- Diagnostic surface fluxes written to the lnd2atm coupling vectors.

@@ -147,7 +147,7 @@ defaultPipelineConfig = PipelineConfig
 
 -- | Seed the dynamic-vegetation (CNDV) state for a single natural-veg patch
 -- when dynamic vegetation is enabled; otherwise leave clmDGVS empty (which makes
--- the wired cndvStep a no-op). Also installs the per-PFT ecophysiological
+-- the wired cndvStep inactive). Also installs the per-PFT ecophysiological
 -- constants ('DGVEcophysCon', from clm5_params.nc) so the step uses the real
 -- bioclimatic limits; if those files are absent the vectors are empty and
 -- cndvStep falls back to the built-in LPJ table. Cold start begins with a
@@ -660,10 +660,11 @@ avgDiag dd =
 -- is missing here reverts to its cold-start value on read and makes that test
 -- diverge — so the test, not this list, is the oracle for completeness.
 --
--- NOTE: CN /vectorized/ pools (per-layer soil-BGC C/N, per-patch veg C/N) are
--- not yet serialized; the scalar CN pools are. The round-trip test therefore
--- runs in the default (CN-off) pipeline, where the vectorized pools are static.
--- Serializing them is the next increment, alongside reading a Fortran restart.
+-- NOTE: the vertically-resolved CN profile (per-layer soil-BGC C/N, per-patch
+-- veg C/N) is outside the round-trip set; the scalar CN pools ('restartCNScalars'
+-- below) are included. The round-trip test therefore runs in the default (CN-off)
+-- pipeline, where the vectorized pools are static. Extending the set to the
+-- vectorized pools, alongside reading a Fortran restart, remains future work.
 
 -- | Snow-/state-carrying WaterDiagnosticBulk fields that persist across steps.
 -- Listed once so 'writeRestartState' and 'readRestartState' cannot drift apart.
@@ -1249,7 +1250,7 @@ runMixedGridcell
   -> Int       -- ^ forcing step offset
   -> Int       -- ^ number of steps
   -> IO [((Double, Double), (Double, Double), (Double, Double))]
-runMixedGridcell dir wNatveg wLake lakedepth dtime off nsteps = do
+runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
   (st0, forcing, albConst) <- initCLMStateFromDir dir
   chParams  <- readCanopyHydroParamsFromDir dir
   snicarOpt <- readSnicarOptics dir
@@ -1278,7 +1279,7 @@ runMixedGridcell dir wNatveg wLake lakedepth dtime off nsteps = do
           VU.! 0
       soil0    = st0
       lake0    = st0
-        { clmColumn = (clmColumn st0) { lakedepth = lakedepth }
+        { clmColumn = (clmColumn st0) { lakedepth = lakeDepth }
         , clmSnl = 0
         , clmTemp = (clmTemp st0)
             { t_grnd_col = 277.0, t_soisno_col = VU.replicate ntot 277.0 }

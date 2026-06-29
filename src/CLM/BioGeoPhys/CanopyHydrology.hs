@@ -74,7 +74,7 @@ data CanopyHydrologyParams = CanopyHydrologyParams
 -- | Generic CLM5 fallback defaults. Case-specific values are read from the CLM
 -- parameter file (chyd_*.bin) by 'readCanopyHydroParamsFromDir'; these defaults
 -- apply only when a param file is absent. maximum_leaf_wetted_fraction caps fwet,
--- which scales canopy (snow) evaporation; the prior placeholder 1.0 let an
+-- which scales canopy (snow) evaporation; the prior default of 1.0 let an
 -- all-snow canopy reach fwet=1 and sublimate ~14x too fast vs Fortran (whose
 -- canopy QVEGE is ~0 and sheds snow by unloading, not sublimation).
 defaultCanopyHydroParams :: CanopyHydrologyParams

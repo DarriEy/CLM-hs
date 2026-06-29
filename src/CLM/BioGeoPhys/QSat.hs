@@ -89,7 +89,10 @@ data QSatResult = QSatResult
   , qsr_desdT :: !Double  -- ^ d(es)/d(T) [Pa/K]
   } deriving (Show, Eq)
 
--- | Simplified result without derivatives.
+-- | Derivative-free result (qs and es only).  The full QSat with the
+-- temperature derivatives (esdT, qsdT) is provided by 'qsat' / 'QSatResult';
+-- this variant corresponds to calling Fortran QSat() without the optional
+-- @qsdT@ / @esdT@ arguments.
 data QSatSimple = QSatSimple
   { qss_qs :: !Double  -- ^ Saturation specific humidity [kg/kg]
   , qss_es :: !Double  -- ^ Saturation vapor pressure [Pa]
@@ -122,7 +125,7 @@ qsat :: Double  -- ^ Temperature [K]
      -> Double  -- ^ Pressure [Pa]
      -> QSatResult
 qsat t p =
-  let td = t - tfrz
+  let td = min 100.0 (max (-75.0) (t - tfrz))  -- clamp to fit range (Fortran QSat)
       (es, desdT)
         | td >= 0.0 = (100.0 * poly8 td qsatA, 100.0 * poly8 td qsatB)
         | otherwise  = (100.0 * poly8 td qsatC, 100.0 * poly8 td qsatD)
@@ -139,7 +142,7 @@ qsatNoDerivs :: Double  -- ^ Temperature [K]
              -> Double  -- ^ Pressure [Pa]
              -> QSatSimple
 qsatNoDerivs t p =
-  let td = t - tfrz
+  let td = min 100.0 (max (-75.0) (t - tfrz))  -- clamp to fit range (Fortran QSat)
       es | td >= 0.0 = 100.0 * poly8 td qsatA
          | otherwise  = 100.0 * poly8 td qsatC
       vp1 = min (es / (p - 0.378 * es)) 1.0
