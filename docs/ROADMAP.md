@@ -157,9 +157,17 @@ or needs writing (glacier).
     machinery: `InitSubgrid` (addLandunit/Column/Patch + `clmPtrsCompdown` down-pointers
     + `clmPtrsCheck`), `Filters` (soil/lake/urban/snow masks), and `SubgridAverage`
     (p2c/c2l/c2g), then route the gridcell aggregation in `runMixedGridcell` through the
-    real `c2g` instead of the ad-hoc weight. That instantiation (fiddly preallocation,
-    no existing template — the machinery has zero tests today) is the recommended next
-    focused step; the per-physics array rewrite is genuinely Phase-5-scale.
+    real `c2g` instead of the ad-hoc weight.
+    **DONE (2026-06-29).** `runMixedGridcell` routes its aggregation through the real
+    `c2g`, and the construction is now the reusable, data-driven
+    `InitSubgrid.buildSingleColumnGridcell [(landunit itype, area weight)]` primitive
+    (one column+patch per landunit, N landunits — generalizing the hand-inlined
+    soil+lake cell). The machinery is now under test: a 3-landunit (soil+lake+ice)
+    gridcell exercises clmPtrsCompdown down-pointers, clmPtrsCheck (valid + broken),
+    the full SubgridAverage operator set (p2c/c2g/l2g/p2g/c2g2d), L2G scale-type
+    selection, and `Filters.buildFilters` classification (11 tests; suite 217/0).
+    The remaining per-physics CLMState array rewrite (running each column's physics off
+    these pointers) is genuinely Phase-5-scale.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake

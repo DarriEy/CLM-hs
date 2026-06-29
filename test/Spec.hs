@@ -10,7 +10,7 @@ import System.FilePath ((</>), takeExtension)
 import CLM.Constants.PhysicalConstants
 import CLM.Constants.ControlFlags (defaultDriverConfig)
 import CLM.Infrastructure.Tridiagonal (tridiagonalSolve)
-import CLM.Infrastructure.Filters (maskToIndices)
+import CLM.Infrastructure.Filters (maskToIndices, buildFilters, FilterSet(..))
 import CLM.Driver.CLMDriver
   ( CLMState(..), TimestepContext(..), defaultCLMState
   , defaultTimestepContext, clmDrvPatch2Col )
@@ -1623,6 +1623,87 @@ main = hspec $ do
       VU.length c `shouldBe` 2
       abs (c VU.! 0 - 5.0) `shouldSatisfy` (< 1.0e-9)
       abs (c VU.! 1 - 7.0) `shouldSatisfy` (< 1.0e-9)
+
+  describe "Subgrid machinery (multi-landunit, full operator coverage)" $ do
+    -- A 3-landunit gridcell built via the reusable buildSingleColumnGridcell
+    -- primitive: soil (area 0.5) + lake (0.3) + glacier/ice (0.2), one column
+    -- and one patch each. Exercises the full SubgridAverage operator set
+    -- (c2g/l2g/p2g/p2c, scale types, 2D) plus the InitSubgrid down-pointers and
+    -- validation that the multi-column architecture is built on. Proves the
+    -- machinery generalizes past the hand-inlined 2-landunit soil+lake cell.
+    let lus = [(IS.istsoil, 0.5), (IS.istdlak, 0.3), (IS.istice, 0.2)]
+        (b, grc, lun, col, pch) = IS.buildSingleColumnGridcell lus
+        approx eps x y = abs (x - y) < eps
+        near = approx 1.0e-9
+
+    it "produces a valid hierarchy (clmPtrsCheck)" $
+      IS.clmPtrsCheck b grc lun col pch `shouldBe` Nothing
+
+    it "fills correct down-pointers" $ do
+      IS.colPatchi col   `shouldBe` VU.fromList [1, 2, 3]
+      IS.colPatchf col   `shouldBe` VU.fromList [1, 2, 3]
+      IS.colNpatches col `shouldBe` VU.fromList [1, 1, 1]
+      IS.lunColi lun     `shouldBe` VU.fromList [1, 2, 3]
+      IS.lunColf lun     `shouldBe` VU.fromList [1, 2, 3]
+      IS.lunNcolumns lun `shouldBe` VU.fromList [1, 1, 1]
+      IS.lunPatchi lun   `shouldBe` VU.fromList [1, 2, 3]
+      -- gridcell -> landunit index map keyed by landunit type
+      let gli = IS.grcLandunitIndices grc
+      gli VU.! (IS.istsoil - 1) `shouldBe` 1
+      gli VU.! (IS.istdlak - 1) `shouldBe` 2
+      gli VU.! (IS.istice  - 1) `shouldBe` 3
+
+    it "detects a broken hierarchy (clmPtrsCheck negative)" $ do
+      let colBad = col { IS.colGridcell = IS.colGridcell col VU.// [(0, 5)] }
+      IS.clmPtrsCheck b grc lun colBad pch `shouldSatisfy` (/= Nothing)
+
+    it "c2g unity = area-weighted column mean (3 columns)" $ do
+      let g = SA.c2g1d (VU.fromList [10, 20, 30]) b SA.C2LUnity SA.L2GUnity col lun
+      VU.length g `shouldBe` 1
+      g VU.! 0 `shouldSatisfy` near (0.5 * 10 + 0.3 * 20 + 0.2 * 30)
+
+    it "c2g conserves a constant field" $ do
+      let g = SA.c2g1d (VU.fromList [273.15, 273.15, 273.15]) b SA.C2LUnity SA.L2GUnity col lun
+      g VU.! 0 `shouldSatisfy` near 273.15
+
+    it "l2g unity = area-weighted landunit mean" $ do
+      let g = SA.l2g1d (VU.fromList [1, 2, 3]) b SA.L2GUnity lun
+      g VU.! 0 `shouldSatisfy` near (0.5 * 1 + 0.3 * 2 + 0.2 * 3)
+
+    it "p2g unity = area-weighted patch mean" $ do
+      let g = SA.p2g1d (VU.fromList [4, 5, 6]) b SA.ScaleUnity SA.C2LUnity SA.L2GUnity pch col lun
+      g VU.! 0 `shouldSatisfy` near (0.5 * 4 + 0.3 * 5 + 0.2 * 6)
+
+    it "p2c is the identity for one patch per column" $ do
+      let c = SA.p2c1d (VU.fromList [7, 8, 9]) b SA.ScaleUnity pch
+      c `shouldBe` VU.fromList [7, 8, 9]
+
+    it "L2G scale types select the right landunits" $ do
+      let carr = VU.fromList [10, 20, 30]   -- soil, lake, ice
+          sel s = SA.c2g1d carr b SA.C2LUnity s col lun VU.! 0
+      sel SA.L2GNatveg      `shouldSatisfy` near 10                            -- soil only
+      sel SA.L2GLake        `shouldSatisfy` near 20                            -- lake only
+      sel SA.L2GIce         `shouldSatisfy` near 30                            -- ice only
+      sel SA.L2GVegPlusLake `shouldSatisfy` near ((0.5 * 10 + 0.3 * 20) / 0.8) -- soil+lake
+
+    it "c2g2d aggregates each level independently" $ do
+      -- layout: [col0lev0,col0lev1, col1lev0,col1lev1, col2lev0,col2lev1]
+      let carr = VU.fromList [10, 100, 20, 200, 30, 300]
+          g = SA.c2g2d carr b 2 SA.C2LUnity SA.L2GUnity col lun
+      VU.length g `shouldBe` 2
+      g VU.! 0 `shouldSatisfy` near (0.5 * 10  + 0.3 * 20  + 0.2 * 30)
+      g VU.! 1 `shouldSatisfy` near (0.5 * 100 + 0.3 * 200 + 0.2 * 300)
+
+    it "buildFilters classifies columns by landunit type" $ do
+      let fs = buildFilters 3 3
+                 (VU.fromList [1, 1, 1])                            -- col_itype (unused by classifier)
+                 (VU.fromList [1, 2, 3])                            -- col -> landunit (1-based)
+                 (VU.fromList [IS.istsoil, IS.istdlak, IS.istice])  -- lun itype
+                 (VU.fromList [1, 2, 3])                            -- patch -> column
+      maskSoil fs   `shouldBe` VU.fromList [True,  False, False]
+      maskLake fs   `shouldBe` VU.fromList [False, True,  False]
+      maskUrban fs  `shouldBe` VU.fromList [False, False, False]
+      maskNoLake fs `shouldBe` VU.fromList [True,  False, True]
 
   describe "CNDV step (dynamic vegetation accumulators + annual driver)" $ do
     -- Faithful accumulator cadence + annual Light->Establishment->Mortality.

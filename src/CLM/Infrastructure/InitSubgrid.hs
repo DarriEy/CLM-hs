@@ -25,6 +25,8 @@ module CLM.Infrastructure.InitSubgrid
     -- * Pointer computation and validation
   , clmPtrsCompdown
   , clmPtrsCheck
+    -- * High-level construction
+  , buildSingleColumnGridcell
     -- * Landunit type constants
   , istsoil, istcrop, istocn, istice, istdlak, istwet
   , isturb_min, isturb_tbd, isturb_hd, isturb_md, isturb_max
@@ -393,6 +395,53 @@ clmPtrsCompdown bounds grc0 lun0 col0 pch = (grc3, lun3, col2)
           g = lunGridcell lun2 ! (l - 1)
       in  grcAcc { grcLandunitIndices =
                       setLandunitIndex (grcLandunitIndices grcAcc) ltype g l }
+
+-- ============================================================================
+-- High-level construction
+-- ============================================================================
+
+-- | Build a 1-gridcell subgrid with exactly one column (and one patch) per
+-- landunit, from a list of @(landunit itype, gridcell area weight)@. Each
+-- column is the whole of its landunit (@wtlunit = 1@) and each patch is the
+-- whole of its column (@wtcol = 1@), so the down-propagated weights are:
+-- @colWtgcell = pchWtgcell = the landunit area weight@. Down-pointers are
+-- filled via 'clmPtrsCompdown'.
+--
+-- This generalizes the previously hand-inlined soil+lake construction in the
+-- mixed-gridcell driver to an arbitrary set of landunits, and is the reusable
+-- primitive the multi-landunit gridcell loop builds on. The per-physics
+-- CLMState array-vectorization (running each column's physics off these
+-- pointers) remains the larger Option-B lift.
+--
+-- Returns @(bounds, gridcell, landunit, column, patch)@ ready for
+-- 'CLM.Infrastructure.SubgridAverage' (c2g/l2g/p2g/p2c).
+buildSingleColumnGridcell
+  :: [(Int, Double)]  -- ^ @[(landunit itype, gridcell area weight)]@, one entry per landunit
+  -> (BoundsType, GridcellData, LandunitData, SubgridColumnData, SubgridPatchData)
+buildSingleColumnGridcell lus =
+  let n      = length lus
+      bounds = BoundsType 1 1 1 n 1 n 1 n
+      ws     = map snd lus
+      -- One landunit per entry (landunit i+1 at gridcell 1).
+      lunFull = foldl (\lun (i, (lt, wt)) -> fst (addLandunit lun i 1 lt wt))
+                      (defaultLandunitData n) (zip [0 ..] lus)
+      -- Column i (1-based i+1) belongs to landunit i+1; whole-of-landunit.
+      colFull = foldl (\col i -> fst (addColumn col lunFull i (i + 1) 1 1.0 False))
+                      (defaultSubgridColumnData n) [0 .. n - 1]
+      -- Patch i belongs to column i+1; whole-of-column. ptype is the natural
+      -- PFT for veg landunits, 0 otherwise (does not affect averaging).
+      pchFull = foldl (\pch i ->
+                         let lt    = fst (lus !! i)
+                             ptype = if lt == istsoil || lt == istcrop then 1 else 0
+                         in  fst (addPatch pch colFull lunFull i (i + 1) ptype 1.0 0))
+                      (defaultSubgridPatchData n) [0 .. n - 1]
+      (grcF, lunF, colF0) = clmPtrsCompdown bounds (defaultGridcellData 1) lunFull colFull pchFull
+      -- clmPtrsCompdown fills down-pointers but not the down-propagated weights.
+      colF = colF0 { colWtgcell = VU.fromList ws }
+      pchF = pchFull { pchWtcol   = VU.replicate n 1.0
+                     , pchWtlunit = VU.replicate n 1.0
+                     , pchWtgcell = VU.fromList ws }
+  in  (bounds, grcF, lunF, colF, pchF)
 
 -- ============================================================================
 -- Pointer validation (pure)
