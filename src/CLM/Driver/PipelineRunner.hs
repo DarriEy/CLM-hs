@@ -28,6 +28,7 @@ module CLM.Driver.PipelineRunner
   , runMixedGridcell
   , runGridcellColumns
   , ColumnKind(..)
+  , GridDiag(..)
     -- * CLM forward model for calibration (extracts QRUNOFF)
   , runCLMForQrunoff
     -- * Re-exports for pipeline users
@@ -1242,11 +1243,25 @@ readSurfdataLandunits path = do
 -- lake surface-flux + temperature path; 'GlacierCol' runs the soil-thermal
 -- pipeline plus the glacier surface-mass-balance step ('glacierSMBStep'), on a
 -- column marked as the land-ice ('istice') landunit so the SMB gate fires
--- (snowpack capped at 10 m SWE, excess routed to ice). The glacier path is
+-- (snowpack capped at 10 m SWE, excess routed to ice); 'UrbanCol' runs the
+-- pipeline on a column marked as an urban ('isturb_md') landunit so the gated
+-- 'urbanFluxesStep' (canyon energy balance) fires. The glacier/urban paths are
 -- sanity/conservation-validated only — no non-soil/non-lake gridcell Fortran
 -- reference exists here.
-data ColumnKind = SoilCol | LakeCol | GlacierCol
+data ColumnKind = SoilCol | LakeCol | GlacierCol | UrbanCol
   deriving (Eq, Show)
+
+-- | Gridcell / per-column diagnostic bundle aggregated by the multi-landunit
+-- driver. Each field is averaged column -> gridcell through the real
+-- 'SubgridAverage.c2g1d' (area weights), so a 'GridDiag' is a faithful
+-- area-weighted gridcell mean of its columns.
+data GridDiag = GridDiag
+  { gd_t_grnd  :: !Double  -- ^ Ground temperature [K]
+  , gd_h2osno  :: !Double  -- ^ Snow water equivalent [kg/m^2]
+  , gd_eflx_sh :: !Double  -- ^ Sensible heat flux [W/m^2]
+  , gd_eflx_lh :: !Double  -- ^ Latent heat flux [W/m^2]
+  , gd_fsa     :: !Double  -- ^ Absorbed solar radiation [W/m^2]
+  } deriving (Eq, Show)
 
 -- | General N-column gridcell driver (PHASE4_SCOPE Option A, column-loop).
 -- Each spec is @(landunit itype, gridcell area weight, ColumnKind)@. The driver
@@ -1266,7 +1281,7 @@ runGridcellColumns
   -> Double                      -- ^ dtime [s]
   -> Int                         -- ^ forcing step offset
   -> Int                         -- ^ number of steps
-  -> IO [((Double, Double), [(Double, Double)])]
+  -> IO [(GridDiag, [GridDiag])]
 runGridcellColumns dir specs lakeDepth dtime off nsteps = do
   (st0, forcing, albConst) <- initCLMStateFromDir dir
   chParams  <- readCanopyHydroParamsFromDir dir
@@ -1300,6 +1315,10 @@ runGridcellColumns dir specs lakeDepth dtime off nsteps = do
       -- (istice) landunit so glacierSMBStep's gate fires in stepCol.
       initCol GlacierCol =
         st0 { clmLandunit = (clmLandunit st0) { lun_itype = VU.singleton IS.istice } }
+      -- urban column: soil cold-start state, marked as an urban (isturb_md)
+      -- landunit so the gated urbanFluxesStep fires inside the pipeline.
+      initCol UrbanCol =
+        st0 { clmLandunit = (clmLandunit st0) { lun_itype = VU.singleton IS.isturb_md } }
       -- advance one column one step, dispatching by kind
       stepCol ctx (SoilCol, drvSt, st) = clmDrv cfg pipeline ctx drvSt st
       stepCol ctx (LakeCol, drvSt, st) =
@@ -1307,16 +1326,32 @@ runGridcellColumns dir specs lakeDepth dtime off nsteps = do
       stepCol ctx (GlacierCol, drvSt, st) =
         let (drvSt', st') = clmDrv cfg pipeline ctx drvSt st
         in  (drvSt', glacierSMBStep cfg ctx st')
-      diag st = (t_grnd_col (clmTemp st), h2osno_col (clmWaterState st))
+      stepCol ctx (UrbanCol, drvSt, st) = clmDrv cfg pipeline ctx drvSt st
+      diag st =
+        let ef = clmEnergyFlux st
+        in  GridDiag
+              { gd_t_grnd  = t_grnd_col (clmTemp st)
+              , gd_h2osno  = h2osno_col (clmWaterState st)
+              , gd_eflx_sh = eflx_sh_tot_patch ef
+              , gd_eflx_lh = eflx_lh_tot_patch ef
+              , gd_fsa     = fsa_patch ef
+              }
+      -- aggregate one diagnostic field column -> gridcell via the real c2g
+      aggDiag sel ds = c2gN (map sel ds)
       go _ step acc | step > nsteps = return (reverse acc)
       go cols step acc = do
         let ctx = buildTimestepContext forcing (off + step) dtime
             advanced = [ (k, d', s')
                        | (k, d, s) <- cols, let (d', s') = stepCol ctx (k, d, s) ]
             colDiags = [ diag s | (_, _, s) <- advanced ]
-            gTG  = c2gN [ tg | (tg, _) <- colDiags ]
-            gSno = c2gN [ sn | (_, sn) <- colDiags ]
-        go advanced (step + 1) (((gTG, gSno), colDiags) : acc)
+            gridDiag = GridDiag
+              { gd_t_grnd  = aggDiag gd_t_grnd  colDiags
+              , gd_h2osno  = aggDiag gd_h2osno  colDiags
+              , gd_eflx_sh = aggDiag gd_eflx_sh colDiags
+              , gd_eflx_lh = aggDiag gd_eflx_lh colDiags
+              , gd_fsa     = aggDiag gd_fsa     colDiags
+              }
+        go advanced (step + 1) ((gridDiag, colDiags) : acc)
       cols0 = [ (k, defaultDriverState, initCol k) | k <- kinds ]
   go cols0 1 []
 
@@ -1339,7 +1374,8 @@ runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
            lakeDepth dtime off nsteps
   return (map toTriple res)
   where
-    toTriple (g, [soil, lake]) = (g, soil, lake)
+    pr d = (gd_t_grnd d, gd_h2osno d)
+    toTriple (g, [soil, lake]) = (pr g, pr soil, pr lake)
     toTriple _ = error "runMixedGridcell: expected exactly soil + lake columns"
 
 runPipeline :: PipelineConfig -> IO [DailyDiag]
