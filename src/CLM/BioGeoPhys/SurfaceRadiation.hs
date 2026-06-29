@@ -206,7 +206,12 @@ canopySunShadeFracs inp =
        }
 
 -- | Compute surface radiation for a single non-urban patch.
--- Simplified single-patch version of the full loop in @surface_radiation!@.
+--
+-- Scope note: this port operates on one (column, patch) pair at a time. The
+-- Fortran @SurfaceRadiation@ wraps the identical per-patch physics in a
+-- @num_nourbanp@ filter loop (and an inner waveband loop); the driver supplies
+-- that outer iteration here, so this function reproduces the body of that loop
+-- faithfully for a single patch rather than re-implementing the loop itself.
 --
 -- Ported from @SurfaceRadiation@ in @SurfaceRadiationMod.F90@.
 surfaceRadiationPatch :: SurfRadConfig
@@ -261,9 +266,69 @@ surfaceRadiationPatch cfg colInp pInp =
            + (srp_albi pInp VU.! 1) * (srp_forc_solai pInp VU.! 1)
       fsr  = rvis + rnir
 
-      -- Layer-resolved absorbed flux (simplified: all in top soil)
-      sabg_lyr = VU.generate nlyr $ \j ->
-        if j == nlevsno then sabgF else 0.0
+      -- Layer-resolved absorbed flux (sabg_lyr): faithful port of the SNICAR
+      -- per-layer distribution in @SurfaceRadiation@ (SurfaceRadiationMod.F90,
+      -- the "compute absorbed flux in each snow layer and top soil layer" loop).
+      -- Port index j maps to Fortran layer i = j - nlevsno + 1, so j == nlevsno
+      -- is the top soil layer (Fortran i = 1) and j < nlevsno are snow layers.
+      --
+      -- NOTE: srr_sabg_lyr is produced here for fidelity/completeness only. The
+      -- validated FSA/T_GRND path consumes srr_sabg, srr_sabv and srr_fsa, and
+      -- the driver builds its own (top-layer-lumped) sabg_lyr; it also passes
+      -- zero SNICAR flux factors into this function. Hence this block does not
+      -- affect any exercised numerics.
+      trdVec = VU.generate nband $ \ib ->
+        (srp_forc_solad pInp VU.! ib) * (srp_ftdd pInp VU.! ib)
+      triVec = VU.generate nband $ \ib ->
+        (srp_forc_solad pInp VU.! ib) * (srp_ftid pInp VU.! ib)
+        + (srp_forc_solai pInp VU.! ib) * (srp_ftii pInp VU.! ib)
+      trd1 = trdVec VU.! 0
+      trd2 = trdVec VU.! 1
+      tri1 = triVec VU.! 0
+      tri2 = triVec VU.! 1
+
+      -- Build a layer vector from Fortran-indexed (layer, value) assignments;
+      -- every unlisted layer is zero (matches the Fortran "= 0" pre-fills).
+      fromFortran assigns = VU.generate nlyr $ \j ->
+        let i = j - nlevsno + 1
+        in foldr (\(fi, v) acc -> if fi == i then v else acc) 0.0 assigns
+
+      snl = src_snl colInp
+      -- CASE 2 base: absorbed per layer from the SNICAR flux factors.
+      baseLyr = VU.generate nlyr $ \j ->
+        (src_flx_absdv colInp VU.! j) * trd1 + (src_flx_absdn colInp VU.! j) * trd2
+        + (src_flx_absiv colInp VU.! j) * tri1 + (src_flx_absin colInp VU.! j) * tri2
+      -- Sum over active snow layers (Fortran i >= snl+1, i.e. port j >= snl+nlevsno).
+      sabgSnlSum =
+        let lo = max 0 (snl + nlevsno)
+        in VU.sum (VU.slice lo (nlyr - lo) baseLyr)
+
+      sabg_lyr
+        -- CASE 1: no snow layers -- all energy in the top soil layer.
+        | snl == 0  = fromFortran [(1, sabgF)]
+        -- CASE 2: snow layers present.
+        | otherwise =
+            let -- Error redistribution when the snow-layer count changed since
+                -- the last radiation step (Fortran |sabg_snl_sum - sabg_snow| > 1e-5).
+                lyrErr
+                  | abs (sabgSnlSum - sabgSnowFin) > 1.0e-5 =
+                      case snl of
+                        (-1) -> fromFortran [ (0, sabgSnowFin * 0.6)
+                                            , (1, sabgSnowFin * 0.4) ]
+                        _    -> fromFortran [ (snl + 1, sabgSnowFin * 0.75)
+                                            , (snl + 2, sabgSnowFin * 0.25) ]
+                  | otherwise = baseLyr
+                -- Shallow-snow lumping (no subgrid fluxes or lake; depth < 0.10 m)
+                -- to prevent unrealistic single-timestep soil warming.
+                shallow = (not (srf_use_subgrid_fluxes cfg)
+                            || srp_lunType pInp == istdlak)
+                          && src_snow_depth colInp < 0.10
+            in if shallow
+                 then case snl of
+                        (-1) -> fromFortran [(0, sabgF)]
+                        _    -> fromFortran [ (snl + 1, sabgF * 0.75)
+                                            , (snl + 2, sabgF * 0.25) ]
+                 else lyrErr
 
       -- VIS diagnostics
       fsds_vis_d = srp_forc_solad pInp VU.! 0
