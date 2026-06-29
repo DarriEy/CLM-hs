@@ -51,6 +51,9 @@ module CLM.Driver.Vectorized
   , soilFluxesStepV
   , baregroundFluxesStepV
   , soilTemperatureFullStepV
+  , snowLayerCombineStepV
+  , snowLayerDivideStepV
+  , snowAgingStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -85,9 +88,10 @@ import CLM.BioGeoPhys.SnowHydrology
 -- import cycle: PhysicsAdapters does not import this module.
 import CLM.Driver.PhysicsAdapters
   ( snowCompactionStep, soilHydrologyStep, soilFluxesStep, baregroundFluxesStep
-  , soilTemperatureFullStep )
+  , soilTemperatureFullStep, snowLayerCombineStep, snowLayerDivideStep, snowAgingStep )
 import CLM.BioGeoPhys.SoilHydrology
   ( waterTable, WaterTableResult(..), defaultSoilHydroParams )
+import CLM.BioGeoPhys.SnowSNICAR (SnicarOptics)
 import CLM.BioGeoPhys.SurfaceHumidity
   ( surfaceHumidity, SurfaceHumidityInput(..), SurfaceHumidityResult(..) )
 
@@ -246,6 +250,8 @@ data CLMStateV = CLMStateV
   , vwatsat_g      :: !(VU.Vector Double)  -- ^ watsat resolved, stride nlevgrnd (read)
   , vbsw_g         :: !(VU.Vector Double)  -- ^ bsw    resolved, stride nlevgrnd (read)
   , vsucsat_g      :: !(VU.Vector Double)  -- ^ sucsat resolved, stride nlevgrnd (read)
+    -- snow aging --------------------------------------------------------------
+  , vsnw_rds_top   :: !(VU.Vector Double)  -- ^ wdiag_snw_rds_top_col bulk top grain radius [um] (read+write)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -350,6 +356,7 @@ gather sts = CLMStateV
   , vwatsat_g     = VU.concat [ padTo nlevgrnd (rslv (sstate_watsat_col (clmSoilState s)) (watsat (clmColumn s))) | s <- sts ]
   , vbsw_g        = VU.concat [ padTo nlevgrnd (rslv (sstate_bsw_col    (clmSoilState s)) (bsw    (clmColumn s))) | s <- sts ]
   , vsucsat_g     = VU.concat [ padTo nlevgrnd (rslv (sstate_sucsat_col (clmSoilState s)) (sucsat (clmColumn s))) | s <- sts ]
+  , vsnw_rds_top  = VU.fromList [ scal0 (wdiag_snw_rds_top_col (clmWaterDiagBulk s)) | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -442,7 +449,10 @@ scatter bases v =
              , wdiag_qg_snow_col     = VU.singleton (vqg_snow   v VU.! i)
              , wdiag_qg_soil_col     = VU.singleton (vqg_soil   v VU.! i)
              , wdiag_qg_h2osfc_col   = VU.singleton (vqg_h2osfc v VU.! i)
-             , wdiag_dqgdT_col       = VU.singleton (vdqgdT     v VU.! i) }
+             , wdiag_dqgdT_col       = VU.singleton (vdqgdT     v VU.! i)
+             , wdiag_frac_sno_col     = VU.singleton (vfrac_sno     v VU.! i)
+             , wdiag_frac_sno_eff_col = VU.singleton (vfrac_sno_eff v VU.! i)
+             , wdiag_snw_rds_top_col  = VU.singleton (vsnw_rds_top  v VU.! i) }
          , clmSoilState = (clmSoilState s)
              { sstate_soilbeta_col = VU.singleton (vsoilbeta v VU.! i) }
          , clmCanopyState = (clmCanopyState s)
@@ -1086,3 +1096,104 @@ soilTemperatureFullStepV cfg ctx v =
        , vp_eflx_gnet  = VU.concat   [ eflx_gnet_patch_vec (clmEnergyFlux r) | r <- results ]
        , vqflx_snomelt = VU.fromList [ clmQflxSnomelt r | r <- results ]
        }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.snowLayerCombineStep'. STRUCTURAL
+-- (can reduce @snl@); per-column sequential top-packing, so reuse the scalar
+-- adapter per column and re-flatten snl + snow geometry/state. Bit-identical.
+snowLayerCombineStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+snowLayerCombineStepV cfg ctx v =
+  let nlev   = vNlev v
+      nlevZi = nlev + 1
+      runCol c =
+        let st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = VU.slice (c * nlev)   nlev   (vcolDz v)
+                  , colZ  = VU.slice (c * nlev)   nlev   (vcolZ  v)
+                  , colZi = VU.slice (c * nlevZi) nlevZi (vcolZi v) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = VU.slice (c * nlev) nlev (vh2osoi_ice v)
+                  , h2osoi_liq_col = VU.slice (c * nlev) nlev (vh2osoi_liq v)
+                  , h2osno_col     = vh2osno v VU.! c }
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_soisno_col = VU.slice (c * nlev) nlev (vt_soisno v) }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col     = VU.singleton (vfrac_sno     v VU.! c)
+                  , wdiag_frac_sno_eff_col = VU.singleton (vfrac_sno_eff v VU.! c)
+                  , wdiag_snow_depth_col   = VU.singleton (vsnow_depth   v VU.! c) }
+              }
+        in snowLayerCombineStep cfg ctx st0
+      results  = map runCol [0 .. vNumCols v - 1]
+      scal0' u = if VU.null u then 0.0 else u VU.! 0
+  in v { vsnl          = VU.fromList [ clmSnl r                            | r <- results ]
+       , vcolDz        = VU.concat   [ colDz (clmColumn r)                 | r <- results ]
+       , vcolZ         = VU.concat   [ colZ  (clmColumn r)                 | r <- results ]
+       , vcolZi        = VU.concat   [ colZi (clmColumn r)                 | r <- results ]
+       , vt_soisno     = VU.concat   [ t_soisno_col   (clmTemp r)          | r <- results ]
+       , vh2osoi_liq   = VU.concat   [ h2osoi_liq_col (clmWaterState r)     | r <- results ]
+       , vh2osoi_ice   = VU.concat   [ h2osoi_ice_col (clmWaterState r)     | r <- results ]
+       , vh2osno       = VU.fromList [ h2osno_col (clmWaterState r)         | r <- results ]
+       , vsnow_depth   = VU.fromList [ scal0' (wdiag_snow_depth_col   (clmWaterDiagBulk r)) | r <- results ]
+       , vfrac_sno     = VU.fromList [ scal0' (wdiag_frac_sno_col     (clmWaterDiagBulk r)) | r <- results ]
+       , vfrac_sno_eff = VU.fromList [ scal0' (wdiag_frac_sno_eff_col (clmWaterDiagBulk r)) | r <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.snowLayerDivideStep'. STRUCTURAL
+-- (can increase @snl@ by splitting thick layers); per-column, reuse the scalar
+-- adapter per column and re-flatten snl + snow geometry/state. Bit-identical.
+snowLayerDivideStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+snowLayerDivideStepV cfg ctx v =
+  let nlev   = vNlev v
+      nlevZi = nlev + 1
+      runCol c =
+        let st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = VU.slice (c * nlev)   nlev   (vcolDz v)
+                  , colZ  = VU.slice (c * nlev)   nlev   (vcolZ  v)
+                  , colZi = VU.slice (c * nlevZi) nlevZi (vcolZi v) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = VU.slice (c * nlev) nlev (vh2osoi_ice v)
+                  , h2osoi_liq_col = VU.slice (c * nlev) nlev (vh2osoi_liq v) }
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_soisno_col = VU.slice (c * nlev) nlev (vt_soisno v) }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col = VU.singleton (vfrac_sno v VU.! c) }
+              }
+        in snowLayerDivideStep cfg ctx st0
+      results = map runCol [0 .. vNumCols v - 1]
+  in v { vsnl        = VU.fromList [ clmSnl r                        | r <- results ]
+       , vcolDz      = VU.concat  [ colDz (clmColumn r)             | r <- results ]
+       , vcolZ       = VU.concat  [ colZ  (clmColumn r)             | r <- results ]
+       , vcolZi      = VU.concat  [ colZi (clmColumn r)             | r <- results ]
+       , vt_soisno   = VU.concat  [ t_soisno_col (clmTemp r)        | r <- results ]
+       , vh2osoi_liq = VU.concat  [ h2osoi_liq_col (clmWaterState r) | r <- results ]
+       , vh2osoi_ice = VU.concat  [ h2osoi_ice_col (clmWaterState r) | r <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.snowAgingStep' (grain metamorphism).
+-- Takes the same 'SnicarOptics' arg as the scalar step; reuses it per column,
+-- re-flattening the one write field (bulk top-layer grain radius). Passthrough
+-- when aging tables are absent. Bit-identical; snl/layer structure unchanged.
+snowAgingStepV :: SnicarOptics -> CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+snowAgingStepV snicarOpt cfg ctx v =
+  let nlev = vNlev v
+      runCol c =
+        let st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_soisno_col = VU.slice (c * nlev) nlev (vt_soisno v) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = VU.slice (c * nlev) nlev (vh2osoi_ice v)
+                  , h2osoi_liq_col = VU.slice (c * nlev) nlev (vh2osoi_liq v)
+                  , h2osno_col     = vh2osno v VU.! c }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col    = VU.singleton (vfrac_sno   v VU.! c)
+                  , wdiag_snow_depth_col  = VU.singleton (vsnow_depth v VU.! c)
+                  , wdiag_snw_rds_top_col = VU.singleton (vsnw_rds_top v VU.! c) }
+              }
+        in snowAgingStep snicarOpt cfg ctx st0
+      results  = map runCol [0 .. vNumCols v - 1]
+      scal0' u = if VU.null u then 0.0 else u VU.! 0
+  in v { vsnw_rds_top = VU.fromList
+           [ scal0' (wdiag_snw_rds_top_col (clmWaterDiagBulk r)) | r <- results ] }
