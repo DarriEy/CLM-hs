@@ -211,7 +211,7 @@ or needs writing (glacier).
     **CSR layout validated end-to-end with a real patch adapter (2026-06-29):**
     `soilFluxesStepV` migrated — its ~25 fields incl. the ragged `*_patch_vec` energy/
     water fluxes store flat via the CSR helpers; bit-identical oracle over 3 columns.
-    **13 of ~37 adapters vectorized; suite 236/0.** Remaining patch adapters
+    **14 of ~37 adapters vectorized; suite 237/0 (incl. soilTemperature, baregroundFluxes, soilFluxes on the CSR patch layout). Remaining: canopyFluxesStep (594 lines) + column-only snowAging/snowLayerCombine/snowLayerDivide.** Remaining patch adapters
     (`soilTemperatureFullStep`, `canopyFluxesStep`, `baregroundFluxesStep`) follow the
     same CSR + scalar-reuse recipe; then the column-only `snowAging`/`snowLayerCombine`/
     `snowLayerDivide`. Mechanical from here.

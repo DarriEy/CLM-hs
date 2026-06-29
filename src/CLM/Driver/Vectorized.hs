@@ -50,6 +50,7 @@ module CLM.Driver.Vectorized
   , soilHydrologyStepV
   , soilFluxesStepV
   , baregroundFluxesStepV
+  , soilTemperatureFullStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -68,6 +69,7 @@ import CLM.Types.SoilStateData          (SoilStateData(..))
 import CLM.Types.SoilHydrologyData      (SoilHydrologyData(..))
 import CLM.Types.CanopyStateData        (CanopyStateData(..))
 import CLM.Types.FrictionVelocityData   (FrictionVelocityData(..))
+import CLM.Types.GridcellData           (GridcellData(..))
 import CLM.BioGeoPhys.BalanceCheck
   ( waterBalanceCol, WaterBalanceColInput(..), WaterBalanceColOutput(..) )
 import CLM.BioGeoPhys.HydrologyDrainage
@@ -82,7 +84,8 @@ import CLM.BioGeoPhys.SnowHydrology
 -- directly per column (rebuild single-column state -> run -> re-flatten). No
 -- import cycle: PhysicsAdapters does not import this module.
 import CLM.Driver.PhysicsAdapters
-  (snowCompactionStep, soilHydrologyStep, soilFluxesStep, baregroundFluxesStep)
+  ( snowCompactionStep, soilHydrologyStep, soilFluxesStep, baregroundFluxesStep
+  , soilTemperatureFullStep )
 import CLM.BioGeoPhys.SoilHydrology
   ( waterTable, WaterTableResult(..), defaultSoilHydroParams )
 import CLM.BioGeoPhys.SurfaceHumidity
@@ -228,6 +231,21 @@ data CLMStateV = CLMStateV
   , vp_t_ref2m       :: !(VU.Vector Double) -- ^ t_ref2m_patch_vec CSR (read+write)
   , vp_fvel_ram1     :: !(VU.Vector Double) -- ^ fvel_ram1_patch   CSR (read+write)
   , vp_fvel_ustar    :: !(VU.Vector Double) -- ^ fvel_ustar_patch  CSR (read+write)
+    -- soil temperature full solve ---------------------------------------------
+  , vtkmg          :: !(VU.Vector Double)  -- ^ sstate_tkmg_col   stride nlevgrnd (read; empty-for-all ⇒ empty)
+  , vtkdry         :: !(VU.Vector Double)  -- ^ sstate_tkdry_col  stride nlevgrnd (read)
+  , vcsol          :: !(VU.Vector Double)  -- ^ sstate_csol_col   stride nlevgrnd (read)
+  , vtksatu        :: !(VU.Vector Double)  -- ^ sstate_tksatu_col stride nlevgrnd (read)
+  , vthk_override  :: !(VU.Vector Double)  -- ^ sstate_thk_override_col stride vNlev (read; empty ⇒ Nothing)
+  , vcv_override   :: !(VU.Vector Double)  -- ^ sstate_cv_override_col  stride vNlev (read; empty ⇒ Nothing)
+  , vgrc_nbedrock  :: !(VU.Vector Int)     -- ^ grc_nbedrock resolved (empty⇒nlevsoi), one per col (read)
+  , vp_eflx_gnet   :: !(VU.Vector Double)  -- ^ eflx_gnet_patch_vec CSR (write)
+  , vqflx_snomelt  :: !(VU.Vector Double)  -- ^ clmQflxSnomelt top-level scalar (write)
+    -- full-grid (nlevgrnd) soil props — soilTemperature reads the whole soil
+    -- column, unlike the top-/soil-layer adapters that use the nlevsoi copies
+  , vwatsat_g      :: !(VU.Vector Double)  -- ^ watsat resolved, stride nlevgrnd (read)
+  , vbsw_g         :: !(VU.Vector Double)  -- ^ bsw    resolved, stride nlevgrnd (read)
+  , vsucsat_g      :: !(VU.Vector Double)  -- ^ sucsat resolved, stride nlevgrnd (read)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -320,11 +338,29 @@ gather sts = CLMStateV
   , vp_t_ref2m    = gPd (t_ref2m_patch_vec . clmTemp)
   , vp_fvel_ram1  = gPd (fvel_ram1_patch   . clmFrictionVel)
   , vp_fvel_ustar = gPd (fvel_ustar_patch  . clmFrictionVel)
+  , vtkmg         = gSg sstate_tkmg_col
+  , vtkdry        = gSg sstate_tkdry_col
+  , vcsol         = gSg sstate_csol_col
+  , vtksatu       = gSg sstate_tksatu_col
+  , vthk_override = gOv sstate_thk_override_col
+  , vcv_override  = gOv sstate_cv_override_col
+  , vgrc_nbedrock = VU.fromList [ nbOf s | s <- sts ]
+  , vp_eflx_gnet  = gPd (eflx_gnet_patch_vec . clmEnergyFlux)
+  , vqflx_snomelt = VU.fromList [ clmQflxSnomelt s | s <- sts ]
+  , vwatsat_g     = VU.concat [ padTo nlevgrnd (rslv (sstate_watsat_col (clmSoilState s)) (watsat (clmColumn s))) | s <- sts ]
+  , vbsw_g        = VU.concat [ padTo nlevgrnd (rslv (sstate_bsw_col    (clmSoilState s)) (bsw    (clmColumn s))) | s <- sts ]
+  , vsucsat_g     = VU.concat [ padTo nlevgrnd (rslv (sstate_sucsat_col (clmSoilState s)) (sucsat (clmColumn s))) | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
     gPd sel = if all (VU.null . sel) sts then VU.empty else VU.concat [ sel s | s <- sts ]
     gPi sel = if all (VU.null . sel) sts then VU.empty else VU.concat [ sel s | s <- sts ]
+    gSg sel = if all (VU.null . sel . clmSoilState) sts then VU.empty
+              else VU.concat [ padTo nlevgrnd (sel (clmSoilState s)) | s <- sts ]
+    gOv sel = if all (VU.null . sel . clmSoilState) sts then VU.empty
+              else VU.concat [ padTo gridNlev (sel (clmSoilState s)) | s <- sts ]
+    nbOf s = let nb = grc_nbedrock (clmGridcell s)
+             in if VU.null nb then nlevsoi else nb VU.! 0
     scalOr d v = if VU.null v then d else v VU.! 0
     rslv ss colv = if VU.null ss then colv else ss   -- sstate else column (mirrors adapter)
     frostCarried s =
@@ -346,6 +382,7 @@ scatter :: [CLMState] -> CLMStateV -> [CLMState]
 scatter bases v =
   let nlev = vNlev v
   in [ s { clmSnl = vsnl v VU.! i   -- soilHydrology meltout can flip snl -> 0
+         , clmQflxSnomelt = vqflx_snomelt v VU.! i
          , clmWaterFlux    = (clmWaterFlux s)
              { qflx_evap_tot_patch = vqflx_evap_tot v VU.! i
              , qflx_surf_col       = vqflx_surf     v VU.! i
@@ -362,7 +399,9 @@ scatter bases v =
              , t_h2osfc_bef_col = vt_h2osfc_bef v VU.! i
              , t_soisno_col     = VU.slice (i * nlev) nlev (vt_soisno v)
              , t_ref2m_patch     = vt_ref2m v VU.! i
-             , t_ref2m_patch_vec = patchSliceD (vPatchOff v) (vp_t_ref2m v) i }
+             , t_ref2m_patch_vec = patchSliceD (vPatchOff v) (vp_t_ref2m v) i
+             , t_grnd_col        = vt_grnd   v VU.! i
+             , t_h2osfc_col      = vt_h2osfc v VU.! i }
          , clmEnergyFlux = (clmEnergyFlux s)
              { eflx_soil_grnd_col       = veflx_soil_grnd v VU.! i
              , eflx_sh_tot_patch        = veflx_sh_tot    v VU.! i
@@ -384,7 +423,8 @@ scatter bases v =
              , cgrndl_patch_vec = patchSliceD (vPatchOff v) (vp_cgrndl v) i
              , cgrnd_patch_vec  = patchSliceD (vPatchOff v) (vp_cgrnd  v) i
              , dlrad_patch_vec  = patchSliceD (vPatchOff v) (vp_dlrad  v) i
-             , ulrad_patch_vec  = patchSliceD (vPatchOff v) (vp_ulrad  v) i }
+             , ulrad_patch_vec  = patchSliceD (vPatchOff v) (vp_ulrad  v) i
+             , eflx_gnet_patch_vec = patchSliceD (vPatchOff v) (vp_eflx_gnet v) i }
          , clmWaterState = (clmWaterState s)
              { h2osoi_liq_col = VU.slice (i * nlev) nlev (vh2osoi_liq v)
              , h2osoi_ice_col = VU.slice (i * nlev) nlev (vh2osoi_ice v)
@@ -960,4 +1000,89 @@ baregroundFluxesStepV cfg ctx v =
        , vp_qflx_evap_tot  = VU.concat [ qflx_evap_tot_patch_vec  (clmWaterFlux r) | r <- results ]
        , vp_qflx_evap_grnd = VU.concat [ qflx_evap_grnd_patch_vec (clmWaterFlux r) | r <- results ]
        , vp_qflx_tran_veg  = VU.concat [ qflx_tran_veg_patch_vec  (clmWaterFlux r) | r <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.soilTemperatureFullStep'. The
+-- implicit tridiagonal heat solve (snow+soil+surface-water) is per-column, so
+-- this reuses the scalar adapter per column: rebuild a single-col CLMState
+-- carrying every read field — sstate thermal props (stride nlevgrnd), optional
+-- thk/cv overrides (empty ⇒ Nothing), nbedrock, and the ragged per-patch flux
+-- inputs via CSR slices — run 'soilTemperatureFullStep', re-flatten temps/water,
+-- per-patch EFLX_GNET, and the carried snowmelt flux. Bit-identical; snl unchanged.
+soilTemperatureFullStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+soilTemperatureFullStepV cfg ctx v =
+  let nlev   = vNlev v
+      nlevZi = nlev + 1
+      off    = vPatchOff v
+      runCol c =
+        let base = c * nlev
+            slc  = VU.slice base nlev
+            pD f = patchSliceD off (f v) c
+            pI f = patchSliceI off (f v) c
+            sliceG flat = if VU.null flat then VU.empty else VU.slice (c * nlevgrnd) nlevgrnd flat
+            sliceTot flat = if VU.null flat then VU.empty else slc flat
+            st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col   = vt_grnd   v VU.! c
+                  , t_h2osfc_col = vt_h2osfc v VU.! c
+                  , t_soisno_col = slc (vt_soisno v) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = slc (vh2osoi_liq v)
+                  , h2osoi_ice_col = slc (vh2osoi_ice v)
+                  , h2osno_col     = vh2osno v VU.! c
+                  , h2osfc_col     = vh2osfc v VU.! c }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz  = slc (vcolDz v)
+                  , colZ   = slc (vcolZ  v)
+                  , colZi  = VU.slice (c * nlevZi) nlevZi (vcolZi v)
+                  , watsat = VU.slice (c * nlevgrnd) nlevgrnd (vwatsat_g v)
+                  , bsw    = VU.slice (c * nlevgrnd) nlevgrnd (vbsw_g    v)
+                  , sucsat = VU.slice (c * nlevgrnd) nlevgrnd (vsucsat_g v) }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_watsat_col       = VU.empty
+                  , sstate_bsw_col          = VU.empty
+                  , sstate_sucsat_col       = VU.empty
+                  , sstate_tkmg_col         = sliceG (vtkmg   v)
+                  , sstate_tkdry_col        = sliceG (vtkdry  v)
+                  , sstate_csol_col         = sliceG (vcsol   v)
+                  , sstate_tksatu_col       = sliceG (vtksatu v)
+                  , sstate_thk_override_col = sliceTot (vthk_override v)
+                  , sstate_cv_override_col  = sliceTot (vcv_override  v) }
+              , clmGridcell = (clmGridcell defaultCLMState)
+                  { grc_nbedrock = VU.singleton (vgrc_nbedrock v VU.! c) }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_eff_col = VU.singleton (vfrac_sno_eff v VU.! c)
+                  , wdiag_frac_h2osfc_col  = VU.singleton (vfrac_h2osfc  v VU.! c)
+                  , wdiag_snow_depth_col   = VU.singleton (vsnow_depth   v VU.! c) }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell            = pD vp_wtgcell
+                  , cstate_frac_veg_nosno_patch     = pI vp_frac_veg_nosno
+                  , cstate_frac_veg_nosno_alb_patch = pI vp_frac_veg_nosno_alb }
+              , clmEnergyFlux = (clmEnergyFlux defaultCLMState)
+                  { sabg_patch           = vsabg         v VU.! c
+                  , eflx_sh_grnd_patch   = veflx_sh_grnd v VU.! c
+                  , dlrad_patch          = vdlrad        v VU.! c
+                  , cgrnds_patch         = vcgrnds       v VU.! c
+                  , cgrndl_patch         = vcgrndl       v VU.! c
+                  , cgrnd_patch          = vcgrnd        v VU.! c
+                  , sabg_patch_vec           = pD vp_sabg
+                  , eflx_sh_grnd_patch_vec   = pD vp_eflx_sh_grnd
+                  , dlrad_patch_vec          = pD vp_dlrad
+                  , cgrnds_patch_vec         = pD vp_cgrnds
+                  , cgrndl_patch_vec         = pD vp_cgrndl
+                  , cgrnd_patch_vec          = pD vp_cgrnd }
+              , clmWaterFlux = (clmWaterFlux defaultCLMState)
+                  { qflx_evap_grnd_col       = vqflx_evap_grnd v VU.! c
+                  , qflx_evap_grnd_patch_vec = pD vp_qflx_evap_grnd }
+              }
+        in soilTemperatureFullStep cfg ctx st0
+      results = map runCol [0 .. vNumCols v - 1]
+  in v { vt_soisno     = VU.concat   [ padTo nlev (t_soisno_col (clmTemp r)) | r <- results ]
+       , vt_grnd       = VU.fromList [ t_grnd_col   (clmTemp r) | r <- results ]
+       , vt_h2osfc     = VU.fromList [ t_h2osfc_col (clmTemp r) | r <- results ]
+       , vh2osoi_liq   = VU.concat   [ padTo nlev (h2osoi_liq_col (clmWaterState r)) | r <- results ]
+       , vh2osoi_ice   = VU.concat   [ padTo nlev (h2osoi_ice_col (clmWaterState r)) | r <- results ]
+       , vp_eflx_gnet  = VU.concat   [ eflx_gnet_patch_vec (clmEnergyFlux r) | r <- results ]
+       , vqflx_snomelt = VU.fromList [ clmQflxSnomelt r | r <- results ]
        }
