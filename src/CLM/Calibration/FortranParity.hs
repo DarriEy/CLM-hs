@@ -688,13 +688,16 @@ data Boundary
   | AfterSoilFluxes
   | AfterHydrologyNoDrain
   | AfterHydrologyDrainage
-    -- CN/BGC boundaries. The harness pipeline does not yet snapshot inside the
-    -- CN phase (CN physics is unwired), so these map to the end-of-step state
-    -- 'bsFinal'. Because the CN steps are identity in the wired pipeline, the
-    -- end-of-step CN state equals the injected before_step CN state, and the
-    -- diff against the CN-boundary dump is the one-step change Fortran made that
-    -- Haskell has not yet reproduced. When CN physics is wired in a later phase,
-    -- dedicated CN snapshots should be added to 'BoundarySnapshots'.
+    -- CN/BGC boundaries. CN physics IS wired in the boundaries pipeline (the
+    -- pre-drainage, post-drainage, products, annual-update, balance-check and
+    -- CNDV steps all run during a 'clmDrvBoundaries' step). However,
+    -- 'BoundarySnapshots' only exposes intermediate snapshots through the
+    -- hydrology phases; it carries no dedicated intra-CN-phase capture, so these
+    -- two CN boundaries map to the end-of-step state 'bsFinal'. The diff against
+    -- the per-phase CN dump therefore compares Haskell's fully-advanced
+    -- end-of-step CN pools to Fortran's CN state at that earlier phase boundary.
+    -- Capturing CN-phase-exact snapshots would require adding fields to
+    -- 'BoundarySnapshots' in CLM.Driver.CLMDriver.
   | AfterEcosysDynPredrain
   | AfterCompetition
   deriving (Eq, Show)
@@ -740,9 +743,11 @@ registry =
   , ("frac_sno",   Col1d, AfterHydrologyDrainage, \s -> headList (wdiag_frac_sno_col (clmWaterDiagBulk s)),   1.0e-3)
     -- ---- CN/BGC baseline fields (compared at after_competition) -----------
     -- Per-patch vegetation pools. Tolerances are deliberately generous: this is
-    -- a measurement baseline (CN physics is unwired), so most CN fields are
-    -- EXPECTED to FAIL with the one-step Fortran change. The point is to REPORT
-    -- the diff, not pass it.
+    -- a measurement baseline. CN physics runs during the step, but it is
+    -- compared at the end-of-step boundary against an earlier per-phase Fortran
+    -- dump (see the CN/BGC boundary note above), so most CN fields are EXPECTED
+    -- to FAIL on the phase-misaligned diff. The point is to REPORT the diff, not
+    -- pass it.
   , ("leafc",      Patch, AfterCompetition,      \s -> VU.toList (cnvcs_leafc_patch     (clmCNVegCState s)), 1.0e-2)
   , ("frootc",     Patch, AfterCompetition,      \s -> VU.toList (cnvcs_frootc_patch    (clmCNVegCState s)), 1.0e-2)
   , ("livestemc",  Patch, AfterCompetition,      \s -> VU.toList (cnvcs_livestemc_patch (clmCNVegCState s)), 1.0e-2)
