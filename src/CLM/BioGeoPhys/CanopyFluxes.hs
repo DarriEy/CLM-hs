@@ -1067,7 +1067,12 @@ canopyFluxes params ctrl inp =
       (um0, obu0) = moninObukIni (cfi_zetamaxstable inp) ur
                                   (cfi_thv inp) dthv0 zldis0 z0mv'
 
-      -- No biomass heat storage: simplified surface areas
+      -- Biomass heat storage disabled (use_biomass_heat_storage=.false., the
+      -- CLM default; see clm_varctl.F90 / CanopyFluxesMod.F90 else-branch
+      -- ~L794): surface areas and heat-storage terms set to zero exactly as in
+      -- the Fortran "set biomass heat storage terms to zero" path. sa_leaf =
+      -- elai+esai; stem/internal areas, leaf/stem heat capacities, stem
+      -- resistance, and frac_rad_abs_by_stem all zero.
       sa_leaf     = cfi_elai inp + cfi_esai inp
       sa_stem     = 0.0
       sa_internal = 0.0
