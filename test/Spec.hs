@@ -1,6 +1,6 @@
 import Test.Hspec
 import Data.Char (isAlphaNum, isSpace, toLower)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, nub)
 import qualified Data.Map.Strict as Map
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector as V
@@ -64,7 +64,8 @@ import CLM.Driver.PipelineRunner
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
   , writeDailyNetCDF, writeGridcellNetCDF, buildTimestepContext
   , SurfdataLandunits(..), readSurfdataLandunits, runMixedGridcell
-  , runGridcellColumns, ColumnKind(..), GridDiag(..) )
+  , runGridcellColumns, runGridcellColumnsV, gridDiagReduceV
+  , ColumnKind(..), GridDiag(..) )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
 import CLM.Types.LakeStateData (LakeStateData(..))
 import CLM.BioGeoPhys.GlacierSurfaceMassBalance
@@ -3138,7 +3139,12 @@ main = hspec $ do
                 , tcForcWind = VU.singleton 3.0, tcForcHgt = 30.0
                 , tcForcSolad = VU.singleton 400.0, tcForcSolai = VU.singleton 100.0
                 , tcDeclin = 0.4, tcDeclinP1 = 0.4, tcNextswCday = 1.0 }
-              sts = [st0, st0, st0]  -- 3-column gridcell of the real np-patch column
+              -- distinct soil columns so the area-weighted gridcell reduction is
+              -- non-trivial (different t_grnd -> different SH/LH/FSA/T_GRND).
+              mkVar tg = st0 { clmTemp = (clmTemp st0)
+                                 { t_grnd_col = tg
+                                 , t_soisno_col = VU.map (const tg) (t_soisno_col (clmTemp st0)) } }
+              sts = [mkVar 295.0, mkVar 285.0, mkVar 278.0]  -- 3-column np-patch gridcell
               scalarRef s = foldl (\x f -> f x) s
                 [ drvInitStep cfg pctx, fracH2oSfcStep cfg pctx
                 , surfaceRadiationStepWithAlbedo albC opt cfg pctx
@@ -3150,20 +3156,66 @@ main = hspec $ do
                 , snowAgingStep opt cfg pctx
                 , hydrologyDrainageStep cfg pctx, waterBalanceStep cfg pctx
                 , surfaceAlbedoStep albC opt cfg pctx ]
-              scl = map scalarRef sts
-              vct = scatter sts (runVectorizedPipeline albC opt cfg pctx (gather sts))
+              scl  = map scalarRef sts
+              vEnd = runVectorizedPipeline albC opt cfg pctx (gather sts)
+              vct  = scatter sts vEnd
               npatch = VU.length (cstate_patch_wtgcell (clmCanopyState st0))
               tg s   = t_grnd_col (clmTemp s)
               tso s  = VU.toList (t_soisno_col (clmTemp s))
               liq s  = VU.toList (h2osoi_liq_col (clmWaterState s))
               fsun s = VU.toList (cstate_fsun_patch (clmCanopyState s))
               elai s = VU.toList (cstate_elai_patch (clmCanopyState s))
+              -- Multi-landunit gridcell: 3 soil landunits (distinct area weights)
+              -- aggregated column -> gridcell. gridDiagReduceV reduces straight
+              -- off the SoA arrays (the energyBalance-style c2g as a vectorized
+              -- stage); the reference aggregates the scalar per-column diags
+              -- through the SAME c2g1d. They must agree bit-for-bit.
+              (sgB, _sgG, sgLun, sgCol, _sgP) =
+                IS.buildSingleColumnGridcell [(IS.istsoil, 0.5), (IS.istsoil, 0.3), (IS.istsoil, 0.2)]
+              c2gN vals = SA.c2g1d (VU.fromList vals) sgB SA.C2LUnity SA.L2GUnity sgCol sgLun VU.! 0
+              gdV   = gridDiagReduceV sgB sgCol sgLun vEnd
+              gdRef = GridDiag
+                { gd_t_grnd  = c2gN (map (t_grnd_col . clmTemp) scl)
+                , gd_h2osno  = c2gN (map (h2osno_col . clmWaterState) scl)
+                , gd_eflx_sh = c2gN (map (eflx_sh_tot_patch . clmEnergyFlux) scl)
+                , gd_eflx_lh = c2gN (map (eflx_lh_tot_patch . clmEnergyFlux) scl)
+                , gd_fsa     = c2gN (map (fsa_patch . clmEnergyFlux) scl) }
           npatch `shouldSatisfy` (>= 1)
           map tg   vct `shouldBe` map tg   scl
           map tso  vct `shouldBe` map tso  scl
           map liq  vct `shouldBe` map liq  scl
           map fsun vct `shouldBe` map fsun scl
           map elai vct `shouldBe` map elai scl
+          -- the vectorized c2g reduction equals the scalar c2g aggregation
+          gdV `shouldBe` gdRef
+          -- and it is a genuine multi-column average (columns are distinct)
+          length (nub (map tg scl)) `shouldSatisfy` (> 1)
+
+    -- The end-to-end vectorized multi-landunit driver: a whole gridcell advances
+    -- through runVectorizedPipeline (SoA batch) per step with the c2g reduction,
+    -- producing a GridDiag series. Sanity: it runs and the gridcell aggregate of
+    -- a 2-soil-landunit cell with identical cold-start columns equals the
+    -- single-column case (area-weighting identical values is the identity), and
+    -- every diagnostic is finite.
+    it "runGridcellColumnsV advances a multi-landunit gridcell via the SoA path" $ do
+      hasData <- doesFileExist "test/data/coldstart/t_veg.bin"
+      if not hasData
+        then pendingWith "cold-start data not available"
+        else do
+          multi <- runGridcellColumnsV "test/data"
+                     [(1, 0.6), (1, 0.4)] 1800.0 0 3   -- 2 soil landunits (itype 1)
+          one   <- runGridcellColumnsV "test/data" [(1, 1.0)] 1800.0 0 3
+          length multi `shouldBe` 3
+          let finite x = not (isNaN x || isInfinite x)
+              -- identical columns -> gridcell mean ~= single-column value (the
+              -- area weights 0.6/0.4 sum to 1, but 0.6x+0.4x != x at ~1 ulp in
+              -- IEEE, so compare within a tight relative tolerance).
+              close a b = abs (a - b) <= 1.0e-9 * (1.0 + abs b)
+          all (\g -> all finite [gd_t_grnd g, gd_h2osno g, gd_eflx_sh g, gd_eflx_lh g, gd_fsa g]) multi
+            `shouldBe` True
+          and (zipWith close (map gd_t_grnd multi) (map gd_t_grnd one)) `shouldBe` True
+          and (zipWith close (map gd_eflx_sh multi) (map gd_eflx_sh one)) `shouldBe` True
+          and (zipWith close (map gd_fsa    multi) (map gd_fsa    one)) `shouldBe` True
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do

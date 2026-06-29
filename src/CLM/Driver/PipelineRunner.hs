@@ -29,6 +29,8 @@ module CLM.Driver.PipelineRunner
   , readSurfdataLandunits
   , runMixedGridcell
   , runGridcellColumns
+  , runGridcellColumnsV
+  , gridDiagReduceV
   , ColumnKind(..)
   , GridDiag(..)
     -- * CLM forward model for calibration (extracts QRUNOFF)
@@ -56,6 +58,7 @@ import CLM.BioGeoChem.CNDVStep (seedDGVS, tkfrz)
 import CLM.Driver.PhysicsAdapters
   ( wiredPhysicsPipeline, initCNDecompPools
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep )
+import qualified CLM.Driver.Vectorized as V
 import CLM.BioGeoPhys.CanopyHydrology
   ( CanopyHydrologyParams(..), defaultCanopyHydroParams )
 
@@ -1379,6 +1382,61 @@ runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
     pr d = (gd_t_grnd d, gd_h2osno d)
     toTriple (g, [soil, lake]) = (pr g, pr soil, pr lake)
     toTriple _ = error "runMixedGridcell: expected exactly soil + lake columns"
+
+-- | Vectorized gridcell reduction — the "non-per-column" stage. Aggregates the
+-- per-column diagnostics already held as column-indexed SoA arrays in a
+-- 'V.CLMStateV' ('V.vt_grnd', 'V.vh2osno', 'V.veflx_sh_tot', 'V.veflx_lh_tot',
+-- 'V.vfsa') up to a single gridcell mean through the real area-weighted
+-- 'SA.c2g1d' — the same column->gridcell operator 'runGridcellColumns' uses, but
+-- applied directly to the SoA column vectors instead of a per-column list (no
+-- scatter). Column order in the SoA state must match the @col@/@lun@ subgrid
+-- pointers (gather order = spec order). This is the energyBalance-style c2g
+-- reduction expressed as one vectorized stage over 'V.CLMStateV'.
+gridDiagReduceV
+  :: IS.BoundsType -> IS.SubgridColumnData -> IS.LandunitData
+  -> V.CLMStateV -> GridDiag
+gridDiagReduceV bounds col lun v =
+  let agg sel = SA.c2g1d (sel v) bounds SA.C2LUnity SA.L2GUnity col lun VU.! 0
+  in GridDiag
+       { gd_t_grnd  = agg V.vt_grnd
+       , gd_h2osno  = agg V.vh2osno
+       , gd_eflx_sh = agg V.veflx_sh_tot
+       , gd_eflx_lh = agg V.veflx_lh_tot
+       , gd_fsa     = agg V.vfsa }
+
+-- | Vectorized multi-landunit gridcell driver. The soil columns of a gridcell
+-- run as ONE 'V.runVectorizedPipeline' batch (SoA fast path) per timestep, and
+-- the gridcell mean is produced by the vectorized 'gridDiagReduceV' reduction —
+-- so a whole multi-column gridcell advances through the SoA path end-to-end,
+-- with the column->gridcell c2g as a reduction over 'V.CLMStateV' rather than a
+-- per-column diag loop. Each spec is @(landunit itype, gridcell area weight)@;
+-- all columns are soil (the kind the 20-step per-column pipeline covers — the
+-- gated lake/glacier/urban paths stay on the scalar 'runGridcellColumns'
+-- dispatch). Returns the per-step gridcell 'GridDiag' series. Proven (test)
+-- bit-identical to running the same 20-step pipeline scalar per column and
+-- aggregating with the same 'SA.c2g1d'.
+runGridcellColumnsV
+  :: FilePath        -- ^ data dir (soil base + forcing)
+  -> [(Int, Double)] -- ^ one entry per soil column: (landunit itype, area weight)
+  -> Double          -- ^ dtime [s]
+  -> Int             -- ^ forcing step offset
+  -> Int             -- ^ number of steps
+  -> IO [GridDiag]
+runGridcellColumnsV dir specs dtime off nsteps = do
+  (st0, forcing, albConst) <- initCLMStateFromDir dir
+  snicarOpt <- readSnicarOptics dir
+  let cfg = defaultDriverConfig
+      (sgBounds, _sgGrc, sgLun, sgCol, _sgPch) =
+        IS.buildSingleColumnGridcell specs
+      sts0 = replicate (length specs) st0
+      go step v acc
+        | step > nsteps = return (reverse acc)
+        | otherwise = do
+            let ctx = buildTimestepContext forcing (off + step) dtime
+                v'  = V.runVectorizedPipeline albConst snicarOpt cfg ctx v
+                gd  = gridDiagReduceV sgBounds sgCol sgLun v'
+            go (step + 1) v' (gd : acc)
+  go 1 (V.gather sts0) []
 
 runPipeline :: PipelineConfig -> IO [DailyDiag]
 runPipeline cfg = do
