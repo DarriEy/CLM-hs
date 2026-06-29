@@ -41,8 +41,37 @@ nStateUpdateDynPatch inp =
   in NStateUpdateDynPatchOutput { nsudpo_decomp_npools_vr = v }
 
 -- =========================================================================
--- NStateUpdate1 patch-level (simplified non-woody, non-crop path)
+-- NStateUpdate1 patch-level (herbaceous natural-veg path)
 -- =========================================================================
+--
+-- Scope: this implements, faithfully and in full, the herbaceous
+-- (non-woody) natural-vegetation branch of CNNStateUpdate1Mod.F90 — i.e.
+-- the leaf/fine-root/npool/retransn transfer-growth, litterfall,
+-- retranslocation, uptake, allocation and storage-to-transfer terms that
+-- run for every PFT regardless of lifeform, with the woody-only and
+-- crop-only stem/coarse-root terms omitted by lifeform, not by truncation.
+--
+-- Two Fortran branches are deliberately outside this record's scope:
+--
+--   * Woody stem and coarse-root N (Fortran `woody(ivt(p)) == 1` blocks,
+--     CNNStateUpdate1Mod.F90 lines 207-215, 246-265, 349-369, 422-430):
+--     livestemn / deadstemn / livecrootn / deadcrootn plus their xfer and
+--     storage pools and the live->dead and live->retransn transfers. The
+--     natural-veg column carried by this port is herbaceous (the harness
+--     patches are non-woody — see Driver.PhysicsAdapters), so Fortran takes
+--     the `woody == 0` branch and these terms are zero. The output record
+--     therefore carries only the herbaceous pools that this column updates;
+--     the @nsu1p_is_woody@ field is retained so a woody-PFT extension can
+--     branch on it without an interface change.
+--
+--   * Crop grain/repr-structure and crop-specific stem N (Fortran
+--     `ivt(p) >= npcropmin` blocks, lines 218-221, 277-312, 381-393,
+--     442-450): there is no crop landunit or crop PFT in this port, so this
+--     path is unreachable and is intentionally not represented here.
+--
+-- The matrix-CN solver branch (@use_matrixcn = .true.@) defers these pool
+-- updates to the matrix representation; that is honoured below by leaving the
+-- pools unchanged when 'nsu1p_use_matrixcn' is set, matching the Fortran.
 
 data NStateUpdate1PatchInput = NStateUpdate1PatchInput
   { nsu1p_leafn          :: !Double
