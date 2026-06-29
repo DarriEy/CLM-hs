@@ -208,6 +208,13 @@ or needs writing (glacier).
     (and empty) — suite 234/0. This unblocks class (b): `soilFluxesStep`,
     `soilTemperatureFullStep`, `canopyFluxesStep`, `baregroundFluxesStep` now migrate
     by storing their `*_patch_vec` fields flat via the CSR helpers + scalar-kernel-reuse.
+    **CSR layout validated end-to-end with a real patch adapter (2026-06-29):**
+    `soilFluxesStepV` migrated — its ~25 fields incl. the ragged `*_patch_vec` energy/
+    water fluxes store flat via the CSR helpers; bit-identical oracle over 3 columns.
+    **12 of ~37 adapters vectorized; suite 235/0.** Remaining patch adapters
+    (`soilTemperatureFullStep`, `canopyFluxesStep`, `baregroundFluxesStep`) follow the
+    same CSR + scalar-reuse recipe; then the column-only `snowAging`/`snowLayerCombine`/
+    `snowLayerDivide`. Mechanical from here.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake
