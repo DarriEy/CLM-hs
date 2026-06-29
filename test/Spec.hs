@@ -24,10 +24,12 @@ import CLM.Driver.PhysicsAdapters
   , preFluxCalcsStep, snowCompactionStep, snowPercolationStep
   , waterTableStep, surfaceHumidityStep, soilHydrologyStep, soilFluxesStep
   , baregroundFluxesStep, soilTemperatureFullStep
-  , snowLayerCombineStep, snowLayerDivideStep, snowAgingStep )
+  , snowLayerCombineStep, snowLayerDivideStep, snowAgingStep
+  , surfaceAlbedoStep, surfaceRadiationStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Types.GridcellData (GridcellData(..))
+import CLM.BioGeoPhys.SurfaceAlbedo (SurfaceAlbedoConstants(..), defaultSurfAlbConstants)
 import CLM.Driver.Vectorized
   ( CLMStateV(..), gather, scatter, patchOffsets
   , waterBalanceStepV, hydrologyDrainageStepV
@@ -36,7 +38,7 @@ import CLM.Driver.Vectorized
   , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV, soilFluxesStepV
   , baregroundFluxesStepV, soilTemperatureFullStepV
   , snowLayerCombineStepV, snowLayerDivideStepV, snowAgingStepV
-  , canopyFluxesStepV )
+  , canopyFluxesStepV, surfaceAlbedoStepV, surfaceRadiationStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2925,6 +2927,73 @@ main = hspec $ do
       map gpp vec `shouldBe` map gpp scalar
       map tvv vec `shouldBe` map tvv scalar
       map psn vec `shouldBe` map psn scalar
+
+    it "surfaceAlbedoStepV matches per-column surfaceAlbedoStep bit-for-bit (CSR)" $ do
+      let albC = defaultSurfAlbConstants
+            { albsat = VU.replicate (15 * numrad) 0.10
+            , albdry = VU.replicate (15 * numrad) 0.20, mxsoilColor = 15 }
+          opt = emptySnicarOptics
+          mkCol snl tgrnd tveg elai esai fwet fcansno fsno spers rds ice liq h2o =
+            defaultCLMState
+              { clmSnl = snl
+              , clmTemp = (clmTemp defaultCLMState) { t_grnd_col = tgrnd, t_veg_patch = tveg }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = mkGrid ice, h2osoi_liq_col = mkGrid liq, h2osno_col = h2o }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell = VU.singleton 1.0
+                  , cstate_elai_patch = VU.singleton elai, cstate_esai_patch = VU.singleton esai }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col = VU.singleton fsno, wdiag_snow_persist_col = VU.singleton spers
+                  , wdiag_snw_rds_top_col = VU.singleton rds, wdiag_fwet_patch = VU.singleton fwet
+                  , wdiag_fcansno_patch = VU.singleton fcansno } }
+          asts = [ mkCol (-2) 270.0 271.0 2.5 0.5 0.2 0.3 0.8 5.0e4 120.0 5.0 1.0 50.0
+                 , mkCol (-1) 274.0 275.0 1.2 0.3 0.0 0.0 0.4 1.0e4  80.0 2.0 0.5 20.0
+                 , mkCol 0    283.0 284.0 0.0 0.0 0.0 0.0 0.0 0.0    54.526 0.0 0.0 0.0 ]
+          scalar = map (surfaceAlbedoStep albC opt cfg ctx) asts
+          vec    = scatter asts (surfaceAlbedoStepV albC opt cfg ctx (gather asts))
+          fsun s = VU.toList (cstate_fsun_patch (clmCanopyState s))
+      map fsun vec `shouldBe` map fsun scalar
+
+    it "surfaceRadiationStepV matches per-column surfaceRadiationStep bit-for-bit" $ do
+      let radCtx = ctx
+            { tcForcSolad = VU.fromList [200.0, 300.0], tcForcSolai = VU.fromList [80.0, 120.0]
+            , tcDeclin = 0.4, tcDeclinP1 = 0.4, tcNextswCday = 1.0 }
+          mkCol snl fsno sdep lat el es wt tv tg =
+            defaultCLMState
+              { clmSnl = snl
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col = tg, t_veg_patch = tv, t_veg_patch_vec = VU.fromList [tv, tv] }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid 5.0, h2osoi_ice_col = mkGrid 1.0
+                  , h2osno_col = if snl < 0 then 30.0 else 0.0 }
+              , clmColumn = (clmColumn defaultCLMState) { colDz = mkGrid 0.1 }
+              , clmGridcell = (clmGridcell defaultCLMState)
+                  { grc_lat = VU.singleton lat, grc_lon = VU.singleton 0.0 }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col = VU.singleton fsno, wdiag_snow_depth_col = VU.singleton sdep
+                  , wdiag_snow_persist_col = VU.singleton 0.0, wdiag_snw_rds_top_col = VU.singleton 54.0
+                  , wdiag_fwet_patch = VU.fromList [0.0,0.0], wdiag_fcansno_patch = VU.fromList [0.0,0.0] }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell = VU.fromList [wt, 1.0 - wt]
+                  , cstate_elai_patch = VU.fromList [el, el], cstate_esai_patch = VU.fromList [es, es]
+                  , cstate_tlai_patch = VU.fromList [el, el], cstate_tsai_patch = VU.fromList [es, es]
+                  , cstate_xl_patch = VU.fromList [0.1, 0.1]
+                  , cstate_rhol_patch = VU.fromList [0.1,0.45,0.1,0.45]
+                  , cstate_rhos_patch = VU.fromList [0.16,0.39,0.16,0.39]
+                  , cstate_taul_patch = VU.fromList [0.05,0.25,0.05,0.25]
+                  , cstate_taus_patch = VU.fromList [0.001,0.001,0.001,0.001] } }
+          rsts = [ mkCol 0    0.0 0.0 0.88 2.0 0.5 0.6 290.0 288.0
+                 , mkCol (-2) 0.6 0.3 0.70 1.0 0.3 0.5 270.0 268.0
+                 , mkCol 0    0.0 0.0 1.10 3.5 0.8 0.4 295.0 294.0 ]
+          scalar = map (surfaceRadiationStep cfg radCtx) rsts
+          vec    = scatter rsts (surfaceRadiationStepV defaultSurfAlbConstants emptySnicarOptics cfg radCtx (gather rsts))
+          sabg s = sabg_patch (clmEnergyFlux s); fsa s = fsa_patch (clmEnergyFlux s)
+          fvec s = VU.toList (fsa_patch_vec (clmEnergyFlux s))
+          lsun s = VU.toList (cstate_laisun_patch (clmCanopyState s))
+      map sabg vec `shouldBe` map sabg scalar
+      map fsa  vec `shouldBe` map fsa  scalar
+      map fvec vec `shouldBe` map fvec scalar
+      map lsun vec `shouldBe` map lsun scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
