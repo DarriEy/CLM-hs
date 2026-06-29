@@ -117,7 +117,24 @@ soilAlpha inp =
                          + shi_frac_sno_eff inp + shi_frac_h2osfc inp
                in SoilAlphaResult qred spval
           else if ct == icolRoadPerv
-               then SoilAlphaResult spval 0.0  -- simplified; full version needs multi-layer
+               -- Urban pervious road (icol_road_perv).  In CLM the faithful
+               -- qred is a FULL-COLUMN integral (SurfaceHumidityMod.F90
+               -- L143-166): for each of nlevgrnd layers it forms the effective
+               -- porosity from watsat and ice, the liquid fraction, then scales
+               -- by (vol_liq-watdry)/(watopt-watdry) and the pervious-road root
+               -- fraction rootfr_road_perv, summing into hr_road_perv; qred =
+               -- (1-frac_sno_eff)*hr_road_perv + frac_sno_eff, stored in
+               -- soilalpha_u.  That integral needs per-column vectors
+               -- (h2osoi_liq/ice, dz, watsat, watdry, watopt, rootfr_road_perv
+               -- over all layers) which the single-column SurfaceHumidityInput
+               -- record (top-layer scalars only) does not carry; porting it
+               -- requires extending that type — an EXTERNAL change out of scope
+               -- for this module.  This urban branch is never reached by the
+               -- validated istsoil/istcrop soil column, so the soilalpha_u value
+               -- returned here is inert for the exercised numerics.  FLAG: to
+               -- support urban pervious roads, add the multi-layer fields and
+               -- port the L143-166 loop here.
+               then SoilAlphaResult spval 0.0
                else if ct == icolSunwall || ct == icolShadewall
                     then SoilAlphaResult spval spval
                     else if ct == icolRoof || ct == icolRoadImperv
