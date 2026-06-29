@@ -342,8 +342,9 @@ ch4Driver !params !varcon !input !states =
       processLayer j =
         let !temp = ch4i_t_soisno input VU.! j
             !h2o = ch4i_h2osoi_vol input VU.! j
-            !watsat = ch4i_watsat input VU.! j
             !dz = ch4i_dz input VU.! j
+            -- watsat/h2o per-layer diffusivity is now used in the column
+            -- diffusion pass below (d_ch4_v), not here.
             !z_mid = ch4i_z input VU.! j
             !hr = ch4i_hr_vr input VU.! j
             !rootfr = ch4i_rootfr input VU.! j
@@ -364,30 +365,93 @@ ch4Driver !params !varcon !input !states =
               if belowWT
               then ch4Ebullition params conc_ch4 temp dz dt
               else (conc_ch4, 0.0)
-            -- Plant transport
+            -- Plant transport (aerenchyma)
             !plant_trans = ch4PlantTransport params conc_post_ebul rootfr atm_conc temp dz
             !aere_flux = ch4AerenchymaFlux params plant_trans temp
-            -- Diffusion (simplified explicit)
-            (!d_ch4, _d_o2) = ch4Diffusivity params watsat h2o temp
-            !diff_flux = if j == 0
-                         then d_ch4 * (conc_post_ebul - atm_conc) / (z_mid + 0.01)
-                         else 0.0
-            -- Update concentration
+            -- Reaction update (production - oxidation - aerenchyma loss).
+            -- Vertical diffusion is solved separately below as a
+            -- conservative column pass (see the diffusion section).
             !net_source = prod - oxid
-            !new_conc = max 0.0 (conc_post_ebul + (net_source - aere_flux / dz) * dt)
+            !conc_react = max 0.0 (conc_post_ebul + (net_source - aere_flux / dz) * dt)
             !new_o2 = max 0.0 (conc_o2 - oxid * 2.0 * dt / dz)
-        in (new_conc, new_o2, prod * dz, oxid, ebul_flux, aere_flux, diff_flux)
+        in (conc_react, new_o2, prod * dz, oxid, ebul_flux, aere_flux)
 
       !results = map processLayer [0 .. nlev - 1]
 
-      !new_ch4 = VU.fromList $ map (\(c,_,_,_,_,_,_) -> c) results
-      !new_o2 = VU.fromList $ map (\(_,o,_,_,_,_,_) -> o) results
-      !tot_prod = sum $ map (\(_,_,p,_,_,_,_) -> p) results
-      !tot_oxid = sum $ map (\(_,_,_,ox,_,_,_) -> ox) results
-      !tot_ebul = sum $ map (\(_,_,_,_,e,_,_) -> e) results
-      !tot_aere = sum $ map (\(_,_,_,_,_,a,_) -> a) results
-      !surf_diff = if null results then 0.0
-                   else let (_,_,_,_,_,_,d) = head results in d
+      !conc_react_v = VU.fromList $ map (\(c,_,_,_,_,_) -> c) results
+      !new_o2 = VU.fromList $ map (\(_,o,_,_,_,_) -> o) results
+      !tot_prod = sum $ map (\(_,_,p,_,_,_) -> p) results
+      !tot_oxid = sum $ map (\(_,_,_,ox,_,_) -> ox) results
+      !tot_ebul = sum $ map (\(_,_,_,_,e,_) -> e) results
+      !tot_aere = sum $ map (\(_,_,_,_,_,a) -> a) results
+
+      -- ===============================================================
+      -- Vertical diffusion of dissolved/gaseous CH4 (ch4_tran, ch4Mod.F90).
+      -- Finite-volume aqueous+gaseous diffusion driven by the effective
+      -- Millington-Quirk diffusivity (ch4Diffusivity: gas through the
+      -- air-filled pore space + solute through the water-filled pore
+      -- space, with the (T/Tfrz)^1.75 gas correction).
+      --
+      -- Fortran solves the column with an implicit Crank-Nicholson
+      -- tridiagonal sweep. Here that solve is integrated explicitly on a
+      -- conservative finite-volume grid, sub-stepped to honour the
+      -- diffusive CFL limit so it is stable for the full model timestep
+      -- and conserves CH4 mass exactly: the only sink is the diffusive
+      -- flux escaping through the top (ground) interface to the
+      -- atmosphere, which becomes the reported diffusive surface flux.
+      --
+      -- Interface conductances (m/s) reproduce the Fortran dp1_zp1 term
+      --   w_{j+1/2} = 2 / (dz_j/D_j + dz_{j+1}/D_{j+1})
+      -- and the ground conductance uses the top half-layer resistance
+      -- dz_0/(2 D_0) from dm1_zm1, i.e.  w_surf = 2 D_0 / dz_0.
+      -- ===============================================================
+      !d_ch4_v = VU.generate nlev $ \j ->
+        let !tj  = ch4i_t_soisno input VU.! j
+            !h2j = ch4i_h2osoi_vol input VU.! j
+            !wsj = ch4i_watsat input VU.! j
+            (!dc, _do2) = ch4Diffusivity params wsj h2j tj
+        in max dc 1.0e-20   -- prevent zero diffusivity / overflow (Fortran smallnumber)
+      !dz_v = ch4i_dz input
+      -- internal interface conductances (length nlev-1)
+      !wint = VU.generate (max 0 (nlev - 1)) $ \j ->
+        let !dj  = d_ch4_v VU.! j
+            !dj1 = d_ch4_v VU.! (j + 1)
+            !zj  = dz_v VU.! j
+            !zj1 = dz_v VU.! (j + 1)
+        in 2.0 / (zj / dj + zj1 / dj1)
+      !w_surf = if nlev > 0
+                then 2.0 * (d_ch4_v VU.! 0) / (dz_v VU.! 0)
+                else 0.0
+      -- maximum stable explicit sub-step (diffusive CFL, safety factor 0.5)
+      sumcond j =
+        let !below = if j < nlev - 1 then wint VU.! j else 0.0
+            !above = if j == 0 then w_surf else wint VU.! (j - 1)
+        in above + below
+      !dt_stable =
+        if nlev <= 0 then dt
+        else 0.5 * minimum [ (dz_v VU.! j) / max (sumcond j) 1.0e-30
+                           | j <- [0 .. nlev - 1] ]
+      !nsub = max 1 (min 100000 (ceiling (dt / max dt_stable 1.0e-30) :: Int))
+      !dtsub = dt / fromIntegral nsub
+      -- one explicit, mass-conserving finite-volume step;
+      -- accumulates the cumulative mass lost through the surface
+      stepDiff (!c, !mout) =
+        let !fsurf = w_surf * ((c VU.! 0) - atm_conc)
+            !fint  = VU.generate (max 0 (nlev - 1)) $ \j ->
+                       (wint VU.! j) * ((c VU.! j) - (c VU.! (j + 1)))
+            !c'    = VU.generate nlev $ \j ->
+              let !dzj    = dz_v VU.! j
+                  !fbelow = if j < nlev - 1 then fint VU.! j else 0.0
+                  !fabove = if j == 0 then fsurf else fint VU.! (j - 1)
+              in (c VU.! j) - dtsub / dzj * (fbelow - fabove)
+        in (c', mout + fsurf * dtsub)
+      iterDiff :: Int -> (VU.Vector Double, Double) -> (VU.Vector Double, Double)
+      iterDiff 0 acc = acc
+      iterDiff k acc = iterDiff (k - 1) (stepDiff acc)
+      (!new_ch4, !mass_out) =
+        if nlev <= 0 then (conc_react_v, 0.0)
+        else iterDiff nsub (conc_react_v, 0.0)
+      !surf_diff = mass_out / dt
       !surf_flux = surf_diff + tot_ebul + tot_aere
 
   in CH4ColumnResult
