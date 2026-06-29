@@ -57,6 +57,8 @@ module CLM.Driver.Vectorized
   , canopyFluxesStepV
   , surfaceAlbedoStepV
   , surfaceRadiationStepV
+    -- * Native vectorized pipeline
+  , runVectorizedPipeline
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -1585,3 +1587,46 @@ surfaceRadiationStepV albConst snicarOpt cfg ctx v =
        , vp_laisha = VU.concat   [ cstate_laisha_patch (clmCanopyState r) | r <- results ]
        , vp_fsun   = VU.concat   [ cstate_fsun_patch   (clmCanopyState r) | r <- results ]
        }
+
+-- ============================================================================
+-- Native vectorized pipeline
+-- ============================================================================
+
+-- | Run the full vectorized physics subset natively on the SoA state: chain
+-- every @*StepV@ through one 'CLMStateV' in the canonical 'wiredPhysicsPipeline'
+-- order (a single gather/scatter pair amortized over all steps). This is the
+-- SoA counterpart of running the corresponding scalar steps via 'clmDrv' on each
+-- column independently — and is bit-identical to it (proven by the equivalence
+-- test): @scatter sts (runVectorizedPipeline albC opt cfg ctx (gather sts))@
+-- equals composing the same scalar steps per column.
+--
+-- Covers the 20 vectorized per-column adapters. The non-vectorized pipeline
+-- steps (gridcell-reduction @energyBalance@, gated landunit dispatch, CN /
+-- diagnostic / coupling) are intentionally omitted — they are not per-column
+-- maps and are handled outside this SoA fast path.
+runVectorizedPipeline
+  :: SurfaceAlbedoConstants -> SnicarOptics
+  -> CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+runVectorizedPipeline albC opt cfg ctx v0 =
+  foldl (\v step -> step v) v0
+    [ drvInitStepV               cfg ctx
+    , fracH2oSfcStepV            cfg ctx
+    , surfaceRadiationStepV albC opt cfg ctx
+    , preFluxCalcsStepV          cfg ctx
+    , soilEvapResistanceStepV    cfg ctx
+    , surfaceHumidityStepV       cfg ctx
+    , baregroundFluxesStepV      cfg ctx
+    , canopyFluxesStepV          cfg ctx
+    , soilTemperatureFullStepV   cfg ctx
+    , soilFluxesStepV            cfg ctx
+    , snowPercolationStepV       cfg ctx
+    , soilHydrologyStepV         cfg ctx
+    , waterTableStepV            cfg ctx
+    , snowCompactionStepV        cfg ctx
+    , snowLayerCombineStepV      cfg ctx
+    , snowLayerDivideStepV       cfg ctx
+    , snowAgingStepV        opt  cfg ctx
+    , hydrologyDrainageStepV     cfg ctx
+    , waterBalanceStepV          cfg ctx
+    , surfaceAlbedoStepV    albC opt cfg ctx
+    ]

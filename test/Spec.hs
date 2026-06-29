@@ -25,7 +25,7 @@ import CLM.Driver.PhysicsAdapters
   , waterTableStep, surfaceHumidityStep, soilHydrologyStep, soilFluxesStep
   , baregroundFluxesStep, soilTemperatureFullStep
   , snowLayerCombineStep, snowLayerDivideStep, snowAgingStep
-  , surfaceAlbedoStep, surfaceRadiationStep )
+  , surfaceAlbedoStep, surfaceRadiationStep, surfaceRadiationStepWithAlbedo )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Types.GridcellData (GridcellData(..))
@@ -38,7 +38,8 @@ import CLM.Driver.Vectorized
   , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV, soilFluxesStepV
   , baregroundFluxesStepV, soilTemperatureFullStepV
   , snowLayerCombineStepV, snowLayerDivideStepV, snowAgingStepV
-  , canopyFluxesStepV, surfaceAlbedoStepV, surfaceRadiationStepV )
+  , canopyFluxesStepV, surfaceAlbedoStepV, surfaceRadiationStepV
+  , runVectorizedPipeline )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -59,7 +60,7 @@ import CLM.Infrastructure.DataStream
   ( mkDataStream, interpStream, streamLength, dataStreamFromVectors
   , constantStream, nDepRateAt )
 import CLM.Driver.PipelineRunner
-  ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
+  ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir, readSnicarOptics
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
   , writeDailyNetCDF, writeGridcellNetCDF, buildTimestepContext
   , SurfdataLandunits(..), readSurfdataLandunits, runMixedGridcell
@@ -2994,6 +2995,123 @@ main = hspec $ do
       map fsa  vec `shouldBe` map fsa  scalar
       map fvec vec `shouldBe` map fvec scalar
       map lsun vec `shouldBe` map lsun scalar
+
+  describe "Native vectorized pipeline (SoA composition)" $ do
+    -- The payoff: chain all 20 *StepV through one CLMStateV (single gather/scatter)
+    -- and prove it composes bit-identically with the same 20 scalar steps run per
+    -- column. Uses a uniform 1-patch synthetic state (consistent CSR; cold-start
+    -- sizes wtgcell to max-PFTs but active patch vectors to 1, which the flat CSR
+    -- can't bridge) with snl=0 (snow steps compose as identity). Field set is the
+    -- union of the per-step tests, so every step runs finitely.
+    it "runVectorizedPipeline == per-column scalar pipeline (bit-identical)" $ do
+      let albC = defaultSurfAlbConstants
+            { albsat = VU.replicate (15 * numrad) 0.10
+            , albdry = VU.replicate (15 * numrad) 0.20, mxsoilColor = 15 }
+          opt  = emptySnicarOptics
+          gridN = nlevsno + nlevgrnd
+          mkGrid val = VU.replicate gridN val
+          mkGrnd val = VU.replicate nlevgrnd val
+          ziV = VU.generate (gridN + 1) (\i -> fromIntegral i * 0.1)
+          zV  = VU.generate gridN       (\i -> fromIntegral i * 0.1 + 0.05)
+          rootfr = VU.generate nlevgrnd (\j -> if j < nlevsoi then 1.0 / fromIntegral nlevsoi else 0.0)
+          pctx = defaultTimestepContext
+            { tcDtime = 1800.0
+            , tcForcRain = VU.singleton 1.0e-4, tcForcSnow = VU.singleton 0.0
+            , tcForcT = VU.singleton 290.0, tcForcTh = VU.singleton 290.0
+            , tcForcQ = VU.singleton 0.008, tcForcPbot = VU.singleton 101325.0
+            , tcForcRho = VU.singleton 1.2, tcForcLwrad = VU.singleton 350.0
+            , tcForcWind = VU.singleton 3.0, tcForcHgt = 30.0
+            , tcForcSolad = VU.singleton 400.0, tcForcSolai = VU.singleton 100.0
+            , tcDeclin = 0.4, tcDeclinP1 = 0.4, tcNextswCday = 1.0 }
+          mkCol tgrnd tsoil =
+            defaultCLMState
+              { clmSnl = 0, clmCNActive = False, clmGPP = 0.0, clmPatchIvt = VU.singleton 1
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col = tgrnd, t_h2osfc_col = tgrnd
+                  , t_soisno_col = mkGrid tsoil, t_soisno_bef_col = mkGrid tsoil
+                  , t_veg_patch = 285.0, t_veg_patch_vec = VU.singleton 285.0
+                  , t_ref2m_patch = 0.0, t_ref2m_patch_vec = VU.singleton 0.0 }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid 5.0, h2osoi_ice_col = mkGrid 1.0
+                  , h2osno_col = 0.0, h2osfc_col = 0.0
+                  , liqcan_patch = 0.0, snocan_patch = 0.0
+                  , liqcan_patch_vec = VU.singleton 0.0, snocan_patch_vec = VU.singleton 0.0 }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = mkGrid 0.1, colZ = zV, colZi = ziV
+                  , watsat = mkGrnd 0.4, bsw = mkGrnd 6.0, sucsat = mkGrnd 200.0, hksat = mkGrnd 0.5
+                  , zii = 1000.0 }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_watsat_col = VU.empty, sstate_bsw_col = VU.empty
+                  , sstate_sucsat_col = VU.empty, sstate_hksat_col = VU.empty
+                  , sstate_soilbeta_col = VU.singleton 0.8
+                  , sstate_tkmg_col = mkGrnd 2.5, sstate_tkdry_col = mkGrnd 0.3
+                  , sstate_csol_col = mkGrnd 2.0e6, sstate_tksatu_col = mkGrnd 2.0
+                  , sstate_thk_override_col = VU.empty, sstate_cv_override_col = VU.empty
+                  , sstate_rootfr_patch = rootfr, sstate_rootfr_col = rootfr
+                  , sstate_smpso_patch = VU.singleton (-66000.0)
+                  , sstate_smpsc_patch = VU.singleton (-255000.0) }
+              , clmGridcell = (clmGridcell defaultCLMState)
+                  { grc_lat = VU.singleton 0.88, grc_lon = VU.singleton 0.0
+                  , grc_dayl = VU.singleton 40000.0, grc_max_dayl = VU.singleton 50000.0
+                  , grc_nbedrock = VU.singleton 20 }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell = VU.singleton 1.0
+                  , cstate_elai_patch = VU.singleton 2.0, cstate_esai_patch = VU.singleton 0.5
+                  , cstate_frac_veg_nosno_patch = VU.singleton 1, cstate_frac_veg_nosno_alb_patch = VU.singleton 1
+                  , cstate_htop_patch = VU.singleton 8.0, cstate_z0m_patch = VU.singleton 0.0
+                  , cstate_displa_patch = VU.singleton 0.0, cstate_laisun_patch = VU.singleton 0.0
+                  , cstate_laisha_patch = VU.singleton 0.0, cstate_parsun_patch = VU.singleton 0.0
+                  , cstate_parsha_patch = VU.singleton 0.0, cstate_dleaf_patch = VU.singleton 0.04
+                  , cstate_leaf_mr_vcm = 0.015
+                  , cstate_tlai_patch = VU.singleton 2.0, cstate_tsai_patch = VU.singleton 0.5
+                  , cstate_xl_patch = VU.singleton 0.1
+                  , cstate_rhol_patch = VU.fromList [0.1, 0.45], cstate_rhos_patch = VU.fromList [0.16, 0.39]
+                  , cstate_taul_patch = VU.fromList [0.05, 0.25], cstate_taus_patch = VU.fromList [0.001, 0.001]
+                  , cstate_psnsun_patch = VU.singleton 0.0, cstate_psnsha_patch = VU.singleton 0.0
+                  , cstate_lmrsun_patch = VU.singleton 0.0, cstate_lmrsha_patch = VU.singleton 0.0
+                  , cstate_fsun_patch = VU.singleton 0.0 }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_qg_col = VU.singleton 0.006, wdiag_qg_snow_col = VU.singleton 0.006
+                  , wdiag_qg_soil_col = VU.singleton 0.006, wdiag_qg_h2osfc_col = VU.singleton 0.006
+                  , wdiag_dqgdT_col = VU.singleton 4.0e-4
+                  , wdiag_frac_sno_col = VU.singleton 0.0, wdiag_frac_sno_eff_col = VU.singleton 0.0
+                  , wdiag_frac_h2osfc_col = VU.singleton 0.0, wdiag_snow_depth_col = VU.singleton 0.0
+                  , wdiag_frac_iceold_col = VU.singleton 0.0, wdiag_snw_rds_top_col = VU.singleton 54.0
+                  , wdiag_snow_persist_col = VU.singleton 0.0
+                  , wdiag_fwet_patch = VU.singleton 0.0, wdiag_fdry_patch = VU.singleton 1.0
+                  , wdiag_fcansno_patch = VU.singleton 0.0 }
+              , clmEnergyFlux = (clmEnergyFlux defaultCLMState) { sabv_patch_vec = VU.singleton 150.0 }
+              , clmP_e_ice = 6.0, clmP_baseflow_scalar = 0.01, clmP_fff = 0.5
+              , clmP_fmax = 0.5, clmP_n_baseflow = 1.0, clmP_n_melt_coef = 200.0 }
+          sts = [ mkCol 290.0 291.0, mkCol 285.0 286.0, mkCol 282.0 283.0 ]
+          scalarRef s = foldl (\x f -> f x) s
+            [ drvInitStep cfg pctx, fracH2oSfcStep cfg pctx
+            , surfaceRadiationStepWithAlbedo albC opt cfg pctx
+            , preFluxCalcsStep cfg pctx, soilEvapResistanceStep cfg pctx, surfaceHumidityStep cfg pctx
+            , baregroundFluxesStep cfg pctx, canopyFluxesStep cfg pctx
+            , soilTemperatureFullStep cfg pctx, soilFluxesStep cfg pctx
+            , snowPercolationStep cfg pctx, soilHydrologyStep cfg pctx, waterTableStep cfg pctx
+            , snowCompactionStep cfg pctx, snowLayerCombineStep cfg pctx, snowLayerDivideStep cfg pctx
+            , snowAgingStep opt cfg pctx
+            , hydrologyDrainageStep cfg pctx, waterBalanceStep cfg pctx
+            , surfaceAlbedoStep albC opt cfg pctx ]
+          cfg = defaultDriverConfig
+          scl = map scalarRef sts
+          vct = scatter sts (runVectorizedPipeline albC opt cfg pctx (gather sts))
+          tg s  = t_grnd_col (clmTemp s)
+          tso s = VU.toList (t_soisno_col (clmTemp s))
+          liq s = VU.toList (h2osoi_liq_col (clmWaterState s))
+          shT s = eflx_sh_tot_patch (clmEnergyFlux s)
+          fsa s = fsa_patch (clmEnergyFlux s)
+          fsun s = VU.toList (cstate_fsun_patch (clmCanopyState s))
+          errh s = VU.toList (wb_errh2o_col (clmWaterBalance s))
+      map tg   vct `shouldBe` map tg   scl
+      map tso  vct `shouldBe` map tso  scl
+      map liq  vct `shouldBe` map liq  scl
+      map shT  vct `shouldBe` map shT  scl
+      map fsa  vct `shouldBe` map fsa  scl
+      map fsun vct `shouldBe` map fsun scl
+      map errh vct `shouldBe` map errh scl
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
