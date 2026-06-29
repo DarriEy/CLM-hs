@@ -175,11 +175,17 @@ or needs writing (glacier).
     `scatter sts (fV cfg ctx (gather sts)) == map (f cfg ctx) sts` must hold bit-for-bit
     — so vectorization changes only storage + iteration (`VU.zipWith`/`generate`) while
     reusing the existing per-column physics KERNELS, keeping the suite green throughout.
-    First slice migrated + oracle-tested: `waterBalanceStepV`, `hydrologyDrainageStepV`
-    (suite 224/0). Each remaining adapter is now an independent, swarm-able unit with a
-    built-in equivalence test; the SoA layout is GPU/AD-ready. Recommended first targets
-    for the next wave (small, soil-path, few fields): `drvInitStep`,
-    `soilEvapResistanceStep`, `fracH2oSfcStep`, then the layer-resolved kernels.
+    Migrated + oracle-tested so far (suite 227/0): `waterBalanceStepV`,
+    `hydrologyDrainageStepV`, `drvInitStepV` (introduces the per-(col,layer)
+    `c*nlev+j` flatten), `soilEvapResistanceStepV` (multi-record reads + the
+    `calcBetaLeePielke1992` kernel + soil-vs-grid layer striding), and
+    `fracH2oSfcStepV` (snow-layer summation). The last three were drafted by a
+    parallel agent swarm (one adapter each) and integrated centrally — proving the
+    swarm-able workflow: each remaining adapter is an independent unit whose
+    bit-identical equivalence test is its own gate. The SoA layout is GPU/AD-ready.
+    Next wave (drafts welcome in parallel): `preFluxCalcsStep`, the snow-layer
+    kernels (`snowCompaction`/`snowLayerCombine`/`snowLayerDivide`), then the large
+    layer-loop solvers (`soilTemperatureFullStep`, `soilHydrologyStep`).
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake
