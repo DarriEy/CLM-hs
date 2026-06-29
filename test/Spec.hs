@@ -21,13 +21,16 @@ import CLM.Driver.PhysicsAdapters
   , cnProductsStep, cnAnnualUpdateStep
   , waterBalanceStep, hydrologyDrainageStep
   , drvInitStep, soilEvapResistanceStep, fracH2oSfcStep
-  , preFluxCalcsStep, snowCompactionStep, snowPercolationStep )
+  , preFluxCalcsStep, snowCompactionStep, snowPercolationStep
+  , waterTableStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
+import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Driver.Vectorized
   ( CLMStateV(..), gather, scatter
   , waterBalanceStepV, hydrologyDrainageStepV
   , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV
-  , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV )
+  , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV
+  , waterTableStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2486,6 +2489,41 @@ main = hspec $ do
       map liq vec `shouldBe` map liq scalar
       map ice vec `shouldBe` map ice scalar
       map tso vec `shouldBe` map tso scalar
+
+    it "waterTableStepV matches per-column waterTableStep bit-for-bit" $ do
+      let mkSoilV val = VU.replicate nlevsoi val
+          ziV = VU.generate (gridN + 1) (\i -> fromIntegral i * 0.1)
+          zV  = VU.generate gridN       (\i -> fromIntegral i * 0.1 + 0.05)
+          mkCol zwt qch tTop liq ice =
+            defaultCLMState
+              { clmColumn = (clmColumn defaultCLMState)
+                  { colZ = zV, colZi = ziV, colDz = mkGrid 0.1
+                  , watsat = mkSoilV 0.4, bsw = mkSoilV 6.0, sucsat = mkSoilV 200.0 }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid liq, h2osoi_ice_col = mkGrid ice }
+              , clmTemp = (clmTemp defaultCLMState) { t_soisno_col = mkGrid tTop }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_watsat_col = VU.empty
+                  , sstate_bsw_col    = VU.empty
+                  , sstate_sucsat_col = VU.empty }
+              , clmSoilHydro = (clmSoilHydro defaultCLMState)
+                  { sh_zwt_col         = VU.singleton zwt
+                  , sh_qcharge_col     = VU.singleton qch
+                  , sh_frost_table_col = VU.singleton 3.5
+                  , sh_zwt_perched_col = VU.singleton 3.5 } }
+          wsts   = [ mkCol 2.0 ( 1.0e-5) 290.0 0.30 0.00
+                   , mkCol 3.5 (-2.0e-6) 271.0 0.20 0.05
+                   , mkCol 1.5 ( 0.0   ) 285.0 0.35 0.00 ]
+          scalar = map (waterTableStep cfg ctx) wsts
+          vec    = scatter wsts (waterTableStepV cfg ctx (gather wsts))
+          zwt s  = VU.toList (sh_zwt_col         (clmSoilHydro s))
+          zwts s = VU.toList (sh_zwts_col        (clmSoilHydro s))
+          zwtp s = VU.toList (sh_zwt_perched_col (clmSoilHydro s))
+          ft s   = VU.toList (sh_frost_table_col (clmSoilHydro s))
+      map zwt  vec `shouldBe` map zwt  scalar
+      map zwts vec `shouldBe` map zwts scalar
+      map zwtp vec `shouldBe` map zwtp scalar
+      map ft   vec `shouldBe` map ft   scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do

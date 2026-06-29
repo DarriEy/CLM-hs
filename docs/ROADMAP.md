@@ -175,7 +175,9 @@ or needs writing (glacier).
     `scatter sts (fV cfg ctx (gather sts)) == map (f cfg ctx) sts` must hold bit-for-bit
     — so vectorization changes only storage + iteration (`VU.zipWith`/`generate`) while
     reusing the existing per-column physics KERNELS, keeping the suite green throughout.
-    Migrated + oracle-tested so far — **8 of ~37 adapters** (suite 230/0):
+    Migrated + oracle-tested so far — **9 of ~37 adapters** (suite 231/0), incl.
+    `waterTableStepV` (reuses the `waterTable` kernel + reproduces the per-column
+    frost/perched-table logic; soil-grid vs combined-grid striding):
     `waterBalanceStepV`, `hydrologyDrainageStepV`, `drvInitStepV` (introduces the
     per-(col,layer) `c*nlev+j` flatten), `soilEvapResistanceStepV` (multi-record +
     `calcBetaLeePielke1992` + soil-vs-grid striding), `fracH2oSfcStepV` (snow-layer
