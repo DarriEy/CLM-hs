@@ -232,7 +232,12 @@ blmaxAllom :: Int -> Double -> Double -> Double -> Double -> Double -> (Double, 
 blmaxAllom !lmode !d !p1 !p2 !p3 !c2b =
   case lmode of
     2 -> d2blmax2pwr d p1 p2 c2b
-    _ -> (nan, 0.0) -- Fallback modes not yet active or standard
+    -- Fortran allom_lmode also defines modes 1 (salda), 3 (dh2blmax_2pwr),
+    -- 4 (dh2blmax_3pwr) and 5 (dh2blmax_3pwr_grass). Those require extra inputs
+    -- (wood density, dbh_maxh, slatop, height/dhdd) not present in this wrapper's
+    -- parameter set, so they are unsupported here and return a NaN sentinel,
+    -- mirroring the Fortran endrun on an undefined allom_lmode.
+    _ -> (nan, 0.0)
 
 -- | Actual leaf biomass with trimming, damage, phenology
 bleaf
