@@ -3113,6 +3113,58 @@ main = hspec $ do
       map fsun vct `shouldBe` map fsun scl
       map errh vct `shouldBe` map errh scl
 
+    -- Native multi-patch: drive the REAL cold-start state (np>1 PFT patches per
+    -- column) through runVectorizedPipeline. This is the case the synthetic
+    -- 1-patch test could not reach: with np>1, surfaceRadiation writes
+    -- cstate_fsun_patch length-np while surfaceAlbedo collapses it to a
+    -- singleton — the one patch field whose per-column length varies through the
+    -- pipeline. vp_fsun_off (fsun's own traveling CSR offset) reconciles that, so
+    -- the flat CSR can now bridge a real multi-column gridcell. Replicating the
+    -- real column 3× reproduces the exact (0,4,3) slice that crashed before.
+    it "runVectorizedPipeline == scalar pipeline on the REAL cold-start state (np>1 multi-patch)" $ do
+      hasData <- doesFileExist "test/data/coldstart/t_veg.bin"
+      if not hasData
+        then pendingWith "cold-start data not available"
+        else do
+          (st0, _, albC) <- initCLMStateFromDir "test/data"
+          opt <- readSnicarOptics "test/data"
+          let cfg  = defaultDriverConfig
+              pctx = defaultTimestepContext
+                { tcDtime = 1800.0
+                , tcForcRain = VU.singleton 1.0e-4, tcForcSnow = VU.singleton 0.0
+                , tcForcT = VU.singleton 290.0, tcForcTh = VU.singleton 290.0
+                , tcForcQ = VU.singleton 0.008, tcForcPbot = VU.singleton 101325.0
+                , tcForcRho = VU.singleton 1.2, tcForcLwrad = VU.singleton 350.0
+                , tcForcWind = VU.singleton 3.0, tcForcHgt = 30.0
+                , tcForcSolad = VU.singleton 400.0, tcForcSolai = VU.singleton 100.0
+                , tcDeclin = 0.4, tcDeclinP1 = 0.4, tcNextswCday = 1.0 }
+              sts = [st0, st0, st0]  -- 3-column gridcell of the real np-patch column
+              scalarRef s = foldl (\x f -> f x) s
+                [ drvInitStep cfg pctx, fracH2oSfcStep cfg pctx
+                , surfaceRadiationStepWithAlbedo albC opt cfg pctx
+                , preFluxCalcsStep cfg pctx, soilEvapResistanceStep cfg pctx, surfaceHumidityStep cfg pctx
+                , baregroundFluxesStep cfg pctx, canopyFluxesStep cfg pctx
+                , soilTemperatureFullStep cfg pctx, soilFluxesStep cfg pctx
+                , snowPercolationStep cfg pctx, soilHydrologyStep cfg pctx, waterTableStep cfg pctx
+                , snowCompactionStep cfg pctx, snowLayerCombineStep cfg pctx, snowLayerDivideStep cfg pctx
+                , snowAgingStep opt cfg pctx
+                , hydrologyDrainageStep cfg pctx, waterBalanceStep cfg pctx
+                , surfaceAlbedoStep albC opt cfg pctx ]
+              scl = map scalarRef sts
+              vct = scatter sts (runVectorizedPipeline albC opt cfg pctx (gather sts))
+              npatch = VU.length (cstate_patch_wtgcell (clmCanopyState st0))
+              tg s   = t_grnd_col (clmTemp s)
+              tso s  = VU.toList (t_soisno_col (clmTemp s))
+              liq s  = VU.toList (h2osoi_liq_col (clmWaterState s))
+              fsun s = VU.toList (cstate_fsun_patch (clmCanopyState s))
+              elai s = VU.toList (cstate_elai_patch (clmCanopyState s))
+          npatch `shouldSatisfy` (>= 1)
+          map tg   vct `shouldBe` map tg   scl
+          map tso  vct `shouldBe` map tso  scl
+          map liq  vct `shouldBe` map liq  scl
+          map fsun vct `shouldBe` map fsun scl
+          map elai vct `shouldBe` map elai scl
+
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
       hasData <- doesFileExist "test/data/coldstart/t_veg.bin"
