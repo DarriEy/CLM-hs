@@ -19,11 +19,13 @@ import CLM.Driver.PhysicsAdapters
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
   , aggregateLnd2Atm, cndvStep, dustEmissionStep, vocEmissionStep
   , cnProductsStep, cnAnnualUpdateStep
-  , waterBalanceStep, hydrologyDrainageStep )
+  , waterBalanceStep, hydrologyDrainageStep
+  , drvInitStep, soilEvapResistanceStep, fracH2oSfcStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Driver.Vectorized
   ( CLMStateV(..), gather, scatter
-  , waterBalanceStepV, hydrologyDrainageStepV )
+  , waterBalanceStepV, hydrologyDrainageStepV
+  , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2345,6 +2347,72 @@ main = hspec $ do
           vec    = scatter sts (hydrologyDrainageStepV cfg ctx (gather sts))
           surf s = qflx_surf_col (clmWaterFlux s)
       map surf vec `shouldBe` map surf scalar
+
+    -- Layer-resolved + multi-record slices. Per-layer fields use the full
+    -- snow+soil grid (nlevsno+nlevgrnd) so the c*nlev+j flatten round-trips.
+    let gridN = nlevsno + nlevgrnd
+        -- fill every layer so any per-column top-index read is finite (avoids
+        -- div-by-zero NaN, which would break the oracle since NaN /= NaN)
+        mkGrid val = VU.replicate gridN val
+
+    it "drvInitStepV matches per-column drvInitStep bit-for-bit" $ do
+      let mkCol tsoiTop tsfc =
+            defaultCLMState
+              { clmTemp = (clmTemp defaultCLMState)
+                  { t_soisno_col     = mkGrid tsoiTop
+                  , t_soisno_bef_col = VU.replicate gridN 0.0
+                  , t_h2osfc_col     = tsfc
+                  , t_h2osfc_bef_col = 0.0 }
+              , clmEnergyFlux = (clmEnergyFlux defaultCLMState)
+                  { eflx_soil_grnd_col = 999.0 } }
+          dsts   = [ mkCol 270.0 274.0, mkCol 261.0 268.0, mkCol 281.0 285.0 ]
+          scalar = map (drvInitStep cfg ctx) dsts
+          vec    = scatter dsts (drvInitStepV cfg ctx (gather dsts))
+          tbef s = VU.toList (t_soisno_bef_col (clmTemp s))
+          hbef s = t_h2osfc_bef_col (clmTemp s)
+          eg   s = eflx_soil_grnd_col (clmEnergyFlux s)
+      map tbef vec `shouldBe` map tbef scalar
+      map hbef vec `shouldBe` map hbef scalar
+      map eg   vec `shouldBe` map eg   scalar
+
+    it "soilEvapResistanceStepV matches per-column soilEvapResistanceStep bit-for-bit" $ do
+      let mkSoil w0 = VU.generate nlevsoi (\j -> if j == 0 then w0 else 0.0)
+          mkCol snl liqTop iceTop dzTop wsat fsno fsfc =
+            defaultCLMState
+              { clmSnl = snl
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid liqTop, h2osoi_ice_col = mkGrid iceTop }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = mkGrid dzTop, watsat = mkSoil wsat }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col    = VU.singleton fsno
+                  , wdiag_frac_h2osfc_col = VU.singleton fsfc } }
+          bsts   = [ mkCol 0    5.0 0.0 0.1 0.4 0.0  0.0
+                   , mkCol 0   40.0 2.0 0.1 0.4 0.1  0.05
+                   , mkCol (-2) 8.0 1.0 0.1 0.4 0.3  0.0 ]
+          scalar = map (soilEvapResistanceStep cfg ctx) bsts
+          vec    = scatter bsts (soilEvapResistanceStepV cfg ctx (gather bsts))
+          beta s = VU.toList (sstate_soilbeta_col (clmSoilState s))
+      map beta vec `shouldBe` map beta scalar
+
+    it "fracH2oSfcStepV matches per-column fracH2oSfcStep bit-for-bit" $ do
+      let mkCol snl h2osfc h2osno fsno fsnoeff iceTop liqTop =
+            defaultCLMState
+              { clmSnl = snl
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osfc_col = h2osfc, h2osno_col = h2osno
+                  , h2osoi_ice_col = mkGrid iceTop, h2osoi_liq_col = mkGrid liqTop }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col     = VU.singleton fsno
+                  , wdiag_frac_sno_eff_col = VU.singleton fsnoeff
+                  , wdiag_frac_h2osfc_col  = VU.empty } }
+          fsts   = [ mkCol (-2) 5.0  10.0 0.30 0.30 3.0 2.0
+                   , mkCol (-1) 0.05 50.0 0.80 0.80 8.0 1.0
+                   , mkCol 0    0.0   0.0 0.00 0.00 0.0 0.0 ]
+          scalar = map (fracH2oSfcStep cfg ctx) fsts
+          vec    = scatter fsts (fracH2oSfcStepV cfg ctx (gather fsts))
+          fh s   = VU.toList (wdiag_frac_h2osfc_col (clmWaterDiagBulk s))
+      map fh vec `shouldBe` map fh scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
