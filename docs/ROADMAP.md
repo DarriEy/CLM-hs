@@ -376,11 +376,16 @@ The highest-leverage work is now **closing the validation gap** — converting
    independently, and aggregates through the real `c2g`. `runMixedGridcell` is now
    a thin wrapper over it (soil+lake, bit-identical). Validated by an N=3
    (soil+lake+soil) dispatch test + soil+lake equivalence to `runMixedGridcell`
-   (suite 218/0). REMAINING: add `GlacierCol`/`UrbanCol`/`WetlandCol` kinds (each
-   needs its column kernel made gridcell-aware) and a per-landunit Fortran
-   reference — the kernels exist (`glacierSMBStep`, `urbanFluxesStep`) but are not
-   yet wired as standalone column paths, and no non-soil/non-lake gridcell
-   reference run exists here.
+   (suite 218/0). **`GlacierCol` now wired (2026-06-29):** a third dispatch kind
+   runs the soil-thermal pipeline plus `glacierSMBStep` (snowpack capped at 10 m
+   SWE, excess → ice) on an `istice`-marked column — the first time
+   `glacierSMBStep` runs in a live multi-step driver (previously a standalone unit
+   test only). Validated by a soil+lake+glacier 3-kind dispatch test (bounded,
+   finite, area-weighted aggregate; suite 219/0). REMAINING: `UrbanCol`/`WetlandCol`
+   kinds (the `urbanFluxesStep` kernel exists but needs standalone-column wiring),
+   and a per-landunit Fortran reference — glacier/urban remain
+   sanity/conservation-validated only (no non-soil/non-lake gridcell reference run
+   exists here).
 4. **Streams**: LAI / crop-calendar / urban-tv readers on the `DataStream` core.
 
 Deferred (large / out of scope): crop (unported, needs a crop landunit), the

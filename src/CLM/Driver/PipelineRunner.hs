@@ -48,10 +48,11 @@ import CLM.Driver.CLMDriver
   , PhysicsPipeline(..)
   , defaultCLMState, defaultDriverState, defaultTimestepContext
   , clmDrv )
+import CLM.Types.LandunitData (LandunitData(..))
 import CLM.BioGeoChem.CNDVStep (seedDGVS, tkfrz)
 import CLM.Driver.PhysicsAdapters
   ( wiredPhysicsPipeline, initCNDecompPools
-  , lakeFluxesStep, lakeTemperatureStep )
+  , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep )
 import CLM.BioGeoPhys.CanopyHydrology
   ( CanopyHydrologyParams(..), defaultCanopyHydroParams )
 
@@ -1238,8 +1239,13 @@ readSurfdataLandunits path = do
 -- | Physics-path dispatch for a column in the multi-landunit gridcell driver.
 -- A column's landunit type fixes which kernel it runs each timestep:
 -- 'SoilCol' runs the full wired physics pipeline (@clmDrv@); 'LakeCol' runs the
--- lake surface-flux + temperature path.
-data ColumnKind = SoilCol | LakeCol
+-- lake surface-flux + temperature path; 'GlacierCol' runs the soil-thermal
+-- pipeline plus the glacier surface-mass-balance step ('glacierSMBStep'), on a
+-- column marked as the land-ice ('istice') landunit so the SMB gate fires
+-- (snowpack capped at 10 m SWE, excess routed to ice). The glacier path is
+-- sanity/conservation-validated only — no non-soil/non-lake gridcell Fortran
+-- reference exists here.
+data ColumnKind = SoilCol | LakeCol | GlacierCol
   deriving (Eq, Show)
 
 -- | General N-column gridcell driver (PHASE4_SCOPE Option A, column-loop).
@@ -1290,10 +1296,17 @@ runGridcellColumns dir specs lakeDepth dtime off nsteps = do
             { lake_t_lake_col = VU.replicate nlevlak 277.0
             , lake_lake_icefrac_col = VU.replicate nlevlak 0.0 }
         }
+      -- glacier column: soil cold-start state, but marked as the land-ice
+      -- (istice) landunit so glacierSMBStep's gate fires in stepCol.
+      initCol GlacierCol =
+        st0 { clmLandunit = (clmLandunit st0) { lun_itype = VU.singleton IS.istice } }
       -- advance one column one step, dispatching by kind
       stepCol ctx (SoilCol, drvSt, st) = clmDrv cfg pipeline ctx drvSt st
       stepCol ctx (LakeCol, drvSt, st) =
         (drvSt, lakeTemperatureStep cfg ctx (lakeFluxesStep cfg ctx st))
+      stepCol ctx (GlacierCol, drvSt, st) =
+        let (drvSt', st') = clmDrv cfg pipeline ctx drvSt st
+        in  (drvSt', glacierSMBStep cfg ctx st')
       diag st = (t_grnd_col (clmTemp st), h2osno_col (clmWaterState st))
       go _ step acc | step > nsteps = return (reverse acc)
       go cols step acc = do
