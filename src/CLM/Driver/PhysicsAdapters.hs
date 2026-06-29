@@ -320,14 +320,17 @@ wiredPhysicsPipeline albConst chParams snicarOpt = defaultPhysicsPipeline
 
 -- | CNDV step adapter: advances the carried DGVS state by one timestep. The
 -- climate accumulators run every step; the annual establishment/light/mortality
--- driver fires on the year boundary (tcIsBegCurrYear). A no-op unless CN is
--- active and the DGVS state has been seeded with at least one patch.
+-- driver fires on the year boundary (tcIsBegCurrYear). The state passes through
+-- unchanged unless CN is active and the DGVS state has been seeded with at least
+-- one patch.
 --
 -- The climate accumulators (agdd, agddtw, t_mo, prec365, annsum_npp) are
 -- faithful to the Fortran reference. The PFT bioclimatic limits
--- (tcmin/tcmax/gddmin/twmax) currently use documented placeholder constants
--- pending pftcon (pftpar28-31) wiring; woody/tree classification is taken from
--- the carried per-patch PFT-type vector.
+-- (tcmin/tcmax/gddmin/twmax) are resolved per patch from the PFT type: the real
+-- per-PFT constants loaded from clm5_params.nc (pftpar28-31, via
+-- readDGVEcophysCon) are used when present, otherwise the built-in LPJ/CLM-DGVM
+-- table defaults apply. Woody/tree classification is taken from the carried
+-- per-patch PFT-type vector.
 cndvStep :: PhysicsStep
 cndvStep _cfg ctx st
   | not (clmCNActive st)           = st
@@ -2944,7 +2947,7 @@ energyBalanceStep _cfg ctx st =
 -- NOT by bit-for-bit Fortran parity. The atm->lnd downscaling direction is a
 -- topographic operation; on a single column with no sub-grid topography it is
 -- the identity (the downscaled column forcing equals the gridcell forcing) and
--- is therefore intentionally a no-op at this scope.
+-- is therefore intentionally inactive at this scope.
 aggregateLnd2Atm :: CLMState -> Lnd2AtmData
 aggregateLnd2Atm st =
   let !ef     = clmEnergyFlux st
@@ -3426,8 +3429,9 @@ snowLayerDivideStep _cfg _ctx st =
 -- wdiag_snw_rds_top_col: aged each step (dry + wet metamorphism), partially
 -- reset toward fresh by new snowfall. Works for the bulk no-layer regime
 -- (snl>=0) as well as resolved layers, since the offline pipeline runs bulk
--- snow. Fed to SNICAR in the albedo step. No-op when aging tables are absent
--- (=> radius stays fresh, SNICAR uses ~54um as before).
+-- snow. Fed to SNICAR in the albedo step. When the aging tables are absent the
+-- state passes through unchanged (=> radius stays fresh, SNICAR uses ~54um as
+-- before).
 snowAgingStep :: SnicarOptics -> PhysicsStep
 snowAgingStep snicarOpt _cfg ctx st =
   let temp  = clmTemp st
@@ -3823,7 +3827,7 @@ cnPhenologyAdvance ctx st =
 -- | Urban turbulent + radiative fluxes for an urban landunit column.
 --
 -- Gated on the urban landunit types (Fortran @isturb_tbd=7@, @isturb_hd=8@,
--- @isturb_md=9@); non-urban columns pass through unchanged. (The previous stub
+-- @isturb_md=9@); non-urban columns pass through unchanged. (An earlier version
 -- mistakenly tested @it /= 6@, which is WETLAND, and then did nothing — both
 -- bugs are fixed here.)
 --
@@ -4770,7 +4774,7 @@ cnPostDrainageStep _cfg ctx st0 =
 -- | CN balance check step.
 -- Verifies C and N conservation (logs warnings if imbalanced).
 -- | CN precision control + non-negativity guardrail (CNPrecisionControlMod),
--- then carbon-isotope (C13/C14) tracking. Replaces the former no-op. After the
+-- then carbon-isotope (C13/C14) tracking. After the
 -- runtime CN fluxes (allocation, growth respiration, gap mortality, phenology,
 -- decomposition) update the column pools, this truncates round-off-level pools
 -- to zero and enforces non-negativity (precision control), then advances the
@@ -4896,7 +4900,8 @@ cnDecompPoolCN = [20, 20, 20, 12, 12, 12, 200]
 -- scalar soil-organic-C and litter-C totals (gC/m2), with an exponential
 -- vertical profile and standard CENTURY pool fractions. Sets
 -- clmNlevDecomp/clmNDecompPools so the free-running vectorized cascade
--- ('runVectorizedNCycle') engages. Idempotent guard: no-op if already set.
+-- ('runVectorizedNCycle') engages. Idempotent: returns the state unchanged if
+-- the pools have already been initialized.
 initCNDecompPools :: CLMState -> CLMState
 initCNDecompPools st
   | not (VU.null (sbgccs_decomp_cpools_vr_col (clmSoilBGCCState st))) = st
