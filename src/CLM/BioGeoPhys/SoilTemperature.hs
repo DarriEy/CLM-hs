@@ -4,8 +4,9 @@
 --
 -- Implements the implicit Crank-Nicolson diffusion scheme with phase change
 -- for a single non-urban, non-lake column.  Urban columns and excess-ice
--- coordinate stretching are not yet handled; they can be added later when the
--- urban and excess-ice modules are ported.
+-- vertical coordinate stretching fall outside this single-column scope: no
+-- urban or excess-ice column is run on this path, so those branches are
+-- intentionally absent and belong with the urban and excess-ice modules.
 --
 -- Key functions (all pure or in ST):
 --
@@ -382,7 +383,7 @@ data TridiagInput = TridiagInput
 
 -- | Build and solve the tridiagonal temperature system.
 -- Returns updated temperatures for snow+soil layers and surface water.
--- For simplicity this handles the non-urban case where the system runs
+-- This handles the non-urban case where the system runs
 -- from snl+1 to nlevgrnd, plus a coupled surface-water equation handled
 -- by correcting the soil-layer-1 row.
 --
