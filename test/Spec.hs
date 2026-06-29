@@ -41,7 +41,7 @@ import CLM.Infrastructure.DataStream
 import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
-  , writeDailyNetCDF, buildTimestepContext
+  , writeDailyNetCDF, writeGridcellNetCDF, buildTimestepContext
   , SurfdataLandunits(..), readSurfdataLandunits, runMixedGridcell
   , runGridcellColumns, ColumnKind(..), GridDiag(..) )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
@@ -2266,6 +2266,42 @@ main = hspec $ do
                             in not (isNaN tg) && tg > 200.0 && tg < 340.0) cols
               && abs (gd_t_grnd g - (0.7 * gd_t_grnd (cols !! 0) + 0.3 * gd_t_grnd (cols !! 1))) < 1.0e-9
         all ok res `shouldBe` True
+
+    it "writes the gridcell GridDiag series to a NetCDF history tape (round-trip)" $ do
+      hasBow <- doesDirectoryExist "test/data_bow/coldstart"
+      if not hasBow then pendingWith "test/data_bow not available"
+      else do
+        let off = 26304; nst = 6; ld = 10.0
+        res <- runGridcellColumns "test/data_bow"
+                 [ (IS.istsoil, 0.5, SoilCol)
+                 , (IS.istdlak, 0.3, LakeCol)
+                 , (IS.istice,  0.2, GlacierCol) ]
+                 ld 3600.0 off nst
+        let grids = map fst res
+            ncpath = "test/data_bow/gridcell-roundtrip.nc"
+        wres <- writeGridcellNetCDF ncpath grids
+        case wres of
+          Left e   -> expectationFailure ("writeGridcellNetCDF failed: " ++ e)
+          Right () -> do
+            ores <- ncOpen ncpath
+            case ores of
+              Left e -> expectationFailure ("ncOpen failed: " ++ e)
+              Right nc -> do
+                let checkVar name f = do
+                      r <- ncReadDouble1D nc name
+                      case r of
+                        Left e -> expectationFailure (name ++ " read failed: " ++ e)
+                        Right v -> do
+                          VU.length v `shouldBe` length grids
+                          let diffs = zipWith (\a b -> abs (a - b)) (VU.toList v) (map f grids)
+                          maximum diffs `shouldSatisfy` (< 1.0e-12)
+                checkVar "T_GRND"      gd_t_grnd
+                checkVar "H2OSNO"      gd_h2osno
+                checkVar "EFLX_SH_TOT" gd_eflx_sh
+                checkVar "EFLX_LH_TOT" gd_eflx_lh
+                checkVar "FSA"         gd_fsa
+                ncClose nc
+        removeFile ncpath
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do

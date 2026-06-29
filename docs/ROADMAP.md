@@ -388,9 +388,13 @@ The highest-leverage work is now **closing the validation gap** — converting
    {T_GRND, H2OSNO, SH, LH, FSA} — with **every field averaged column→gridcell
    through the real `c2g`** (conservation-tested to 1e-9), so the multi-landunit cell
    emits coupler-grade gridcell means rather than just T_GRND/H2OSNO. Suite 220/0.
-   REMAINING: `WetlandCol` (≈ soil path), a per-landunit Fortran reference
-   (glacier/urban stay sanity/conservation-validated only), and connecting the
-   `GridDiag` bundle to `aggregateLnd2Atm` / NetCDF history output.
+   **NetCDF gridcell output now wired (2026-06-29):** `writeGridcellNetCDF` emits
+   the `GridDiag` series (T_GRND/H2OSNO/SH/LH/FSA) to a CF-attributed, time-
+   dimensioned NetCDF history tape, round-trip validated to 1e-12 — so a
+   mixed-landunit cell produces a real machine-comparable gridcell history file
+   (suite 221/0). REMAINING: `WetlandCol` (≈ soil path), a per-landunit Fortran
+   reference (glacier/urban stay sanity/conservation-validated only), and routing
+   the `GridDiag` bundle into the `aggregateLnd2Atm` lnd→atm coupling carriers.
 4. **Streams**: LAI / crop-calendar / urban-tv readers on the `DataStream` core.
 
 Deferred (large / out of scope): crop (unported, needs a crop landunit), the
