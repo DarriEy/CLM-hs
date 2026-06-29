@@ -23,7 +23,8 @@ import CLM.Driver.PhysicsAdapters
   , drvInitStep, soilEvapResistanceStep, fracH2oSfcStep
   , preFluxCalcsStep, snowCompactionStep, snowPercolationStep
   , waterTableStep, surfaceHumidityStep, soilHydrologyStep, soilFluxesStep
-  , baregroundFluxesStep, soilTemperatureFullStep )
+  , baregroundFluxesStep, soilTemperatureFullStep
+  , snowLayerCombineStep, snowLayerDivideStep, snowAgingStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Types.GridcellData (GridcellData(..))
@@ -33,7 +34,8 @@ import CLM.Driver.Vectorized
   , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV
   , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV
   , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV, soilFluxesStepV
-  , baregroundFluxesStepV, soilTemperatureFullStepV )
+  , baregroundFluxesStepV, soilTemperatureFullStepV
+  , snowLayerCombineStepV, snowLayerDivideStepV, snowAgingStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2782,6 +2784,83 @@ main = hspec $ do
       map liq  vec `shouldBe` map liq  scalar
       map gnet vec `shouldBe` map gnet scalar
       map snm  vec `shouldBe` map snm  scalar
+
+    it "snowLayerCombineStepV matches per-column snowLayerCombineStep bit-for-bit" $ do
+      let gridN1 = gridN + 1
+          mkCol snl dz ice liq tcol fsno fsnoeff h2osno sd =
+            defaultCLMState
+              { clmSnl = snl
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = VU.replicate gridN dz
+                  , colZ  = VU.generate gridN  (\j -> negate (fromIntegral j) * dz)
+                  , colZi = VU.generate gridN1 (\j -> negate (fromIntegral j) * dz) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = VU.replicate gridN ice
+                  , h2osoi_liq_col = VU.replicate gridN liq, h2osno_col = h2osno }
+              , clmTemp = (clmTemp defaultCLMState) { t_soisno_col = VU.replicate gridN tcol }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col = VU.singleton fsno
+                  , wdiag_frac_sno_eff_col = VU.singleton fsnoeff
+                  , wdiag_snow_depth_col = VU.singleton sd } }
+          csts = [ mkCol (-3) 0.004 5.0 1.0 263.0 0.9 0.9 18.0 0.012
+                 , mkCol (-2) 0.006 8.0 0.5 270.0 0.7 0.7 12.0 0.012
+                 , mkCol 0    0.050 0.0 0.0 275.0 0.0 0.0  0.0 0.0   ]
+          scalar = map (snowLayerCombineStep cfg ctx) csts
+          vec    = scatter csts (snowLayerCombineStepV cfg ctx (gather csts))
+          snl s = clmSnl s; dz s = VU.toList (colDz (clmColumn s)); zi s = VU.toList (colZi (clmColumn s))
+          t s = VU.toList (t_soisno_col (clmTemp s)); liq s = VU.toList (h2osoi_liq_col (clmWaterState s))
+      map snl vec `shouldBe` map snl scalar
+      map dz  vec `shouldBe` map dz  scalar
+      map zi  vec `shouldBe` map zi  scalar
+      map t   vec `shouldBe` map t   scalar
+      map liq vec `shouldBe` map liq scalar
+
+    it "snowLayerDivideStepV matches per-column snowLayerDivideStep bit-for-bit" $ do
+      let gridN1 = gridN + 1
+          mkCol snl dz ice liq tcol fsno =
+            defaultCLMState
+              { clmSnl = snl
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = VU.replicate gridN dz
+                  , colZ  = VU.generate gridN  (\j -> negate (fromIntegral j) * dz)
+                  , colZi = VU.generate gridN1 (\j -> negate (fromIntegral j) * dz) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = VU.replicate gridN ice, h2osoi_liq_col = VU.replicate gridN liq }
+              , clmTemp = (clmTemp defaultCLMState) { t_soisno_col = VU.replicate gridN tcol }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col = VU.singleton fsno } }
+          dsts = [ mkCol (-1) 0.10 5.0 1.0 263.0 1.0
+                 , mkCol (-2) 0.04 8.0 0.5 270.0 1.0
+                 , mkCol 0    0.05 0.0 0.0 275.0 0.0 ]
+          scalar = map (snowLayerDivideStep cfg ctx) dsts
+          vec    = scatter dsts (snowLayerDivideStepV cfg ctx (gather dsts))
+          snl s = clmSnl s; dz s = VU.toList (colDz (clmColumn s)); zi s = VU.toList (colZi (clmColumn s))
+          t s = VU.toList (t_soisno_col (clmTemp s)); liq s = VU.toList (h2osoi_liq_col (clmWaterState s))
+      map snl vec `shouldBe` map snl scalar
+      map dz  vec `shouldBe` map dz  scalar
+      map zi  vec `shouldBe` map zi  scalar
+      map t   vec `shouldBe` map t   scalar
+      map liq vec `shouldBe` map liq scalar
+
+    it "snowAgingStepV matches per-column snowAgingStep bit-for-bit" $ do
+      let opt = emptySnicarOptics  -- no aging tables => identity passthrough; validates the bridge
+          mkCol snl rds snowd fsno ice liq tcol h2o =
+            defaultCLMState
+              { clmSnl = snl
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = mkGrid ice, h2osoi_liq_col = mkGrid liq, h2osno_col = h2o }
+              , clmTemp = (clmTemp defaultCLMState) { t_soisno_col = mkGrid tcol }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col = VU.singleton fsno
+                  , wdiag_snow_depth_col = VU.singleton snowd
+                  , wdiag_snw_rds_top_col = VU.singleton rds } }
+          asts = [ mkCol (-2) 120.0  0.3 0.9 5.0 1.0 263.0 50.0
+                 , mkCol (-1)  80.0  0.1 0.5 2.0 0.5 270.0 20.0
+                 , mkCol 0     54.526 0.0 0.0 0.0 0.0 275.0  0.0 ]
+          scalar = map (snowAgingStep opt cfg ctx) asts
+          vec    = scatter asts (snowAgingStepV opt cfg ctx (gather asts))
+          rds s  = VU.toList (wdiag_snw_rds_top_col (clmWaterDiagBulk s))
+      map rds vec `shouldBe` map rds scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
