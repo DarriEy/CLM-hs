@@ -42,6 +42,7 @@ module CLM.Driver.Vectorized
   , snowCompactionStepV
   , snowPercolationStepV
   , waterTableStepV
+  , surfaceHumidityStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -74,6 +75,8 @@ import CLM.BioGeoPhys.SnowHydrology
 import CLM.Driver.PhysicsAdapters (snowCompactionStep)
 import CLM.BioGeoPhys.SoilHydrology
   ( waterTable, WaterTableResult(..), defaultSoilHydroParams )
+import CLM.BioGeoPhys.SurfaceHumidity
+  ( surfaceHumidity, SurfaceHumidityInput(..), SurfaceHumidityResult(..) )
 
 -- | The combined snow+soil grid stride for per-(column,layer) fields.
 gridNlev :: Int
@@ -131,6 +134,12 @@ data CLMStateV = CLMStateV
   , vsh_zwts          :: !(VU.Vector Double)  -- ^ shallower water-table depth [m] (write)
   , vsh_zwt_perched   :: !(VU.Vector Double)  -- ^ perched water-table depth [m] (write)
   , vsh_frost_table   :: !(VU.Vector Double)  -- ^ frost-table depth [m] (write)
+    -- surface humidity --------------------------------------------------------
+  , vqg               :: !(VU.Vector Double)  -- ^ ground specific humidity [kg/kg] (write)
+  , vqg_snow          :: !(VU.Vector Double)  -- ^ snow specific humidity (write)
+  , vqg_soil          :: !(VU.Vector Double)  -- ^ soil specific humidity (write)
+  , vqg_h2osfc        :: !(VU.Vector Double)  -- ^ surface-water specific humidity (write)
+  , vdqgdT            :: !(VU.Vector Double)  -- ^ d(qg)/dT [kg/kg/K] (write)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -173,6 +182,11 @@ gather sts = CLMStateV
   , vsh_zwts          = VU.fromList [ scal0 (sh_zwts_col        (clmSoilHydro s)) | s <- sts ]
   , vsh_zwt_perched   = VU.fromList [ scal0 (sh_zwt_perched_col (clmSoilHydro s)) | s <- sts ]
   , vsh_frost_table   = VU.fromList [ scal0 (sh_frost_table_col (clmSoilHydro s)) | s <- sts ]
+  , vqg               = VU.fromList [ scal0 (wdiag_qg_col        (clmWaterDiagBulk s)) | s <- sts ]
+  , vqg_snow          = VU.fromList [ scal0 (wdiag_qg_snow_col   (clmWaterDiagBulk s)) | s <- sts ]
+  , vqg_soil          = VU.fromList [ scal0 (wdiag_qg_soil_col   (clmWaterDiagBulk s)) | s <- sts ]
+  , vqg_h2osfc        = VU.fromList [ scal0 (wdiag_qg_h2osfc_col (clmWaterDiagBulk s)) | s <- sts ]
+  , vdqgdT            = VU.fromList [ scal0 (wdiag_dqgdT_col     (clmWaterDiagBulk s)) | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -218,7 +232,12 @@ scatter bases v =
          , clmWaterDiagBulk = (clmWaterDiagBulk s)
              { wdiag_frac_h2osfc_col = VU.singleton (vfrac_h2osfc v VU.! i)
              , wdiag_frac_iceold_col = VU.singleton (vfrac_iceold v VU.! i)
-             , wdiag_snow_depth_col  = VU.singleton (vsnow_depth  v VU.! i) }
+             , wdiag_snow_depth_col  = VU.singleton (vsnow_depth  v VU.! i)
+             , wdiag_qg_col          = VU.singleton (vqg        v VU.! i)
+             , wdiag_qg_snow_col     = VU.singleton (vqg_snow   v VU.! i)
+             , wdiag_qg_soil_col     = VU.singleton (vqg_soil   v VU.! i)
+             , wdiag_qg_h2osfc_col   = VU.singleton (vqg_h2osfc v VU.! i)
+             , wdiag_dqgdT_col       = VU.singleton (vdqgdT     v VU.! i) }
          , clmSoilState = (clmSoilState s)
              { sstate_soilbeta_col = VU.singleton (vsoilbeta v VU.! i) }
          , clmSoilHydro = (clmSoilHydro s)
@@ -498,4 +517,57 @@ waterTableStepV _cfg ctx v =
        , vsh_zwts        = VU.fromList [ z | (z, _) <- results ]
        , vsh_zwt_perched = VU.fromList [ f | (_, f) <- results ]
        , vsh_frost_table = VU.fromList [ f | (_, f) <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.surfaceHumidityStep': reuses the
+-- 'surfaceHumidity' kernel per column. Top layer index = @nlevsno+snl@;
+-- watsat/sucsat/bsw read on the soil grid at @topIdx-nlevsno@. @forc_pbot@/
+-- @forc_q@ are global (ctx) with the scalar adapter's exact defaults. Writes the
+-- ground specific-humidity diagnostics; layer structure unchanged.
+surfaceHumidityStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+surfaceHumidityStepV _cfg ctx v =
+  let nlev = vNlev v
+      sIdx vec k = if k >= 0 && k < VU.length vec then vec VU.! k else 0.0
+      forc_pbot = if VU.null (tcForcPbot ctx) then 101325.0 else tcForcPbot ctx VU.! 0
+      forc_q    = if VU.null (tcForcQ    ctx) then 0.005    else tcForcQ    ctx VU.! 0
+      perCol c =
+        let snl    = vsnl v VU.! c
+            topIdx = nlevsno + snl
+            base   = c * nlev
+            t_grnd = vt_grnd v VU.! c
+            inp = SurfaceHumidityInput
+              { shi_lunType        = 1
+              , shi_colType        = 1
+              , shi_snl            = snl
+              , shi_dz_top         = sIdx (vcolDz v)      (base + topIdx)
+              , shi_h2osoi_liq_top = sIdx (vh2osoi_liq v) (base + topIdx)
+              , shi_h2osoi_ice_top = sIdx (vh2osoi_ice v) (base + topIdx)
+              , shi_watsat_top     = if topIdx >= nlevsno
+                                     then sIdx (vwatsat v) (c * nlevsoi + (topIdx - nlevsno))
+                                     else 1.0
+              , shi_smpmin         = -1.0e8
+              , shi_sucsat_top     = if topIdx >= nlevsno
+                                     then sIdx (vsucsat v) (c * nlevsoi + (topIdx - nlevsno))
+                                     else 0.0
+              , shi_bsw_top        = if topIdx >= nlevsno
+                                     then sIdx (vbsw v) (c * nlevsoi + (topIdx - nlevsno))
+                                     else 1.0
+              , shi_frac_sno_eff   = vfrac_sno_eff v VU.! c
+              , shi_frac_h2osfc    = vfrac_h2osfc v VU.! c
+              , shi_t_soisno_top   = sIdx (vt_soisno v) (base + topIdx)
+              , shi_t_soisno_snow  = if snl < 0
+                                     then sIdx (vt_soisno v) (base + nlevsno + snl)
+                                     else t_grnd
+              , shi_t_grnd         = t_grnd
+              , shi_t_h2osfc       = vt_h2osfc v VU.! c
+              , shi_forc_pbot      = forc_pbot
+              , shi_forc_q         = forc_q
+              }
+        in surfaceHumidity inp
+      results = map perCol [0 .. vNumCols v - 1]
+  in v { vqg        = VU.fromList [ shr_qg        r | r <- results ]
+       , vqg_snow   = VU.fromList [ shr_qg_snow   r | r <- results ]
+       , vqg_soil   = VU.fromList [ shr_qg_soil   r | r <- results ]
+       , vqg_h2osfc = VU.fromList [ shr_qg_h2osfc r | r <- results ]
+       , vdqgdT     = VU.fromList [ shr_dqgdT     r | r <- results ]
        }
