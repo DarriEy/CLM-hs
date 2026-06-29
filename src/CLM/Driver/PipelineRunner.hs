@@ -1258,21 +1258,14 @@ runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
       cfg      = defaultDriverConfig
       nlevlak  = 10
       ntot     = nlevsno + nlevgrnd
-      -- Build the real subgrid hierarchy for this 1-gridcell / 2-landunit /
-      -- 2-column mixed cell (soil landunit -> soil column, lake landunit ->
-      -- lake column) and route the gridcell aggregation through the ported
-      -- SubgridAverage.c2g1d (column -> gridcell by area weight) instead of an
-      -- ad-hoc weighted sum. The down-propagated gridcell weight is the
-      -- landunit area weight (each column is the whole of its landunit).
-      sgBounds = IS.BoundsType 1 1 1 2 1 2 1 2
-      (sgLunA, sgL1) = IS.addLandunit (IS.defaultLandunitData 2) 0 1 IS.istsoil wNatveg
-      (sgLunB, sgL2) = IS.addLandunit sgLunA 1 1 IS.istdlak wLake
-      (sgColA, sgC1) = IS.addColumn (IS.defaultSubgridColumnData 2) sgLunB 0 sgL1 1 1.0 False
-      (sgColB, sgC2) = IS.addColumn sgColA sgLunB 1 sgL2 1 1.0 False
-      (sgPchA, _)    = IS.addPatch (IS.defaultSubgridPatchData 2) sgColB sgLunB 0 sgC1 1 1.0 0
-      (sgPchB, _)    = IS.addPatch sgPchA sgColB sgLunB 1 sgC2 0 1.0 0
-      (_, sgLun, sgCol0) = IS.clmPtrsCompdown sgBounds (IS.defaultGridcellData 1) sgLunB sgColB sgPchB
-      sgCol = sgCol0 { IS.colWtgcell = VU.fromList [wNatveg, wLake] }
+      -- Build the real subgrid hierarchy for this 1-gridcell mixed cell via the
+      -- reusable 'buildSingleColumnGridcell' primitive (soil landunit -> soil
+      -- column, lake landunit -> lake column, one patch each) and route the
+      -- gridcell aggregation through the ported SubgridAverage.c2g1d (column ->
+      -- gridcell by area weight) instead of an ad-hoc weighted sum. The list is
+      -- data-driven, so adding further landunits is a one-line change.
+      (sgBounds, _sgGrc, sgLun, sgCol, _sgPch) =
+        IS.buildSingleColumnGridcell [(IS.istsoil, wNatveg), (IS.istdlak, wLake)]
       -- column -> gridcell area-weighted aggregate of a soil/lake column pair
       c2g sVal lVal =
         SA.c2g1d (VU.fromList [sVal, lVal]) sgBounds SA.C2LUnity SA.L2GUnity sgCol sgLun
