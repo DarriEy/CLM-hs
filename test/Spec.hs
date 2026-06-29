@@ -22,7 +22,8 @@ import CLM.Driver.PhysicsAdapters
   , waterBalanceStep, hydrologyDrainageStep
   , drvInitStep, soilEvapResistanceStep, fracH2oSfcStep
   , preFluxCalcsStep, snowCompactionStep, snowPercolationStep
-  , waterTableStep, surfaceHumidityStep, soilHydrologyStep, soilFluxesStep )
+  , waterTableStep, surfaceHumidityStep, soilHydrologyStep, soilFluxesStep
+  , baregroundFluxesStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Driver.Vectorized
@@ -30,7 +31,8 @@ import CLM.Driver.Vectorized
   , waterBalanceStepV, hydrologyDrainageStepV
   , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV
   , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV
-  , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV, soilFluxesStepV )
+  , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV, soilFluxesStepV
+  , baregroundFluxesStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2682,6 +2684,49 @@ main = hspec $ do
       map lhTv vec `shouldBe` map lhTv scalar
       map et   vec `shouldBe` map et   scalar
       map etv  vec `shouldBe` map etv  scalar
+
+    it "baregroundFluxesStepV matches per-column baregroundFluxesStep bit-for-bit (CSR)" $ do
+      let mkSoilV val = VU.replicate nlevsoi val
+          mkCol snl tgrnd tsfc tsoiTop liqTop iceTop dzTop wsat zii'
+                qg qgsn qgso qghf dqdt sbeta wt elai esai fve =
+            defaultCLMState
+              { clmSnl = snl
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col = tgrnd, t_h2osfc_col = tsfc, t_soisno_col = mkGrid tsoiTop }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid liqTop, h2osoi_ice_col = mkGrid iceTop }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = mkGrid dzTop, watsat = mkSoilV wsat, zii = zii' }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_qg_col = VU.singleton qg, wdiag_qg_snow_col = VU.singleton qgsn
+                  , wdiag_qg_soil_col = VU.singleton qgso, wdiag_qg_h2osfc_col = VU.singleton qghf
+                  , wdiag_dqgdT_col = VU.singleton dqdt }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_soilbeta_col = VU.singleton sbeta }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell        = VU.singleton wt
+                  , cstate_elai_patch           = VU.singleton elai
+                  , cstate_esai_patch           = VU.singleton esai
+                  , cstate_frac_veg_nosno_patch = VU.singleton fve } }
+          bsts = [ mkCol (-2) 270.0 271.0 268.0  5.0 1.0 0.1 0.4 1000.0 0.004 0.005 0.004 0.004 2.0e-4 0.5 1.0 0.5 0.2 1
+                 , mkCol 0    285.0 286.0 285.0 40.0 0.0 0.1 0.4 1000.0 0.010 0.011 0.010 0.012 3.0e-4 1.0 1.0 0.0 0.0 0
+                 , mkCol (-1) 263.0 265.0 264.0  8.0 2.0 0.1 0.4  800.0 0.002 0.003 0.002 0.002 1.0e-4 0.0 1.0 3.0 1.0 1 ]
+          scalar = map (baregroundFluxesStep cfg ctx) bsts
+          vec    = scatter bsts (baregroundFluxesStepV cfg ctx (gather bsts))
+          shT s  = eflx_sh_tot_patch   (clmEnergyFlux s)
+          lhT s  = eflx_lh_tot_patch   (clmEnergyFlux s)
+          cg  s  = cgrnd_patch         (clmEnergyFlux s)
+          eg  s  = qflx_evap_grnd_col  (clmWaterFlux s)
+          tr  s  = t_ref2m_patch       (clmTemp s)
+          ram s  = VU.toList (fvel_ram1_patch  (clmFrictionVel s))
+          ust s  = VU.toList (fvel_ustar_patch (clmFrictionVel s))
+      map shT vec `shouldBe` map shT scalar
+      map lhT vec `shouldBe` map lhT scalar
+      map cg  vec `shouldBe` map cg  scalar
+      map eg  vec `shouldBe` map eg  scalar
+      map tr  vec `shouldBe` map tr  scalar
+      map ram vec `shouldBe` map ram scalar
+      map ust vec `shouldBe` map ust scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
