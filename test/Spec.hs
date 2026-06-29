@@ -2219,6 +2219,26 @@ main = hspec $ do
         let eq ((gA, cs), (gB, sB, lB)) = gA == gB && cs == [sB, lB]
         and (map eq (zip gen mix)) `shouldBe` True
 
+    it "dispatches a soil + lake + glacier gridcell (3 landunit kinds)" $ do
+      hasBow <- doesDirectoryExist "test/data_bow/coldstart"
+      if not hasBow then pendingWith "test/data_bow not available"
+      else do
+        let off = 26304; nst = 6; ld = 10.0
+        res <- runGridcellColumns "test/data_bow"
+                 [ (IS.istsoil, 0.5, SoilCol)
+                 , (IS.istdlak, 0.3, LakeCol)
+                 , (IS.istice,  0.2, GlacierCol) ]
+                 ld 3600.0 off nst
+        length res `shouldBe` nst
+        -- all three column kinds run stably (bounded, finite) and the gridcell
+        -- aggregate is the area-weighted mean of all three.
+        let ok ((gTG, _), cols) =
+              length cols == 3
+              && all (\(tg, sn) -> not (isNaN tg) && tg > 200.0 && tg < 320.0 && not (isNaN sn))
+                     cols
+              && abs (gTG - sum (zipWith (*) [0.5, 0.3, 0.2] (map fst cols))) < 1.0e-9
+        all ok res `shouldBe` True
+
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
       hasData <- doesFileExist "test/data/coldstart/t_veg.bin"
