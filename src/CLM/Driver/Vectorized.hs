@@ -41,13 +41,14 @@ module CLM.Driver.Vectorized
   , preFluxCalcsStepV
   , snowCompactionStepV
   , snowPercolationStepV
+  , waterTableStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
 
 import CLM.Driver.CLMDriver        (CLMState(..), TimestepContext(..), defaultCLMState)
 import CLM.Constants.ControlFlags  (CLMDriverConfig)
-import CLM.Constants.PhysicalConstants (nlevsno, nlevgrnd, nlevsoi, tfrz)
+import CLM.Constants.PhysicalConstants (nlevsno, nlevgrnd, nlevsoi, tfrz, denice)
 import CLM.Types.WaterFluxData          (WaterFluxData(..))
 import CLM.Types.WaterBalanceData       (WaterBalanceData(..))
 import CLM.Types.WaterStateData         (WaterStateData(..))
@@ -56,6 +57,7 @@ import CLM.Types.TemperatureData        (TemperatureData(..))
 import CLM.Types.EnergyFluxData         (EnergyFluxData(..))
 import CLM.Types.WaterDiagnosticBulkData (WaterDiagnosticBulkData(..))
 import CLM.Types.SoilStateData          (SoilStateData(..))
+import CLM.Types.SoilHydrologyData      (SoilHydrologyData(..))
 import CLM.BioGeoPhys.BalanceCheck
   ( waterBalanceCol, WaterBalanceColInput(..), WaterBalanceColOutput(..) )
 import CLM.BioGeoPhys.HydrologyDrainage
@@ -70,6 +72,8 @@ import CLM.BioGeoPhys.SnowHydrology
 -- directly per column (rebuild single-column state -> run -> re-flatten). No
 -- import cycle: PhysicsAdapters does not import this module.
 import CLM.Driver.PhysicsAdapters (snowCompactionStep)
+import CLM.BioGeoPhys.SoilHydrology
+  ( waterTable, WaterTableResult(..), defaultSoilHydroParams )
 
 -- | The combined snow+soil grid stride for per-(column,layer) fields.
 gridNlev :: Int
@@ -117,6 +121,16 @@ data CLMStateV = CLMStateV
   , vcolZ          :: !(VU.Vector Double)  -- ^ per-(col,layer) midpoint depth, stride vNlev (read+write)
   , vcolZi         :: !(VU.Vector Double)  -- ^ per-(col,interface) depth, stride vNlev+1 (read+write)
   , vsnow_depth    :: !(VU.Vector Double)  -- ^ snow depth of covered area [m] (write)
+    -- water table -------------------------------------------------------------
+  , vbsw              :: !(VU.Vector Double)  -- ^ per-(col,soil-layer) Clapp-Hornberger b (read, stride nlevsoi)
+  , vsucsat           :: !(VU.Vector Double)  -- ^ per-(col,soil-layer) sat. matric potential (read, stride nlevsoi)
+  , vwt_zwt_in        :: !(VU.Vector Double)  -- ^ prognostic water-table depth in [m] (read; fallback 2.0)
+  , vwt_qcharge       :: !(VU.Vector Double)  -- ^ aquifer recharge [mm/s] (read; fallback 0.0)
+  , vwt_frost_carried :: !(VU.Vector Double)  -- ^ carried frost table for snow-free columns (read)
+  , vsh_zwt           :: !(VU.Vector Double)  -- ^ water-table depth zwt [m] (write)
+  , vsh_zwts          :: !(VU.Vector Double)  -- ^ shallower water-table depth [m] (write)
+  , vsh_zwt_perched   :: !(VU.Vector Double)  -- ^ perched water-table depth [m] (write)
+  , vsh_frost_table   :: !(VU.Vector Double)  -- ^ frost-table depth [m] (write)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -150,9 +164,28 @@ gather sts = CLMStateV
   , vcolZ          = VU.concat   [ padTo gridNlev       (colZ  (clmColumn s)) | s <- sts ]
   , vcolZi         = VU.concat   [ padTo (gridNlev + 1) (colZi (clmColumn s)) | s <- sts ]
   , vsnow_depth    = VU.fromList [ scal0 (wdiag_snow_depth_col (clmWaterDiagBulk s)) | s <- sts ]
+  , vbsw              = VU.concat   [ padTo nlevsoi (rslv (sstate_bsw_col    (clmSoilState s)) (bsw    (clmColumn s))) | s <- sts ]
+  , vsucsat           = VU.concat   [ padTo nlevsoi (rslv (sstate_sucsat_col (clmSoilState s)) (sucsat (clmColumn s))) | s <- sts ]
+  , vwt_zwt_in        = VU.fromList [ scalOr 2.0 (sh_zwt_col     (clmSoilHydro s)) | s <- sts ]
+  , vwt_qcharge       = VU.fromList [ scalOr 0.0 (sh_qcharge_col (clmSoilHydro s)) | s <- sts ]
+  , vwt_frost_carried = VU.fromList [ frostCarried s | s <- sts ]
+  , vsh_zwt           = VU.fromList [ scal0 (sh_zwt_col         (clmSoilHydro s)) | s <- sts ]
+  , vsh_zwts          = VU.fromList [ scal0 (sh_zwts_col        (clmSoilHydro s)) | s <- sts ]
+  , vsh_zwt_perched   = VU.fromList [ scal0 (sh_zwt_perched_col (clmSoilHydro s)) | s <- sts ]
+  , vsh_frost_table   = VU.fromList [ scal0 (sh_frost_table_col (clmSoilHydro s)) | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
+    scalOr d v = if VU.null v then d else v VU.! 0
+    rslv ss colv = if VU.null ss then colv else ss   -- sstate else column (mirrors adapter)
+    frostCarried s =
+      let ft  = sh_frost_table_col (clmSoilHydro s)
+          zp  = sh_zwt_perched_col (clmSoilHydro s)
+          ziS = VU.slice nlevsno (nlevgrnd + 1) (padTo (gridNlev + 1) (colZi (clmColumn s)))
+          six vec i = if i >= 0 && i < VU.length vec then vec VU.! i else 0.0
+      in if not (VU.null ft) then ft VU.! 0
+         else if not (VU.null zp) then zp VU.! 0
+         else six ziS nlevsoi
 
 -- | Overlay the SoA state's WRITE-target fields back onto a per-column base list
 -- (one base 'CLMState' per column, same order/length as the 'gather'ed list),
@@ -188,6 +221,11 @@ scatter bases v =
              , wdiag_snow_depth_col  = VU.singleton (vsnow_depth  v VU.! i) }
          , clmSoilState = (clmSoilState s)
              { sstate_soilbeta_col = VU.singleton (vsoilbeta v VU.! i) }
+         , clmSoilHydro = (clmSoilHydro s)
+             { sh_zwt_col         = VU.singleton (vsh_zwt         v VU.! i)
+             , sh_zwts_col        = VU.singleton (vsh_zwts        v VU.! i)
+             , sh_zwt_perched_col = VU.singleton (vsh_zwt_perched v VU.! i)
+             , sh_frost_table_col = VU.singleton (vsh_frost_table v VU.! i) }
          }
      | (i, s) <- zip [0 ..] bases ]
 
@@ -400,4 +438,64 @@ snowPercolationStepV _cfg ctx v =
   in v { vh2osoi_liq = VU.concat [ l | (l, _, _) <- results ]
        , vh2osoi_ice = VU.concat [ i | (_, i, _) <- results ]
        , vt_soisno   = VU.concat [ t | (_, _, t) <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.waterTableStep': reuses the
+-- 'waterTable' kernel per column and reproduces the adapter's per-column frost-
+-- and perched-table logic (computed outside the kernel). Soil-grid reads
+-- (watsat/bsw/sucsat) stride @nlevsoi@; combined-grid reads stride @vNlev@;
+-- @colZi@ on its @vNlev+1@ interface stride. @sh_zwts@ mirrors the scalar
+-- adapter (= @wtr_zwt@); @h2osoi_liq@ is left unchanged (the kernel returns it
+-- unchanged — drainage modifies it elsewhere). Frost-table carried value is
+-- resolved in 'gather' (@vwt_frost_carried@).
+waterTableStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+waterTableStepV _cfg ctx v =
+  let dtime  = tcDtime ctx
+      nlev   = vNlev v
+      nlevZi = nlev + 1
+      six vec i = if i >= 0 && i < VU.length vec then vec VU.! i else 0.0
+      colCompute c =
+        let base   = c * nlev
+            baseZi = c * nlevZi
+            baseS  = c * nlevsoi
+            watsat_c = VU.slice baseS nlevsoi (vwatsat v)
+            bsw_c    = VU.slice baseS nlevsoi (vbsw    v)
+            sucsat_c = VU.slice baseS nlevsoi (vsucsat v)
+            liq_c    = VU.slice base  nlev (vh2osoi_liq v)
+            ice_c    = VU.slice base  nlev (vh2osoi_ice v)
+            tsno_c   = VU.slice base  nlev (vt_soisno   v)
+            dz_full  = VU.slice base  nlev (vcolDz v)
+            z_full   = VU.slice base  nlev (vcolZ  v)
+            zi_full  = VU.slice baseZi nlevZi (vcolZi v)
+            z_soil  = VU.slice nlevsno nlevgrnd       z_full
+            zi_soil = VU.slice nlevsno (nlevgrnd + 1) zi_full
+            dz_soil = VU.slice nlevsno nlevgrnd       dz_full
+            eff_por = VU.generate nlevsoi $ \j ->
+              let ws_j  = six watsat_c j
+                  ice_j = six ice_c   (j + nlevsno)
+                  dz_j  = six dz_full (j + nlevsno)
+              in max 0.01 (ws_j - ice_j / (denice * dz_j))
+            zwt_in  = vwt_zwt_in  v VU.! c
+            qcharge = vwt_qcharge v VU.! c
+            wa_in   = 5000.0
+            result = waterTable defaultSoilHydroParams
+                       dtime qcharge zwt_in wa_in
+                       watsat_c bsw_c sucsat_c eff_por
+                       z_soil zi_soil dz_soil
+                       liq_c ice_c tsno_c
+            t_top_soil = six tsno_c nlevsno
+            soilFrozen = t_top_soil <= tfrz
+            k_frz_idx  = let go k | k >= nlevsoi = nlevsoi
+                                  | six tsno_c (nlevsno + k - 1) > tfrz
+                                    && six tsno_c (nlevsno + k) <= tfrz = k
+                                  | otherwise = go (k + 1)
+                         in if soilFrozen then 1 else go 1
+            frost_table_val = if soilFrozen then six zi_soil k_frz_idx
+                              else vwt_frost_carried v VU.! c
+        in (wtr_zwt result, frost_table_val)
+      results = map colCompute [0 .. vNumCols v - 1]
+  in v { vsh_zwt         = VU.fromList [ z | (z, _) <- results ]
+       , vsh_zwts        = VU.fromList [ z | (z, _) <- results ]
+       , vsh_zwt_perched = VU.fromList [ f | (_, f) <- results ]
+       , vsh_frost_table = VU.fromList [ f | (_, f) <- results ]
        }
