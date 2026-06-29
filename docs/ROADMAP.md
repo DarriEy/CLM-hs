@@ -369,6 +369,18 @@ The highest-leverage work is now **closing the validation gap** — converting
 3. **Landunit gridcell runs**: column-type dispatch in the driver so glacier/
    urban/wetland columns run in `runMixedGridcell` (lake already does), each vs
    its Fortran reference (`clm_glacier_run`, etc.).
+   **IN PROGRESS (2026-06-29).** The driver is now a general, data-driven
+   N-column loop: `runGridcellColumns [(landunit itype, area weight, ColumnKind)]`
+   dispatches each column's physics by `ColumnKind` (`SoilCol` → full `clmDrv`
+   pipeline, `LakeCol` → lake flux+temperature path), threads per-column state
+   independently, and aggregates through the real `c2g`. `runMixedGridcell` is now
+   a thin wrapper over it (soil+lake, bit-identical). Validated by an N=3
+   (soil+lake+soil) dispatch test + soil+lake equivalence to `runMixedGridcell`
+   (suite 218/0). REMAINING: add `GlacierCol`/`UrbanCol`/`WetlandCol` kinds (each
+   needs its column kernel made gridcell-aware) and a per-landunit Fortran
+   reference — the kernels exist (`glacierSMBStep`, `urbanFluxesStep`) but are not
+   yet wired as standalone column paths, and no non-soil/non-lake gridcell
+   reference run exists here.
 4. **Streams**: LAI / crop-calendar / urban-tv readers on the `DataStream` core.
 
 Deferred (large / out of scope): crop (unported, needs a crop landunit), the

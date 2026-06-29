@@ -42,7 +42,8 @@ import CLM.Driver.PipelineRunner
   ( PipelineConfig(..), defaultPipelineConfig, initCLMStateFromDir
   , runPipeline, DailyDiag(..), runCLMForQrunoff, readFortranRestart
   , writeDailyNetCDF, buildTimestepContext
-  , SurfdataLandunits(..), readSurfdataLandunits, runMixedGridcell )
+  , SurfdataLandunits(..), readSurfdataLandunits, runMixedGridcell
+  , runGridcellColumns, ColumnKind(..) )
 import CLM.Types.ColumnData (ColumnData(..), defaultColumnData)
 import CLM.Types.LakeStateData (LakeStateData(..))
 import CLM.BioGeoPhys.GlacierSurfaceMassBalance
@@ -2190,6 +2191,33 @@ main = hspec $ do
                 lakePure = map (\(_, _, (l, _)) -> l) lakeOnly
             and (zipWith (\a b -> abs (a - b) < 1.0e-12) soilMix soilPure) `shouldBe` True
             and (zipWith (\a b -> abs (a - b) < 1.0e-12) lakeMix lakePure) `shouldBe` True
+
+    it "runGridcellColumns dispatches an N-column gridcell by type (#12)" $ do
+      hasBow <- doesDirectoryExist "test/data_bow/coldstart"
+      if not hasBow then pendingWith "test/data_bow not available"
+      else do
+        let off = 26304; nst = 12; ld = 10.0
+        -- a 3-column gridcell: soil + lake + a second soil column
+        res <- runGridcellColumns "test/data_bow"
+                 [ (IS.istsoil, 0.5, SoilCol)
+                 , (IS.istdlak, 0.3, LakeCol)
+                 , (IS.istsoil, 0.2, SoilCol) ]
+                 ld 3600.0 off nst
+        length res `shouldBe` nst
+        -- gridcell aggregate is the area-weighted mean of all 3 columns
+        let okAgg ((gTG, _), cols) =
+              length cols == 3
+              && abs (gTG - sum (zipWith (*) [0.5, 0.3, 0.2] (map fst cols))) < 1.0e-9
+        all okAgg res `shouldBe` True
+        -- the two soil columns share kind + forcing, so their trajectories match
+        let twoSoilAgree (_, cols) = abs (fst (cols !! 0) - fst (cols !! 2)) < 1.0e-12
+        all twoSoilAgree res `shouldBe` True
+        -- equivalence: the general driver on [soil, lake] reproduces runMixedGridcell
+        gen <- runGridcellColumns "test/data_bow"
+                 [(IS.istsoil, 0.6, SoilCol), (IS.istdlak, 0.4, LakeCol)] ld 3600.0 off nst
+        mix <- runMixedGridcell "test/data_bow" 0.6 0.4 ld 3600.0 off nst
+        let eq ((gA, cs), (gB, sB, lB)) = gA == gB && cs == [sB, lB]
+        and (map eq (zip gen mix)) `shouldBe` True
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do

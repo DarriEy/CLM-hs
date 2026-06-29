@@ -26,6 +26,8 @@ module CLM.Driver.PipelineRunner
   , SurfdataLandunits(..)
   , readSurfdataLandunits
   , runMixedGridcell
+  , runGridcellColumns
+  , ColumnKind(..)
     -- * CLM forward model for calibration (extracts QRUNOFF)
   , runCLMForQrunoff
     -- * Re-exports for pipeline users
@@ -1233,24 +1235,33 @@ readSurfdataLandunits path = do
         , sl_pct_crop = cr, sl_pct_wetland = wl, sl_pct_urban = ur
         , sl_lakedepth = ld }
 
--- | Run a soil + lake gridcell as the column-loop realization of the
--- multi-landunit driver (PHASE4_SCOPE Option A): the soil column runs the full
--- wired physics pipeline and the lake column runs the lake surface-flux +
--- temperature path, both sharing the same forcing; gridcell diagnostics are the
--- area-weighted average of the two columns. Columns are independent within a
+-- | Physics-path dispatch for a column in the multi-landunit gridcell driver.
+-- A column's landunit type fixes which kernel it runs each timestep:
+-- 'SoilCol' runs the full wired physics pipeline (@clmDrv@); 'LakeCol' runs the
+-- lake surface-flux + temperature path.
+data ColumnKind = SoilCol | LakeCol
+  deriving (Eq, Show)
+
+-- | General N-column gridcell driver (PHASE4_SCOPE Option A, column-loop).
+-- Each spec is @(landunit itype, gridcell area weight, ColumnKind)@. The driver
+-- builds the real subgrid hierarchy from the spec list via
+-- 'IS.buildSingleColumnGridcell', dispatches each column's physics by its
+-- 'ColumnKind' (threading each column's own state independently), and routes the
+-- per-column diagnostics to the gridcell through the ported
+-- 'SubgridAverage.c2g1d' (area-weighted). Columns are independent within a
 -- timestep (they interact only through the gridcell aggregate to the
--- atmosphere), so looping the kernel and weighting the outputs is exact for one
--- gridcell. Returns per-step @(gridcell, soil, lake)@ of @(T_GRND, H2OSNO)@.
-runMixedGridcell
-  :: FilePath  -- ^ data dir (soil base + forcing)
-  -> Double    -- ^ natural-veg (soil) area weight
-  -> Double    -- ^ lake area weight
-  -> Double    -- ^ lake depth [m]
-  -> Double    -- ^ dtime [s]
-  -> Int       -- ^ forcing step offset
-  -> Int       -- ^ number of steps
-  -> IO [((Double, Double), (Double, Double), (Double, Double))]
-runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
+-- atmosphere), so the loop is exact for one gridcell and generalizes past the
+-- hand-wired soil+lake pair. Returns, per step, the gridcell @(T_GRND, H2OSNO)@
+-- aggregate and the per-column list in spec order.
+runGridcellColumns
+  :: FilePath                    -- ^ data dir (soil base + forcing)
+  -> [(Int, Double, ColumnKind)] -- ^ one entry per column: (landunit itype, area weight, kind)
+  -> Double                      -- ^ lake depth [m]
+  -> Double                      -- ^ dtime [s]
+  -> Int                         -- ^ forcing step offset
+  -> Int                         -- ^ number of steps
+  -> IO [((Double, Double), [(Double, Double)])]
+runGridcellColumns dir specs lakeDepth dtime off nsteps = do
   (st0, forcing, albConst) <- initCLMStateFromDir dir
   chParams  <- readCanopyHydroParamsFromDir dir
   snicarOpt <- readSnicarOptics dir
@@ -1258,20 +1269,15 @@ runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
       cfg      = defaultDriverConfig
       nlevlak  = 10
       ntot     = nlevsno + nlevgrnd
-      -- Build the real subgrid hierarchy for this 1-gridcell mixed cell via the
-      -- reusable 'buildSingleColumnGridcell' primitive (soil landunit -> soil
-      -- column, lake landunit -> lake column, one patch each) and route the
-      -- gridcell aggregation through the ported SubgridAverage.c2g1d (column ->
-      -- gridcell by area weight) instead of an ad-hoc weighted sum. The list is
-      -- data-driven, so adding further landunits is a one-line change.
       (sgBounds, _sgGrc, sgLun, sgCol, _sgPch) =
-        IS.buildSingleColumnGridcell [(IS.istsoil, wNatveg), (IS.istdlak, wLake)]
-      -- column -> gridcell area-weighted aggregate of a soil/lake column pair
-      c2g sVal lVal =
-        SA.c2g1d (VU.fromList [sVal, lVal]) sgBounds SA.C2LUnity SA.L2GUnity sgCol sgLun
-          VU.! 0
-      soil0    = st0
-      lake0    = st0
+        IS.buildSingleColumnGridcell [(lt, w) | (lt, w, _) <- specs]
+      -- column -> gridcell area-weighted aggregate over all columns (spec order)
+      c2gN vals =
+        SA.c2g1d (VU.fromList vals) sgBounds SA.C2LUnity SA.L2GUnity sgCol sgLun VU.! 0
+      kinds = [ k | (_, _, k) <- specs ]
+      -- per-column cold-start state, by kind
+      initCol SoilCol = st0
+      initCol LakeCol = st0
         { clmColumn = (clmColumn st0) { lakedepth = lakeDepth }
         , clmSnl = 0
         , clmTemp = (clmTemp st0)
@@ -1284,19 +1290,44 @@ runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
             { lake_t_lake_col = VU.replicate nlevlak 277.0
             , lake_lake_icefrac_col = VU.replicate nlevlak 0.0 }
         }
-      go _ _ _ step acc | step > nsteps = return (reverse acc)
-      go soilSt lakeSt drvSt step acc = do
+      -- advance one column one step, dispatching by kind
+      stepCol ctx (SoilCol, drvSt, st) = clmDrv cfg pipeline ctx drvSt st
+      stepCol ctx (LakeCol, drvSt, st) =
+        (drvSt, lakeTemperatureStep cfg ctx (lakeFluxesStep cfg ctx st))
+      diag st = (t_grnd_col (clmTemp st), h2osno_col (clmWaterState st))
+      go _ step acc | step > nsteps = return (reverse acc)
+      go cols step acc = do
         let ctx = buildTimestepContext forcing (off + step) dtime
-            (drvSt', soilSt') = clmDrv cfg pipeline ctx drvSt soilSt
-            lakeSt' = lakeTemperatureStep cfg ctx (lakeFluxesStep cfg ctx lakeSt)
-            sTG = t_grnd_col (clmTemp soilSt')
-            sSno = h2osno_col (clmWaterState soilSt')
-            lTG = t_grnd_col (clmTemp lakeSt')
-            lSno = h2osno_col (clmWaterState lakeSt')
-        go soilSt' lakeSt' drvSt' (step + 1)
-           ( ( (c2g sTG lTG, c2g sSno lSno)
-             , (sTG, sSno), (lTG, lSno) ) : acc )
-  go soil0 lake0 defaultDriverState 1 []
+            advanced = [ (k, d', s')
+                       | (k, d, s) <- cols, let (d', s') = stepCol ctx (k, d, s) ]
+            colDiags = [ diag s | (_, _, s) <- advanced ]
+            gTG  = c2gN [ tg | (tg, _) <- colDiags ]
+            gSno = c2gN [ sn | (_, sn) <- colDiags ]
+        go advanced (step + 1) (((gTG, gSno), colDiags) : acc)
+      cols0 = [ (k, defaultDriverState, initCol k) | k <- kinds ]
+  go cols0 1 []
+
+-- | Run a soil + lake gridcell — the original two-landunit realization of the
+-- multi-landunit driver, now a thin wrapper over the general
+-- 'runGridcellColumns'. Returns per-step @(gridcell, soil, lake)@ of
+-- @(T_GRND, H2OSNO)@ (bit-identical to the previous hand-wired loop).
+runMixedGridcell
+  :: FilePath  -- ^ data dir (soil base + forcing)
+  -> Double    -- ^ natural-veg (soil) area weight
+  -> Double    -- ^ lake area weight
+  -> Double    -- ^ lake depth [m]
+  -> Double    -- ^ dtime [s]
+  -> Int       -- ^ forcing step offset
+  -> Int       -- ^ number of steps
+  -> IO [((Double, Double), (Double, Double), (Double, Double))]
+runMixedGridcell dir wNatveg wLake lakeDepth dtime off nsteps = do
+  res <- runGridcellColumns dir
+           [(IS.istsoil, wNatveg, SoilCol), (IS.istdlak, wLake, LakeCol)]
+           lakeDepth dtime off nsteps
+  return (map toTriple res)
+  where
+    toTriple (g, [soil, lake]) = (g, soil, lake)
+    toTriple _ = error "runMixedGridcell: expected exactly soil + lake columns"
 
 runPipeline :: PipelineConfig -> IO [DailyDiag]
 runPipeline cfg = do
