@@ -22,6 +22,7 @@ module CLM.Driver.PipelineRunner
   , writeDailyCSV
     -- * NetCDF history output
   , writeDailyNetCDF
+  , writeGridcellNetCDF
     -- * Multi-landunit gridcell (Phase 4 #12, Option A: column-loop)
   , SurfdataLandunits(..)
   , readSurfdataLandunits
@@ -1473,7 +1474,27 @@ runPipeline cfg = do
 -- | Write the daily diagnostics to a NetCDF history tape: one "time" dimension,
 -- one double variable per field, each with a @long_name@ attribute. This is the
 -- single-column analogue of a CLM history tape — machine-comparable to CTSM
--- output instead of CSV. Returns 'Left' on any NetCDF write error.
+-- | Write the gridcell-mean diagnostic series from a multi-landunit run
+-- ('runGridcellColumns') to a NetCDF history tape — one CF-attributed,
+-- time-dimensioned variable per 'GridDiag' field. Each value is already the
+-- area-weighted column→gridcell mean (via the real @c2g@), so this is the
+-- coupler-grade gridcell output of a mixed-landunit cell. Companion to
+-- 'writeDailyNetCDF' (single-column daily tape); round-trips with the NetCDF
+-- reader the same way.
+writeGridcellNetCDF :: FilePath -> [GridDiag] -> IO (Either String ())
+writeGridcellNetCDF path grids =
+  ncWriteTimeseries path (length grids)
+    [ ("T_GRND",      "gridcell ground temperature [K]",         col gd_t_grnd)
+    , ("H2OSNO",      "gridcell snow water equivalent [kg/m2]",  col gd_h2osno)
+    , ("EFLX_SH_TOT", "gridcell sensible heat flux [W/m2]",      col gd_eflx_sh)
+    , ("EFLX_LH_TOT", "gridcell latent heat flux [W/m2]",        col gd_eflx_lh)
+    , ("FSA",         "gridcell absorbed solar radiation [W/m2]", col gd_fsa)
+    ]
+  where
+    col f = VU.fromList (map f grids)
+
+-- | Write the daily single-column diagnostic accumulator to a NetCDF history tape
+-- instead of CSV. Returns 'Left' on any NetCDF write error.
 --
 -- Round-trips with the NetCDF reader (write then 'ncReadDouble1D' returns the
 -- same series), which is how it is validated.
