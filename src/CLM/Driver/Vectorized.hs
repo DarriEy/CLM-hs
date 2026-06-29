@@ -38,13 +38,16 @@ module CLM.Driver.Vectorized
   , drvInitStepV
   , soilEvapResistanceStepV
   , fracH2oSfcStepV
+  , preFluxCalcsStepV
+  , snowCompactionStepV
+  , snowPercolationStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
 
-import CLM.Driver.CLMDriver        (CLMState(..), TimestepContext(..))
+import CLM.Driver.CLMDriver        (CLMState(..), TimestepContext(..), defaultCLMState)
 import CLM.Constants.ControlFlags  (CLMDriverConfig)
-import CLM.Constants.PhysicalConstants (nlevsno, nlevgrnd, nlevsoi)
+import CLM.Constants.PhysicalConstants (nlevsno, nlevgrnd, nlevsoi, tfrz)
 import CLM.Types.WaterFluxData          (WaterFluxData(..))
 import CLM.Types.WaterBalanceData       (WaterBalanceData(..))
 import CLM.Types.WaterStateData         (WaterStateData(..))
@@ -61,6 +64,12 @@ import CLM.BioGeoPhys.SurfaceResistance
   ( calcBetaLeePielke1992, BetaInput(..), BetaResult(..) )
 import CLM.BioGeoPhys.SurfaceWater
   ( computeFracH2osfc, FracH2osfcInput(..), FracH2osfcResult(..) )
+import CLM.BioGeoPhys.SnowHydrology
+  ( snowPercolationBottomPacked, SnowPercResult(..), defaultSnowHydroParams )
+-- Two adapters whose kernels are inherently per-column sequential are reused
+-- directly per column (rebuild single-column state -> run -> re-flatten). No
+-- import cycle: PhysicsAdapters does not import this module.
+import CLM.Driver.PhysicsAdapters (snowCompactionStep)
 
 -- | The combined snow+soil grid stride for per-(column,layer) fields.
 gridNlev :: Int
@@ -101,6 +110,13 @@ data CLMStateV = CLMStateV
   , vfrac_sno_eff  :: !(VU.Vector Double)  -- ^ effective snow fraction (read)
   , vfrac_h2osfc   :: !(VU.Vector Double)  -- ^ surface-water fraction (read+write)
   , vsoilbeta      :: !(VU.Vector Double)  -- ^ soil evap resistance beta (write)
+    -- pre-flux calcs ----------------------------------------------------------
+  , vt_grnd        :: !(VU.Vector Double)  -- ^ ground surface temperature [K] (read)
+  , vfrac_iceold   :: !(VU.Vector Double)  -- ^ top-layer ice fraction (write)
+    -- snow compaction ---------------------------------------------------------
+  , vcolZ          :: !(VU.Vector Double)  -- ^ per-(col,layer) midpoint depth, stride vNlev (read+write)
+  , vcolZi         :: !(VU.Vector Double)  -- ^ per-(col,interface) depth, stride vNlev+1 (read+write)
+  , vsnow_depth    :: !(VU.Vector Double)  -- ^ snow depth of covered area [m] (write)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -129,6 +145,11 @@ gather sts = CLMStateV
   , vfrac_sno_eff  = VU.fromList [ scal0 (wdiag_frac_sno_eff_col (clmWaterDiagBulk s)) | s <- sts ]
   , vfrac_h2osfc   = VU.fromList [ scal0 (wdiag_frac_h2osfc_col  (clmWaterDiagBulk s)) | s <- sts ]
   , vsoilbeta      = VU.fromList [ scal0 (sstate_soilbeta_col    (clmSoilState s)) | s <- sts ]
+  , vt_grnd        = VU.fromList [ t_grnd_col (clmTemp s) | s <- sts ]
+  , vfrac_iceold   = VU.fromList [ scal0 (wdiag_frac_iceold_col (clmWaterDiagBulk s)) | s <- sts ]
+  , vcolZ          = VU.concat   [ padTo gridNlev       (colZ  (clmColumn s)) | s <- sts ]
+  , vcolZi         = VU.concat   [ padTo (gridNlev + 1) (colZi (clmColumn s)) | s <- sts ]
+  , vsnow_depth    = VU.fromList [ scal0 (wdiag_snow_depth_col (clmWaterDiagBulk s)) | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -150,11 +171,21 @@ scatter bases v =
              { wb_errh2o_col = VU.singleton (vwb_errh2o v VU.! i) }
          , clmTemp = (clmTemp s)
              { t_soisno_bef_col = VU.slice (i * nlev) nlev (vt_soisno_bef v)
-             , t_h2osfc_bef_col = vt_h2osfc_bef v VU.! i }
+             , t_h2osfc_bef_col = vt_h2osfc_bef v VU.! i
+             , t_soisno_col     = VU.slice (i * nlev) nlev (vt_soisno v) }
          , clmEnergyFlux = (clmEnergyFlux s)
              { eflx_soil_grnd_col = veflx_soil_grnd v VU.! i }
+         , clmWaterState = (clmWaterState s)
+             { h2osoi_liq_col = VU.slice (i * nlev) nlev (vh2osoi_liq v)
+             , h2osoi_ice_col = VU.slice (i * nlev) nlev (vh2osoi_ice v) }
+         , clmColumn = (clmColumn s)
+             { colDz = VU.slice (i * nlev)       nlev       (vcolDz v)
+             , colZ  = VU.slice (i * nlev)       nlev       (vcolZ  v)
+             , colZi = VU.slice (i * (nlev + 1)) (nlev + 1) (vcolZi v) }
          , clmWaterDiagBulk = (clmWaterDiagBulk s)
-             { wdiag_frac_h2osfc_col = VU.singleton (vfrac_h2osfc v VU.! i) }
+             { wdiag_frac_h2osfc_col = VU.singleton (vfrac_h2osfc v VU.! i)
+             , wdiag_frac_iceold_col = VU.singleton (vfrac_iceold v VU.! i)
+             , wdiag_snow_depth_col  = VU.singleton (vsnow_depth  v VU.! i) }
          , clmSoilState = (clmSoilState s)
              { sstate_soilbeta_col = VU.singleton (vsoilbeta v VU.! i) }
          }
@@ -270,3 +301,103 @@ fracH2oSfcStepV _cfg ctx v =
               }
         in fhr_frac_h2osfc (computeFracH2osfc inp)
   in v { vfrac_h2osfc = VU.generate (vNumCols v) frac }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.preFluxCalcsStep'. Only two outputs
+-- are live: the top-layer ice fraction (@frac_iceold@, top index @nlevsno+snl@)
+-- and the frozen-ground soil-evap factor (@soilbeta = if t_grnd < tfrz then
+-- 0.01 else 1.0@). The scalar adapter's other intermediates are dead. snl/layer
+-- structure is unchanged.
+preFluxCalcsStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+preFluxCalcsStepV _cfg _ctx v =
+  let nlev = vNlev v
+      sIdx vec k = if k >= 0 && k < VU.length vec then vec VU.! k else 0.0
+      fracIceold c =
+        let topIdx = nlevsno + (vsnl v VU.! c)
+            base   = c * nlev
+            liqTop = sIdx (vh2osoi_liq v) (base + topIdx)
+            iceTop = sIdx (vh2osoi_ice v) (base + topIdx)
+            tot    = liqTop + iceTop
+        in if tot > 0.0 then iceTop / tot else 0.0
+      soilbeta c = if vt_grnd v VU.! c < tfrz then 0.01 else 1.0
+  in v { vfrac_iceold = VU.generate (vNumCols v) fracIceold
+       , vsoilbeta    = VU.generate (vNumCols v) soilbeta
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.snowCompactionStep' (Anderson 1976).
+-- Compaction is per-layer sequential (the overburden accumulates downward), so
+-- this reuses the scalar adapter per column: rebuild a single-column 'CLMState'
+-- from the SoA slices, run 'snowCompactionStep', re-flatten the written geometry.
+-- Bit-identical by construction; @snl@/layer count unchanged.
+snowCompactionStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+snowCompactionStepV cfg ctx v =
+  let nlev   = vNlev v
+      nlevZi = nlev + 1
+      runCol c =
+        let st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = VU.slice (c * nlev)   nlev   (vcolDz v)
+                  , colZ  = VU.slice (c * nlev)   nlev   (vcolZ  v)
+                  , colZi = VU.slice (c * nlevZi) nlevZi (vcolZi v) }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = VU.slice (c * nlev) nlev (vh2osoi_ice v)
+                  , h2osoi_liq_col = VU.slice (c * nlev) nlev (vh2osoi_liq v) }
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_soisno_col = VU.slice (c * nlev) nlev (vt_soisno v) }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col = VU.singleton (vfrac_sno v VU.! c) }
+              }
+        in snowCompactionStep cfg ctx st0
+      results  = map runCol [0 .. vNumCols v - 1]
+      scal0' u = if VU.null u then 0.0 else u VU.! 0
+  in v { vcolDz      = VU.concat   [ colDz (clmColumn r) | r <- results ]
+       , vcolZ       = VU.concat   [ colZ  (clmColumn r) | r <- results ]
+       , vcolZi      = VU.concat   [ colZi (clmColumn r) | r <- results ]
+       , vsnow_depth = VU.fromList [ scal0' (wdiag_snow_depth_col (clmWaterDiagBulk r)) | r <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.snowPercolationStep': reuses the
+-- 'snowPercolationBottomPacked' kernel per column, replicating the scalar gate
+-- (@snl<0 && -snl>=1 && frac_sno_eff>0 && canResolve@) and routing the
+-- pack-bottom drainage into the top soil layer's liquid (index @nlevsno@).
+-- Inactive columns pass through; @snl@/layer count unchanged.
+snowPercolationStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+snowPercolationStepV _cfg ctx v =
+  let dtime   = tcDtime ctx
+      nlev    = vNlev v
+      topSoil = nlevsno
+      sIdx vec k = if k >= 0 && k < VU.length vec then vec VU.! k else 0.0
+      perCol c =
+        let base  = c * nlev
+            slc   = VU.slice base nlev
+            liq_v = slc (vh2osoi_liq v)
+            ice_v = slc (vh2osoi_ice v)
+            dz_v  = slc (vcolDz v)
+            t_v   = slc (vt_soisno v)
+            snl          = vsnl v VU.! c
+            frac_sno_eff = vfrac_sno_eff v VU.! c
+            topSnow = nlevsno + snl
+            canResolve =
+                 VU.length liq_v >= nlevsno + nlevgrnd
+              && VU.length ice_v >= nlevsno + nlevgrnd
+              && VU.length dz_v  >= nlevsno + nlevgrnd
+              && VU.length t_v   >= nlevsno + nlevgrnd
+              && topSnow >= 0
+            active = snl < 0 && negate snl >= 1 && frac_sno_eff > 0.0 && canResolve
+        in if not active
+           then (liq_v, ice_v, t_v)
+           else
+             let res     = snowPercolationBottomPacked
+                             defaultSnowHydroParams dtime frac_sno_eff snl
+                             dz_v ice_v liq_v t_v
+                 liqPerc = sprLiq res
+                 drainMm = sprSnowDrain res
+                 liq'    = if topSoil < VU.length liqPerc
+                           then liqPerc VU.// [(topSoil, sIdx liqPerc topSoil + drainMm)]
+                           else liqPerc
+             in (liq', sprIce res, sprTSoisno res)
+      results = map perCol [0 .. vNumCols v - 1]
+  in v { vh2osoi_liq = VU.concat [ l | (l, _, _) <- results ]
+       , vh2osoi_ice = VU.concat [ i | (_, i, _) <- results ]
+       , vt_soisno   = VU.concat [ t | (_, _, t) <- results ]
+       }
