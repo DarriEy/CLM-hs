@@ -175,9 +175,9 @@ or needs writing (glacier).
     `scatter sts (fV cfg ctx (gather sts)) == map (f cfg ctx) sts` must hold bit-for-bit
     — so vectorization changes only storage + iteration (`VU.zipWith`/`generate`) while
     reusing the existing per-column physics KERNELS, keeping the suite green throughout.
-    Migrated + oracle-tested so far — **10 of ~37 adapters** (suite 232/0), incl.
-    `waterTableStepV` (frost/perched-table logic) and `surfaceHumidityStepV` (ground
-    specific-humidity `qg` diagnostics via the `surfaceHumidity` kernel):
+    Migrated + oracle-tested so far — **11 of ~37 adapters** (suite 233/0), incl.
+    `waterTableStepV`, `surfaceHumidityStepV`, and `soilHydrologyStepV` (the Richards
+    solve via scalar-kernel-reuse per column; handles the `snl→0` meltout):
     `waterBalanceStepV`, `hydrologyDrainageStepV`, `drvInitStepV` (introduces the
     per-(col,layer) `c*nlev+j` flatten), `soilEvapResistanceStepV` (multi-record +
     `calcBetaLeePielke1992` + soil-vs-grid striding), `fracH2oSfcStepV` (snow-layer
@@ -188,11 +188,19 @@ or needs writing (glacier).
     adapter per agent) and integrated centrally — the swarm-able workflow is proven:
     each remaining adapter is an independent unit whose bit-identical equivalence test
     is its own gate (agents draft code; the build is integrated serially since stack
-    locks `.stack-work`). The SoA layout is GPU/AD-ready. Next: `waterTableStep`
-    (drafted, queued), the snow-layer combine/divide (structural — change `snl`), then
-    the large layer-loop solvers (`soilTemperatureFullStep`, `soilHydrologyStep`,
-    `canopyFluxesStep`, `surfaceRadiationStep`). The full set is multi-session
-    mechanical cranking; the architecture + oracle + multi-shape templates are done.
+    locks `.stack-work`). The SoA layout is GPU/AD-ready.
+    **The remaining adapters split into two classes.** (a) Column/layer-only adapters
+    (`waterTableStep`/`soilHydrologyStep` done; `snowAging`, `snowLayerCombine/Divide`
+    — the last two structural, change `snl`) keep migrating cleanly via scalar-reuse.
+    (b) **Patch-vectorized adapters** (`soilFluxesStep`, `soilTemperatureFullStep`,
+    `canopyFluxesStep`, `baregroundFluxesStep`) read/write **variable-length per-patch
+    (`*_patch_vec`) arrays** whose length defines patchCount — these do NOT fit the flat
+    `c*nlev+j` SoA layout and are DEFERRED pending a proper patch-indexed layout
+    (per-column patch count/offset vectors, CSR-style). That layout is the next design
+    step before class (b); it then unblocks ~6 adapters at once. `energyBalanceStep`
+    stays deferred (its only live write is the gridcell `aggregateLnd2Atm` reduction —
+    a `c2g`, not a per-column map). The architecture + oracle + multi-shape templates
+    are done; this is multi-session mechanical cranking plus one patch-layout design.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake

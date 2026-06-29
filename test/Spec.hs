@@ -22,7 +22,7 @@ import CLM.Driver.PhysicsAdapters
   , waterBalanceStep, hydrologyDrainageStep
   , drvInitStep, soilEvapResistanceStep, fracH2oSfcStep
   , preFluxCalcsStep, snowCompactionStep, snowPercolationStep
-  , waterTableStep, surfaceHumidityStep )
+  , waterTableStep, surfaceHumidityStep, soilHydrologyStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Driver.Vectorized
@@ -30,7 +30,7 @@ import CLM.Driver.Vectorized
   , waterBalanceStepV, hydrologyDrainageStepV
   , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV
   , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV
-  , waterTableStepV, surfaceHumidityStepV )
+  , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2559,6 +2559,55 @@ main = hspec $ do
       map qgso vec `shouldBe` map qgso scalar
       map qghf vec `shouldBe` map qghf scalar
       map dqdt vec `shouldBe` map dqdt scalar
+
+    it "soilHydrologyStepV matches per-column soilHydrologyStep bit-for-bit" $ do
+      let mkSoilV val = VU.replicate nlevsoi val
+          ziV = VU.generate (gridN + 1) (\i -> fromIntegral i * 0.1)
+          zV  = VU.generate gridN       (\i -> fromIntegral i * 0.1 + 0.05)
+          mkT snowT soilT = VU.generate gridN (\j -> if j < nlevsno then snowT else soilT)
+          mkCol snl snowT soilT liq ice h2osno h2osfc evap tran zwt
+                eIce bflow fff fmax nbf nmelt =
+            defaultCLMState
+              { clmSnl = snl
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid liq, h2osoi_ice_col = mkGrid ice
+                  , h2osno_col = h2osno, h2osfc_col = h2osfc }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz = mkGrid 0.1, colZ = zV, colZi = ziV
+                  , watsat = mkSoilV 0.4, bsw = mkSoilV 6.0
+                  , hksat  = mkSoilV 0.5, sucsat = mkSoilV 200.0 }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_watsat_col = VU.empty, sstate_bsw_col = VU.empty
+                  , sstate_hksat_col  = VU.empty, sstate_sucsat_col = VU.empty }
+              , clmTemp = (clmTemp defaultCLMState) { t_soisno_col = mkT snowT soilT }
+              , clmWaterFlux = (clmWaterFlux defaultCLMState)
+                  { qflx_evap_tot_patch = evap, qflx_tran_veg_patch = tran }
+              , clmSoilHydro = (clmSoilHydro defaultCLMState)
+                  { sh_zwt_col = VU.singleton zwt }
+              , clmP_e_ice = eIce, clmP_baseflow_scalar = bflow
+              , clmP_fff = fff, clmP_fmax = fmax
+              , clmP_n_baseflow = nbf, clmP_n_melt_coef = nmelt }
+          shsts = [ mkCol (-2) 273.5 280.0 10.0 2.0 5.0 1.0 1.0e-6 2.0e-6 2.0 6.0 0.010 0.5 0.5 1.0 200.0
+                  , mkCol 0    275.0 282.0 12.0 0.0 0.0 0.5 2.0e-6 1.0e-6 3.0 5.0 0.020 0.4 0.4 1.0 180.0
+                  , mkCol (-1) 270.0 281.0  8.0 1.0 3.0 0.0 0.0    0.0    1.5 7.0 0.005 0.6 0.6 1.0 220.0 ]
+          scalar = map (soilHydrologyStep cfg ctx) shsts
+          vec    = scatter shsts (soilHydrologyStepV cfg ctx (gather shsts))
+          liq s  = VU.toList (h2osoi_liq_col (clmWaterState s))
+          ice s  = VU.toList (h2osoi_ice_col (clmWaterState s))
+          sno s  = h2osno_col (clmWaterState s)
+          sfc s  = h2osfc_col (clmWaterState s)
+          drn s  = qflx_drain_col (clmWaterFlux s)
+          srf s  = qflx_surf_col  (clmWaterFlux s)
+          qch s  = VU.toList (sh_qcharge_col (clmSoilHydro s))
+          snl s  = clmSnl s
+      map liq vec `shouldBe` map liq scalar
+      map ice vec `shouldBe` map ice scalar
+      map sno vec `shouldBe` map sno scalar
+      map sfc vec `shouldBe` map sfc scalar
+      map drn vec `shouldBe` map drn scalar
+      map srf vec `shouldBe` map srf scalar
+      map qch vec `shouldBe` map qch scalar
+      map snl vec `shouldBe` map snl scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
