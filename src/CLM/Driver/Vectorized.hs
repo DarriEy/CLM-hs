@@ -43,6 +43,7 @@ module CLM.Driver.Vectorized
   , snowPercolationStepV
   , waterTableStepV
   , surfaceHumidityStepV
+  , soilHydrologyStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -72,7 +73,7 @@ import CLM.BioGeoPhys.SnowHydrology
 -- Two adapters whose kernels are inherently per-column sequential are reused
 -- directly per column (rebuild single-column state -> run -> re-flatten). No
 -- import cycle: PhysicsAdapters does not import this module.
-import CLM.Driver.PhysicsAdapters (snowCompactionStep)
+import CLM.Driver.PhysicsAdapters (snowCompactionStep, soilHydrologyStep)
 import CLM.BioGeoPhys.SoilHydrology
   ( waterTable, WaterTableResult(..), defaultSoilHydroParams )
 import CLM.BioGeoPhys.SurfaceHumidity
@@ -140,6 +141,15 @@ data CLMStateV = CLMStateV
   , vqg_soil          :: !(VU.Vector Double)  -- ^ soil specific humidity (write)
   , vqg_h2osfc        :: !(VU.Vector Double)  -- ^ surface-water specific humidity (write)
   , vdqgdT            :: !(VU.Vector Double)  -- ^ d(qg)/dT [kg/kg/K] (write)
+    -- soil hydrology ----------------------------------------------------------
+  , vhksat             :: !(VU.Vector Double) -- ^ per-(col,soil-layer) sat. hydraulic conductivity (read, stride nlevsoi)
+  , vqflx_tran_veg     :: !(VU.Vector Double) -- ^ canopy transpiration [mm/s] (read)
+  , vp_e_ice           :: !(VU.Vector Double) -- ^ calib: ice impedance factor (read)
+  , vp_baseflow_scalar :: !(VU.Vector Double) -- ^ calib: baseflow scalar (read)
+  , vp_fff             :: !(VU.Vector Double) -- ^ calib: TOPMODEL decay factor (read)
+  , vp_fmax            :: !(VU.Vector Double) -- ^ calib: max fractional saturated area (read)
+  , vp_n_baseflow      :: !(VU.Vector Double) -- ^ calib: baseflow exponent (read)
+  , vp_n_melt_coef     :: !(VU.Vector Double) -- ^ calib: snowmelt coefficient (read)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -187,6 +197,14 @@ gather sts = CLMStateV
   , vqg_soil          = VU.fromList [ scal0 (wdiag_qg_soil_col   (clmWaterDiagBulk s)) | s <- sts ]
   , vqg_h2osfc        = VU.fromList [ scal0 (wdiag_qg_h2osfc_col (clmWaterDiagBulk s)) | s <- sts ]
   , vdqgdT            = VU.fromList [ scal0 (wdiag_dqgdT_col     (clmWaterDiagBulk s)) | s <- sts ]
+  , vhksat             = VU.concat   [ padTo nlevsoi (rslv (sstate_hksat_col (clmSoilState s)) (hksat (clmColumn s))) | s <- sts ]
+  , vqflx_tran_veg     = VU.fromList [ qflx_tran_veg_patch (clmWaterFlux s) | s <- sts ]
+  , vp_e_ice           = VU.fromList [ clmP_e_ice           s | s <- sts ]
+  , vp_baseflow_scalar = VU.fromList [ clmP_baseflow_scalar s | s <- sts ]
+  , vp_fff             = VU.fromList [ clmP_fff             s | s <- sts ]
+  , vp_fmax            = VU.fromList [ clmP_fmax            s | s <- sts ]
+  , vp_n_baseflow      = VU.fromList [ clmP_n_baseflow      s | s <- sts ]
+  , vp_n_melt_coef     = VU.fromList [ clmP_n_melt_coef     s | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -210,7 +228,8 @@ gather sts = CLMStateV
 scatter :: [CLMState] -> CLMStateV -> [CLMState]
 scatter bases v =
   let nlev = vNlev v
-  in [ s { clmWaterFlux    = (clmWaterFlux s)
+  in [ s { clmSnl = vsnl v VU.! i   -- soilHydrology meltout can flip snl -> 0
+         , clmWaterFlux    = (clmWaterFlux s)
              { qflx_evap_tot_patch = vqflx_evap_tot v VU.! i
              , qflx_surf_col       = vqflx_surf     v VU.! i
              , qflx_drain_col      = vqflx_drain    v VU.! i }
@@ -224,7 +243,9 @@ scatter bases v =
              { eflx_soil_grnd_col = veflx_soil_grnd v VU.! i }
          , clmWaterState = (clmWaterState s)
              { h2osoi_liq_col = VU.slice (i * nlev) nlev (vh2osoi_liq v)
-             , h2osoi_ice_col = VU.slice (i * nlev) nlev (vh2osoi_ice v) }
+             , h2osoi_ice_col = VU.slice (i * nlev) nlev (vh2osoi_ice v)
+             , h2osno_col     = vh2osno v VU.! i
+             , h2osfc_col     = vh2osfc v VU.! i }
          , clmColumn = (clmColumn s)
              { colDz = VU.slice (i * nlev)       nlev       (vcolDz v)
              , colZ  = VU.slice (i * nlev)       nlev       (vcolZ  v)
@@ -244,7 +265,8 @@ scatter bases v =
              { sh_zwt_col         = VU.singleton (vsh_zwt         v VU.! i)
              , sh_zwts_col        = VU.singleton (vsh_zwts        v VU.! i)
              , sh_zwt_perched_col = VU.singleton (vsh_zwt_perched v VU.! i)
-             , sh_frost_table_col = VU.singleton (vsh_frost_table v VU.! i) }
+             , sh_frost_table_col = VU.singleton (vsh_frost_table v VU.! i)
+             , sh_qcharge_col     = VU.singleton (vwt_qcharge     v VU.! i) }
          }
      | (i, s) <- zip [0 ..] bases ]
 
@@ -570,4 +592,67 @@ surfaceHumidityStepV _cfg ctx v =
        , vqg_soil   = VU.fromList [ shr_qg_soil   r | r <- results ]
        , vqg_h2osfc = VU.fromList [ shr_qg_h2osfc r | r <- results ]
        , vdqgdT     = VU.fromList [ shr_dqgdT     r | r <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.soilHydrologyStep'. The
+-- infiltration-excess + Richards solve is an inherently per-column implicit
+-- tridiagonal solve, so this reuses the scalar adapter per column: rebuild a
+-- single-column 'CLMState' from the SoA slices (every read field carried;
+-- soil hydraulics resolved via clmColumn with empty sstate_*), run
+-- 'soilHydrologyStep', re-flatten the soil water / runoff / qcharge / snl.
+-- Bit-identical by construction. NOTE: snowpack meltout can flip @snl -> 0@,
+-- which is why 'scatter' writes @clmSnl@.
+soilHydrologyStepV :: CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+soilHydrologyStepV cfg ctx v =
+  let nlev   = vNlev v
+      nlevZi = nlev + 1
+      runCol c =
+        let base   = c * nlev
+            slc    = VU.slice base nlev
+            slcS   = VU.slice (c * nlevsoi) nlevsoi
+            st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = slc (vh2osoi_liq v)
+                  , h2osoi_ice_col = slc (vh2osoi_ice v)
+                  , h2osno_col     = vh2osno v VU.! c
+                  , h2osfc_col     = vh2osfc v VU.! c }
+              , clmColumn = (clmColumn defaultCLMState)
+                  { colDz  = slc (vcolDz v)
+                  , colZ   = slc (vcolZ  v)
+                  , colZi  = VU.slice (c * nlevZi) nlevZi (vcolZi v)
+                  , watsat = slcS (vwatsat v)
+                  , bsw    = slcS (vbsw    v)
+                  , hksat  = slcS (vhksat  v)
+                  , sucsat = slcS (vsucsat v) }
+              , clmSoilState = (clmSoilState defaultCLMState)
+                  { sstate_watsat_col = VU.empty
+                  , sstate_bsw_col    = VU.empty
+                  , sstate_hksat_col  = VU.empty
+                  , sstate_sucsat_col = VU.empty }
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_soisno_col = slc (vt_soisno v) }
+              , clmWaterFlux = (clmWaterFlux defaultCLMState)
+                  { qflx_evap_tot_patch = vqflx_evap_tot v VU.! c
+                  , qflx_tran_veg_patch = vqflx_tran_veg v VU.! c }
+              , clmSoilHydro = (clmSoilHydro defaultCLMState)
+                  { sh_zwt_col = VU.singleton (vwt_zwt_in v VU.! c) }
+              , clmP_e_ice           = vp_e_ice           v VU.! c
+              , clmP_baseflow_scalar = vp_baseflow_scalar v VU.! c
+              , clmP_fff             = vp_fff             v VU.! c
+              , clmP_fmax            = vp_fmax            v VU.! c
+              , clmP_n_baseflow      = vp_n_baseflow      v VU.! c
+              , clmP_n_melt_coef     = vp_n_melt_coef     v VU.! c
+              }
+        in soilHydrologyStep cfg ctx st0
+      results  = map runCol [0 .. vNumCols v - 1]
+      scal0' u = if VU.null u then 0.0 else u VU.! 0
+  in v { vh2osoi_liq = VU.concat   [ padTo nlev (h2osoi_liq_col (clmWaterState r)) | r <- results ]
+       , vh2osoi_ice = VU.concat   [ padTo nlev (h2osoi_ice_col (clmWaterState r)) | r <- results ]
+       , vh2osno     = VU.fromList [ h2osno_col (clmWaterState r) | r <- results ]
+       , vh2osfc     = VU.fromList [ h2osfc_col (clmWaterState r) | r <- results ]
+       , vqflx_drain = VU.fromList [ qflx_drain_col (clmWaterFlux r) | r <- results ]
+       , vqflx_surf  = VU.fromList [ qflx_surf_col  (clmWaterFlux r) | r <- results ]
+       , vwt_qcharge = VU.fromList [ scal0' (sh_qcharge_col (clmSoilHydro r)) | r <- results ]
+       , vsnl        = VU.fromList [ clmSnl r | r <- results ]
        }
