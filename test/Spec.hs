@@ -22,7 +22,7 @@ import CLM.Driver.PhysicsAdapters
   , waterBalanceStep, hydrologyDrainageStep
   , drvInitStep, soilEvapResistanceStep, fracH2oSfcStep
   , preFluxCalcsStep, snowCompactionStep, snowPercolationStep
-  , waterTableStep, surfaceHumidityStep, soilHydrologyStep )
+  , waterTableStep, surfaceHumidityStep, soilHydrologyStep, soilFluxesStep )
 import CLM.Types.WaterBalanceData (WaterBalanceData(..))
 import CLM.Types.SoilHydrologyData (SoilHydrologyData(..))
 import CLM.Driver.Vectorized
@@ -30,7 +30,7 @@ import CLM.Driver.Vectorized
   , waterBalanceStepV, hydrologyDrainageStepV
   , drvInitStepV, soilEvapResistanceStepV, fracH2oSfcStepV
   , preFluxCalcsStepV, snowCompactionStepV, snowPercolationStepV
-  , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV )
+  , waterTableStepV, surfaceHumidityStepV, soilHydrologyStepV, soilFluxesStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2630,6 +2630,58 @@ main = hspec $ do
       map srf vec `shouldBe` map srf scalar
       map qch vec `shouldBe` map qch scalar
       map snl vec `shouldBe` map snl scalar
+
+    it "soilFluxesStepV matches per-column soilFluxesStep bit-for-bit (CSR patches)" $ do
+      let mkCol tgrnd tsfc shTot shGrnd evapTot evapGrnd tranVeg
+                sabgv cgrndsv cgrndlv dlradv ulradv lwnet fve =
+            defaultCLMState
+              { clmSnl = -1
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col = tgrnd, t_soisno_col = mkGrid 272.0
+                  , t_soisno_bef_col = mkGrid 271.0
+                  , t_h2osfc_col = tsfc, t_h2osfc_bef_col = tsfc - 1.0 }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = mkGrid 5.0, h2osoi_ice_col = mkGrid 1.0 }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_eff_col = VU.singleton 0.3
+                  , wdiag_frac_h2osfc_col  = VU.singleton 0.1 }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell        = VU.singleton 1.0
+                  , cstate_frac_veg_nosno_patch = VU.singleton fve }
+              , clmEnergyFlux = (clmEnergyFlux defaultCLMState)
+                  { eflx_sh_tot_patch_vec    = VU.singleton shTot
+                  , eflx_sh_grnd_patch_vec   = VU.singleton shGrnd
+                  , sabg_patch_vec           = VU.singleton sabgv
+                  , cgrnds_patch_vec         = VU.singleton cgrndsv
+                  , cgrndl_patch_vec         = VU.singleton cgrndlv
+                  , dlrad_patch_vec          = VU.singleton dlradv
+                  , ulrad_patch_vec          = VU.singleton ulradv
+                  , eflx_lwrad_net_patch_vec = VU.singleton lwnet }
+              , clmWaterFlux = (clmWaterFlux defaultCLMState)
+                  { qflx_evap_tot_patch_vec  = VU.singleton evapTot
+                  , qflx_evap_grnd_patch_vec = VU.singleton evapGrnd
+                  , qflx_tran_veg_patch_vec  = VU.singleton tranVeg } }
+          fsts = [ mkCol 270.0 271.0 30.0 20.0 1.0e-5 6.0e-6 4.0e-6 100.0 5.0 1.0e-6 250.0 320.0 (-20.0) 1
+                 , mkCol 285.0 286.0 50.0 35.0 4.0e-5 2.0e-5 2.0e-5 180.0 8.0 2.0e-6 300.0 360.0 (-40.0) 1
+                 , mkCol 263.0 265.0 10.0  8.0 2.0e-6 1.0e-6 1.0e-6  60.0 3.0 5.0e-7 200.0 300.0 (-10.0) 0 ]
+          scalar = map (soilFluxesStep cfg ctx) fsts
+          vec    = scatter fsts (soilFluxesStepV cfg ctx (gather fsts))
+          shT s  = eflx_sh_tot_patch    (clmEnergyFlux s)
+          lhT s  = eflx_lh_tot_patch    (clmEnergyFlux s)
+          sg  s  = eflx_soil_grnd_col   (clmEnergyFlux s)
+          lwo s  = eflx_lwrad_out_patch (clmEnergyFlux s)
+          shTv s = VU.toList (eflx_sh_tot_patch_vec (clmEnergyFlux s))
+          lhTv s = VU.toList (eflx_lh_tot_patch_vec (clmEnergyFlux s))
+          et  s  = qflx_evap_tot_patch (clmWaterFlux s)
+          etv s  = VU.toList (qflx_evap_tot_patch_vec (clmWaterFlux s))
+      map shT  vec `shouldBe` map shT  scalar
+      map lhT  vec `shouldBe` map lhT  scalar
+      map sg   vec `shouldBe` map sg   scalar
+      map lwo  vec `shouldBe` map lwo  scalar
+      map shTv vec `shouldBe` map shTv scalar
+      map lhTv vec `shouldBe` map lhTv scalar
+      map et   vec `shouldBe` map et   scalar
+      map etv  vec `shouldBe` map etv  scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
