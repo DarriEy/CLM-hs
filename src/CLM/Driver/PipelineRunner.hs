@@ -5,6 +5,7 @@
 module CLM.Driver.PipelineRunner
   ( -- * Initialization
     initCLMStateFromDir
+  , readSnicarOptics
     -- * Timestep context
   , buildTimestepContext
     -- * Run loop
