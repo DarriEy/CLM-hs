@@ -182,10 +182,19 @@ canyonWind !params !inp =
              ctw * (2.0 / rpi) *
                    exp (-0.5 * hwr * (1.0 - whc / ht))
 
+      -- Neutral-stability friction velocity from the log-law over the town
+      -- (ustar = k*ur / ln((z_u - z_d)/z_0)). In the full driver path ustar is
+      -- supplied by the Monin-Obukhov stability iteration; this stand-alone
+      -- canyon-wind helper uses the neutral first guess so that it remains a
+      -- pure function of the forcing. The net canyon wind combines the
+      -- horizontal Masson profile with the vertical turbulence scale:
+      --   canyon_wind = sqrt(canyon_u_wind^2 + ustar^2)   (Masson 2000).
+      !ustar_neutral = vkc * ur / log ((hgt - zd) / z0)
+
   in CanyonWindResult
      { cwr_canyontop_wind = ctw
      , cwr_canyon_u_wind  = cuw
-     , cwr_canyon_wind    = sqrt (cuw ** 2 + 0.01)  -- placeholder ustar contribution
+     , cwr_canyon_wind    = sqrt (cuw ** 2 + ustar_neutral ** 2)
      , cwr_ur             = ur
      }
 
@@ -195,8 +204,14 @@ canyonResistance !forc_rho !canyon_wind =
   cpair * forc_rho / (11.8 + 4.2 * canyon_wind)
 
 -- | Compute urban fluxes for a single patch.
--- This is a simplified single-patch version; the full vectorized version
--- would iterate over filters as in the Julia code.
+--
+-- Scope note: this operates on one urban landunit/column at a time, matching the
+-- current single-landunit driver wiring. The Fortran 'UrbanFluxes' runs the same
+-- per-facet physics inside a @do fc = 1, num_urbanc@ filter loop over the roof,
+-- pervious/impervious road, and sunlit/shaded wall columns of every urban
+-- landunit; the vectorization boundary therefore lives in the caller, which
+-- invokes this function once per active column. The per-column algebra below is
+-- the faithful translation of that loop body.
 urbanFluxesSinglePatch
   :: Double  -- ^ forc_rho
   -> Double  -- ^ taf (canyon air temp, K)
@@ -347,14 +362,22 @@ data CanyonEnergyOutput = CanyonEnergyOutput
 solveCanyonEnergyBalance :: CanyonEnergyInput -> CanyonEnergyOutput
 solveCanyonEnergyBalance !inp =
   let !hwr = cei_canyon_hwr inp
-      !rho = cei_forc_rho inp
 
-      -- Aerodynamic conductances (simplified)
-      !u_canyon = max 0.1 (cei_forc_u inp * exp (-0.2 * hwr))
-      !h_atm = rho * cpair * u_canyon / 50.0  -- conductance to atmosphere
-      !h_roof = rho * cpair * u_canyon / 20.0
-      !h_road = rho * cpair * u_canyon / 30.0
-      !h_sunwall = rho * cpair * u_canyon / 40.0 * hwr
+      -- Facet exchange coefficients (Masson 2000). The single canyon resistance
+      -- R_canyon = cpair*rho/(11.8 + 4.2*canyon_wind) governs exchange between
+      -- every canyon facet and the canopy air; the effective heat-transfer
+      -- coefficient is therefore h = forc_rho*cpair/R_canyon = (11.8 + 4.2*wind)
+      -- [W/m2/K], scaled by each facet's area weight (roof and road by their
+      -- canyon-floor fractions, walls by the height-to-width ratio). The canopy
+      -- air exchanges with the overlying atmosphere through the above-canyon wind.
+      !u_canyon = max 0.1 (cei_forc_u inp * exp (-0.5 * hwr))   -- skimming-flow attenuation
+      !htc_canyon = 11.8 + 4.2 * u_canyon                       -- facet coeff [W/m2/K]
+      !htc_atm    = 11.8 + 4.2 * max 0.1 (cei_forc_u inp)       -- canopy-air <-> atmosphere
+      !wtroad = cei_wtroad inp
+      !h_atm = htc_atm
+      !h_roof = htc_atm                  -- roof sits above the canyon, vents to atmosphere
+      !h_road = wtroad * htc_canyon
+      !h_sunwall = hwr * htc_canyon
       !h_shadewall = h_sunwall
 
       -- Canyon air temperature (energy balance)
