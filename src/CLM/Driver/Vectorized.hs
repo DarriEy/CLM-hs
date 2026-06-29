@@ -55,6 +55,8 @@ module CLM.Driver.Vectorized
   , snowLayerDivideStepV
   , snowAgingStepV
   , canopyFluxesStepV
+  , surfaceAlbedoStepV
+  , surfaceRadiationStepV
   ) where
 
 import qualified Data.Vector.Unboxed as VU
@@ -90,7 +92,8 @@ import CLM.BioGeoPhys.SnowHydrology
 import CLM.Driver.PhysicsAdapters
   ( snowCompactionStep, soilHydrologyStep, soilFluxesStep, baregroundFluxesStep
   , soilTemperatureFullStep, snowLayerCombineStep, snowLayerDivideStep, snowAgingStep
-  , canopyFluxesStep )
+  , canopyFluxesStep, surfaceAlbedoStep, surfaceRadiationStepWithAlbedo )
+import CLM.BioGeoPhys.SurfaceAlbedo (SurfaceAlbedoConstants)
 import CLM.BioGeoPhys.SoilHydrology
   ( waterTable, WaterTableResult(..), defaultSoilHydroParams )
 import CLM.BioGeoPhys.SnowSNICAR (SnicarOptics)
@@ -289,6 +292,23 @@ data CLMStateV = CLMStateV
   , vp_lmrsun        :: !(VU.Vector Double) -- ^ cstate_lmrsun_patch CSR (write)
   , vp_lmrsha        :: !(VU.Vector Double) -- ^ cstate_lmrsha_patch CSR (write)
   , vgpp             :: !(VU.Vector Double) -- ^ clmGPP              col scalar (write)
+    -- surface radiation / albedo ---------------------------------------------
+  , vsnow_persist  :: !(VU.Vector Double) -- ^ wdiag_snow_persist_col [s] col scalar (read)
+  , vp_fcansno     :: !(VU.Vector Double) -- ^ wdiag_fcansno_patch CSR (read)
+  , vgrc_lat       :: !(VU.Vector Double) -- ^ grc_lat resolved (empty⇒0.88) (read)
+  , vgrc_lon       :: !(VU.Vector Double) -- ^ grc_lon resolved (empty⇒0.0)  (read)
+  , vp_tlai        :: !(VU.Vector Double) -- ^ cstate_tlai_patch CSR (read)
+  , vp_tsai        :: !(VU.Vector Double) -- ^ cstate_tsai_patch CSR (read)
+  , vp_xl          :: !(VU.Vector Double) -- ^ cstate_xl_patch   CSR (read)
+  , vp_rhol        :: !(VU.Vector Double) -- ^ cstate_rhol_patch per-patch×numrad, CSR vp_optband_off (read)
+  , vp_rhos        :: !(VU.Vector Double) -- ^ cstate_rhos_patch per-patch×numrad (read)
+  , vp_taul        :: !(VU.Vector Double) -- ^ cstate_taul_patch per-patch×numrad (read)
+  , vp_taus        :: !(VU.Vector Double) -- ^ cstate_taus_patch per-patch×numrad (read)
+  , vp_optband_off :: !(VU.Vector Int)    -- ^ CSR offsets for the rhol/rhos/taul/taus band block (length nCols+1)
+  , vsabv          :: !(VU.Vector Double) -- ^ sabv_patch col scalar (write)
+  , vfsa           :: !(VU.Vector Double) -- ^ fsa_patch  col scalar (write)
+  , vp_fsa         :: !(VU.Vector Double) -- ^ fsa_patch_vec     CSR (write)
+  , vp_fsun        :: !(VU.Vector Double) -- ^ cstate_fsun_patch CSR (write; albedo+radiation)
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -428,6 +448,22 @@ gather sts = CLMStateV
   , vp_lmrsun        = gPd (cstate_lmrsun_patch . clmCanopyState)
   , vp_lmrsha        = gPd (cstate_lmrsha_patch . clmCanopyState)
   , vgpp             = VU.fromList [ clmGPP s | s <- sts ]
+  , vsnow_persist  = VU.fromList [ scal0 (wdiag_snow_persist_col (clmWaterDiagBulk s)) | s <- sts ]
+  , vp_fcansno     = gPd (wdiag_fcansno_patch . clmWaterDiagBulk)
+  , vgrc_lat       = VU.fromList [ scalOr 0.88 (grc_lat (clmGridcell s)) | s <- sts ]
+  , vgrc_lon       = VU.fromList [ scalOr 0.0  (grc_lon (clmGridcell s)) | s <- sts ]
+  , vp_tlai        = gPd (cstate_tlai_patch . clmCanopyState)
+  , vp_tsai        = gPd (cstate_tsai_patch . clmCanopyState)
+  , vp_xl          = gPd (cstate_xl_patch   . clmCanopyState)
+  , vp_rhol        = gPd (cstate_rhol_patch . clmCanopyState)
+  , vp_rhos        = gPd (cstate_rhos_patch . clmCanopyState)
+  , vp_taul        = gPd (cstate_taul_patch . clmCanopyState)
+  , vp_taus        = gPd (cstate_taus_patch . clmCanopyState)
+  , vp_optband_off = patchOffsets [ VU.length (cstate_rhol_patch (clmCanopyState s)) | s <- sts ]
+  , vsabv          = VU.fromList [ sabv_patch (clmEnergyFlux s) | s <- sts ]
+  , vfsa           = VU.fromList [ fsa_patch  (clmEnergyFlux s) | s <- sts ]
+  , vp_fsa         = gPd (fsa_patch_vec     . clmEnergyFlux)
+  , vp_fsun        = gPd (cstate_fsun_patch . clmCanopyState)
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -505,7 +541,13 @@ scatter bases v =
              , cgrnd_patch_vec  = patchSliceD (vPatchOff v) (vp_cgrnd  v) i
              , dlrad_patch_vec  = patchSliceD (vPatchOff v) (vp_dlrad  v) i
              , ulrad_patch_vec  = patchSliceD (vPatchOff v) (vp_ulrad  v) i
-             , eflx_gnet_patch_vec = patchSliceD (vPatchOff v) (vp_eflx_gnet v) i }
+             , eflx_gnet_patch_vec = patchSliceD (vPatchOff v) (vp_eflx_gnet v) i
+             , sabg_patch     = vsabg v VU.! i
+             , sabv_patch     = vsabv v VU.! i
+             , fsa_patch      = vfsa  v VU.! i
+             , sabg_patch_vec = patchSliceD (vPatchOff v) (vp_sabg v) i
+             , sabv_patch_vec = patchSliceD (vPatchOff v) (vp_sabv v) i
+             , fsa_patch_vec  = patchSliceD (vPatchOff v) (vp_fsa  v) i }
          , clmWaterState = (clmWaterState s)
              { h2osoi_liq_col = VU.slice (i * nlev) nlev (vh2osoi_liq v)
              , h2osoi_ice_col = VU.slice (i * nlev) nlev (vh2osoi_ice v)
@@ -543,7 +585,12 @@ scatter bases v =
              , cstate_psnsun_patch  = patchSliceD (vPatchOff v) (vp_psnsun v) i
              , cstate_psnsha_patch  = patchSliceD (vPatchOff v) (vp_psnsha v) i
              , cstate_lmrsun_patch  = patchSliceD (vPatchOff v) (vp_lmrsun v) i
-             , cstate_lmrsha_patch  = patchSliceD (vPatchOff v) (vp_lmrsha v) i }
+             , cstate_lmrsha_patch  = patchSliceD (vPatchOff v) (vp_lmrsha v) i
+             , cstate_parsun_patch  = patchSliceD (vPatchOff v) (vp_parsun v) i
+             , cstate_parsha_patch  = patchSliceD (vPatchOff v) (vp_parsha v) i
+             , cstate_laisun_patch  = patchSliceD (vPatchOff v) (vp_laisun v) i
+             , cstate_laisha_patch  = patchSliceD (vPatchOff v) (vp_laisha v) i
+             , cstate_fsun_patch    = patchSliceD (vPatchOff v) (vp_fsun   v) i }
          , clmSoilHydro = (clmSoilHydro s)
              { sh_zwt_col         = VU.singleton (vsh_zwt         v VU.! i)
              , sh_zwts_col        = VU.singleton (vsh_zwts        v VU.! i)
@@ -1438,4 +1485,103 @@ canopyFluxesStepV cfg ctx v =
        , vp_lmrsun = VU.concat [ cstate_lmrsun_patch (clmCanopyState r) | r <- results ]
        , vp_lmrsha = VU.concat [ cstate_lmrsha_patch (clmCanopyState r) | r <- results ]
        , vgpp = VU.fromList [ clmGPP r | r <- results ]
+       }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.surfaceAlbedoStep'. The two-stream +
+-- SNICAR snow-albedo solve is per-column; the scalar adapter persists only the
+-- sunlit canopy fraction @cstate_fsun_patch@. Reuse the scalar adapter per column
+-- (rebuild from SoA slices → run → re-flatten fsun). Takes the same
+-- 'SurfaceAlbedoConstants' + 'SnicarOptics' args. Bit-identical; snl unchanged.
+surfaceAlbedoStepV :: SurfaceAlbedoConstants -> SnicarOptics
+                   -> CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+surfaceAlbedoStepV albConst snicarOpt cfg ctx v =
+  let nlev = vNlev v
+      off  = vPatchOff v
+      runCol c =
+        let slc  = VU.slice (c * nlev) nlev
+            pD f = patchSliceD off (f v) c
+            st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col = vt_grnd v VU.! c, t_veg_patch = vt_veg v VU.! c }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_ice_col = slc (vh2osoi_ice v)
+                  , h2osoi_liq_col = slc (vh2osoi_liq v)
+                  , h2osno_col     = vh2osno v VU.! c }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_elai_patch = pD vp_elai
+                  , cstate_esai_patch = pD vp_esai }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col     = VU.singleton (vfrac_sno     v VU.! c)
+                  , wdiag_snow_persist_col = VU.singleton (vsnow_persist v VU.! c)
+                  , wdiag_snw_rds_top_col  = VU.singleton (vsnw_rds_top  v VU.! c)
+                  , wdiag_fwet_patch       = pD vp_fwet
+                  , wdiag_fcansno_patch    = pD vp_fcansno }
+              }
+        in surfaceAlbedoStep albConst snicarOpt cfg ctx st0
+      results = map runCol [0 .. vNumCols v - 1]
+  in v { vp_fsun = VU.concat [ cstate_fsun_patch (clmCanopyState r) | r <- results ] }
+
+-- | Vectorized 'CLM.Driver.PhysicsAdapters.surfaceRadiationStepWithAlbedo'.
+-- Two-stream canopy/ground absorbed-solar partition over the ragged PFT-patch
+-- set; reuse the scalar adapter per column. rhol/rhos/taul/taus are per-patch×
+-- numrad (their own CSR offset vp_optband_off). Re-flatten sabg/sabv/fsa (scalar
+-- + CSR) and the PAR/LAI/fsun partition. Bit-identical; snl/layers unchanged.
+surfaceRadiationStepV :: SurfaceAlbedoConstants -> SnicarOptics
+                      -> CLMDriverConfig -> TimestepContext -> CLMStateV -> CLMStateV
+surfaceRadiationStepV albConst snicarOpt cfg ctx v =
+  let nlev   = vNlev v
+      off    = vPatchOff v
+      optOff = vp_optband_off v
+      runCol c =
+        let base    = c * nlev
+            slc     = VU.slice base nlev
+            pD f    = patchSliceD off    (f v) c
+            pBand f = patchSliceD optOff (f v) c
+            st0 = defaultCLMState
+              { clmSnl = vsnl v VU.! c
+              , clmTemp = (clmTemp defaultCLMState)
+                  { t_grnd_col      = vt_grnd v VU.! c
+                  , t_veg_patch     = vt_veg  v VU.! c
+                  , t_veg_patch_vec = pD vp_t_veg }
+              , clmWaterState = (clmWaterState defaultCLMState)
+                  { h2osoi_liq_col = slc (vh2osoi_liq v)
+                  , h2osoi_ice_col = slc (vh2osoi_ice v)
+                  , h2osno_col     = vh2osno v VU.! c }
+              , clmColumn = (clmColumn defaultCLMState) { colDz = slc (vcolDz v) }
+              , clmGridcell = (clmGridcell defaultCLMState)
+                  { grc_lat = VU.singleton (vgrc_lat v VU.! c)
+                  , grc_lon = VU.singleton (vgrc_lon v VU.! c) }
+              , clmWaterDiagBulk = (clmWaterDiagBulk defaultCLMState)
+                  { wdiag_frac_sno_col     = VU.singleton (vfrac_sno     v VU.! c)
+                  , wdiag_snow_depth_col   = VU.singleton (vsnow_depth   v VU.! c)
+                  , wdiag_snow_persist_col = VU.singleton (vsnow_persist v VU.! c)
+                  , wdiag_snw_rds_top_col  = VU.singleton (vsnw_rds_top  v VU.! c)
+                  , wdiag_fwet_patch       = pD vp_fwet
+                  , wdiag_fcansno_patch    = pD vp_fcansno }
+              , clmCanopyState = (clmCanopyState defaultCLMState)
+                  { cstate_patch_wtgcell = pD vp_wtgcell
+                  , cstate_elai_patch    = pD vp_elai
+                  , cstate_esai_patch    = pD vp_esai
+                  , cstate_tlai_patch    = pD vp_tlai
+                  , cstate_tsai_patch    = pD vp_tsai
+                  , cstate_xl_patch      = pD vp_xl
+                  , cstate_rhol_patch    = pBand vp_rhol
+                  , cstate_rhos_patch    = pBand vp_rhos
+                  , cstate_taul_patch    = pBand vp_taul
+                  , cstate_taus_patch    = pBand vp_taus }
+              }
+        in surfaceRadiationStepWithAlbedo albConst snicarOpt cfg ctx st0
+      results = map runCol [0 .. vNumCols v - 1]
+  in v { vsabg     = VU.fromList [ sabg_patch (clmEnergyFlux r) | r <- results ]
+       , vsabv     = VU.fromList [ sabv_patch (clmEnergyFlux r) | r <- results ]
+       , vfsa      = VU.fromList [ fsa_patch  (clmEnergyFlux r) | r <- results ]
+       , vp_sabg   = VU.concat   [ sabg_patch_vec (clmEnergyFlux r) | r <- results ]
+       , vp_sabv   = VU.concat   [ sabv_patch_vec (clmEnergyFlux r) | r <- results ]
+       , vp_fsa    = VU.concat   [ fsa_patch_vec  (clmEnergyFlux r) | r <- results ]
+       , vp_parsun = VU.concat   [ cstate_parsun_patch (clmCanopyState r) | r <- results ]
+       , vp_parsha = VU.concat   [ cstate_parsha_patch (clmCanopyState r) | r <- results ]
+       , vp_laisun = VU.concat   [ cstate_laisun_patch (clmCanopyState r) | r <- results ]
+       , vp_laisha = VU.concat   [ cstate_laisha_patch (clmCanopyState r) | r <- results ]
+       , vp_fsun   = VU.concat   [ cstate_fsun_patch   (clmCanopyState r) | r <- results ]
        }

@@ -21,6 +21,7 @@ module CLM.Driver.PhysicsAdapters
   , fracH2oSfcStep
   , preFluxCalcsStep
   , surfaceRadiationStep
+  , surfaceRadiationStepWithAlbedo
   , surfaceHumidityStep
   , canopyHydrologyStep
   , baregroundFluxesStep
