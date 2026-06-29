@@ -28,6 +28,7 @@ module CLM.Driver.PhysicsAdapters
   , soilTemperatureFullStep
   , soilFluxesStep
   , snowWaterStep
+  , snowPercolationStep
   , snowCompactionStep
   , snowLayerCombineStep
   , snowLayerDivideStep

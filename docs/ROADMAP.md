@@ -175,17 +175,22 @@ or needs writing (glacier).
     `scatter sts (fV cfg ctx (gather sts)) == map (f cfg ctx) sts` must hold bit-for-bit
     — so vectorization changes only storage + iteration (`VU.zipWith`/`generate`) while
     reusing the existing per-column physics KERNELS, keeping the suite green throughout.
-    Migrated + oracle-tested so far (suite 227/0): `waterBalanceStepV`,
-    `hydrologyDrainageStepV`, `drvInitStepV` (introduces the per-(col,layer)
-    `c*nlev+j` flatten), `soilEvapResistanceStepV` (multi-record reads + the
-    `calcBetaLeePielke1992` kernel + soil-vs-grid layer striding), and
-    `fracH2oSfcStepV` (snow-layer summation). The last three were drafted by a
-    parallel agent swarm (one adapter each) and integrated centrally — proving the
-    swarm-able workflow: each remaining adapter is an independent unit whose
-    bit-identical equivalence test is its own gate. The SoA layout is GPU/AD-ready.
-    Next wave (drafts welcome in parallel): `preFluxCalcsStep`, the snow-layer
-    kernels (`snowCompaction`/`snowLayerCombine`/`snowLayerDivide`), then the large
-    layer-loop solvers (`soilTemperatureFullStep`, `soilHydrologyStep`).
+    Migrated + oracle-tested so far — **8 of ~37 adapters** (suite 230/0):
+    `waterBalanceStepV`, `hydrologyDrainageStepV`, `drvInitStepV` (introduces the
+    per-(col,layer) `c*nlev+j` flatten), `soilEvapResistanceStepV` (multi-record +
+    `calcBetaLeePielke1992` + soil-vs-grid striding), `fracH2oSfcStepV` (snow-layer
+    sum), `preFluxCalcsStepV`, `snowCompactionStepV` (reuses the scalar kernel
+    per-column for the sequential overburden loop; `colZi` on its own `vNlev+1`
+    interface stride), and `snowPercolationStepV` (reuses `snowPercolationBottomPacked`
+    with the per-column snow gate). Drafted across two parallel agent swarms (one
+    adapter per agent) and integrated centrally — the swarm-able workflow is proven:
+    each remaining adapter is an independent unit whose bit-identical equivalence test
+    is its own gate (agents draft code; the build is integrated serially since stack
+    locks `.stack-work`). The SoA layout is GPU/AD-ready. Next: `waterTableStep`
+    (drafted, queued), the snow-layer combine/divide (structural — change `snl`), then
+    the large layer-loop solvers (`soilTemperatureFullStep`, `soilHydrologyStep`,
+    `canopyFluxesStep`, `surfaceRadiationStep`). The full set is multi-session
+    mechanical cranking; the architecture + oracle + multi-shape templates are done.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake
