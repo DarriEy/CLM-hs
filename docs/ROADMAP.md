@@ -215,6 +215,24 @@ or needs writing (glacier).
     (`soilTemperatureFullStep`, `canopyFluxesStep`, `baregroundFluxesStep`) follow the
     same CSR + scalar-reuse recipe; then the column-only `snowAging`/`snowLayerCombine`/
     `snowLayerDivide`. Mechanical from here.
+
+    **COMPLETE PER-COLUMN SoA + NATIVE PIPELINE + NATIVE MULTI-PATCH — DONE (2026-06-29):**
+    all 20 per-column physics adapters now have bit-identical `*StepV` SoA
+    counterparts (soil temp/hydrology, soil/bareground/canopy fluxes, surface
+    humidity, all snow steps, water table, radiation, albedo). `runVectorizedPipeline`
+    chains all 20 through ONE `CLMStateV` (single gather/scatter) in canonical order
+    and is proven bit-identical to the per-column scalar pipeline. **It now drives the
+    REAL cold-start state** (np>1 PFT patches per column): the flat CSR is reconciled
+    by giving the two patch fields whose per-column length does NOT equal the patch
+    count their OWN traveling offsets — `vp_fsun_off` (`cstate_fsun_patch` is length-np
+    out of surfaceRadiation but a length-1 representative singleton out of surfaceAlbedo)
+    and `vp_ivt_off` (`clmPatchIvt` stores the single dominant PFT, length 1, not one
+    per patch). All other patch fields are stably length-np or empty (null-branch) or
+    have their own stride (`vp_optband_off` for optical np×numrad, `vp_rootfr_off` for
+    per-(patch,layer)). Suite 245/0. The SoA fast path runs end-to-end on real
+    multi-column gridcell data — GPU/AD-ready. Remaining non-vectorized steps
+    (energyBalance c2g reduction; lake/urban/glacier dispatch; CN/dust/VOC/diagnostic)
+    are by-design outside the per-column fast path.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake

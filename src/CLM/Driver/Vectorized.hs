@@ -277,6 +277,9 @@ data CLMStateV = CLMStateV
   , vp_fdry          :: !(VU.Vector Double) -- ^ wdiag_fdry_patch    CSR (read)
   , vp_sabv          :: !(VU.Vector Double) -- ^ sabv_patch_vec      CSR (read)
   , vp_ivt           :: !(VU.Vector Int)    -- ^ clmPatchIvt         CSR (read)
+  , vp_ivt_off       :: !(VU.Vector Int)    -- ^ clmPatchIvt's OWN CSR offset. Cold-start stores
+                                            --   the single DOMINANT PFT (length 1), not one per
+                                            --   patch, so it cannot share vPatchOff (=np patches).
   , vleaf_mr_vcm     :: !(VU.Vector Double) -- ^ cstate_leaf_mr_vcm  col scalar (read)
   , vdayl            :: !(VU.Vector Double) -- ^ grc_dayl[0]         col scalar (read)
   , vmax_dayl        :: !(VU.Vector Double) -- ^ grc_max_dayl[0]     col scalar (read)
@@ -311,6 +314,12 @@ data CLMStateV = CLMStateV
   , vfsa           :: !(VU.Vector Double) -- ^ fsa_patch  col scalar (write)
   , vp_fsa         :: !(VU.Vector Double) -- ^ fsa_patch_vec     CSR (write)
   , vp_fsun        :: !(VU.Vector Double) -- ^ cstate_fsun_patch CSR (write; albedo+radiation)
+  , vp_fsun_off    :: !(VU.Vector Int)    -- ^ fsun's OWN CSR offset. cstate_fsun_patch is the
+                                          --   one patch field whose per-column length VARIES
+                                          --   through the pipeline (np from surfaceRadiation,
+                                          --   1 from surfaceAlbedo's representative singleton),
+                                          --   so it cannot share vPatchOff. Recomputed by both
+                                          --   writers from their actual per-column output lengths.
   } deriving (Eq, Show)
 
 -- | Project a list of single-column 'CLMState's (column order = list order)
@@ -433,6 +442,7 @@ gather sts = CLMStateV
   , vp_fdry          = gPd (wdiag_fdry_patch . clmWaterDiagBulk)
   , vp_sabv          = gPd (sabv_patch_vec   . clmEnergyFlux)
   , vp_ivt           = gPi clmPatchIvt
+  , vp_ivt_off       = patchOffsets [ VU.length (clmPatchIvt s) | s <- sts ]
   , vleaf_mr_vcm     = VU.fromList [ cstate_leaf_mr_vcm (clmCanopyState s) | s <- sts ]
   , vdayl            = VU.fromList [ scal0 (grc_dayl     (clmGridcell s)) | s <- sts ]
   , vmax_dayl        = VU.fromList [ scal0 (grc_max_dayl (clmGridcell s)) | s <- sts ]
@@ -466,6 +476,7 @@ gather sts = CLMStateV
   , vfsa           = VU.fromList [ fsa_patch  (clmEnergyFlux s) | s <- sts ]
   , vp_fsa         = gPd (fsa_patch_vec     . clmEnergyFlux)
   , vp_fsun        = gPd (cstate_fsun_patch . clmCanopyState)
+  , vp_fsun_off    = patchOffsets [ VU.length (cstate_fsun_patch (clmCanopyState s)) | s <- sts ]
   }
   where
     scal0 v = if VU.null v then 0.0 else v VU.! 0
@@ -592,7 +603,7 @@ scatter bases v =
              , cstate_parsha_patch  = patchSliceD (vPatchOff v) (vp_parsha v) i
              , cstate_laisun_patch  = patchSliceD (vPatchOff v) (vp_laisun v) i
              , cstate_laisha_patch  = patchSliceD (vPatchOff v) (vp_laisha v) i
-             , cstate_fsun_patch    = patchSliceD (vPatchOff v) (vp_fsun   v) i }
+             , cstate_fsun_patch    = patchSliceD (vp_fsun_off v) (vp_fsun v) i }
          , clmSoilHydro = (clmSoilHydro s)
              { sh_zwt_col         = VU.singleton (vsh_zwt         v VU.! i)
              , sh_zwts_col        = VU.singleton (vsh_zwts        v VU.! i)
@@ -1356,7 +1367,7 @@ canopyFluxesStepV cfg ctx v =
             st0 = defaultCLMState
               { clmSnl      = vsnl v VU.! c
               , clmCNActive = vcnactive v VU.! c
-              , clmPatchIvt = pI vp_ivt
+              , clmPatchIvt = patchSliceI (vp_ivt_off v) (vp_ivt v) c
               , clmGPP      = vgpp v VU.! c
               , clmTemp = (clmTemp defaultCLMState)
                   { t_grnd_col        = vt_grnd   v VU.! c
@@ -1522,7 +1533,8 @@ surfaceAlbedoStepV albConst snicarOpt cfg ctx v =
               }
         in surfaceAlbedoStep albConst snicarOpt cfg ctx st0
       results = map runCol [0 .. vNumCols v - 1]
-  in v { vp_fsun = VU.concat [ cstate_fsun_patch (clmCanopyState r) | r <- results ] }
+  in v { vp_fsun     = VU.concat   [ cstate_fsun_patch (clmCanopyState r) | r <- results ]
+       , vp_fsun_off = patchOffsets [ VU.length (cstate_fsun_patch (clmCanopyState r)) | r <- results ] }
 
 -- | Vectorized 'CLM.Driver.PhysicsAdapters.surfaceRadiationStepWithAlbedo'.
 -- Two-stream canopy/ground absorbed-solar partition over the ragged PFT-patch
@@ -1586,6 +1598,7 @@ surfaceRadiationStepV albConst snicarOpt cfg ctx v =
        , vp_laisun = VU.concat   [ cstate_laisun_patch (clmCanopyState r) | r <- results ]
        , vp_laisha = VU.concat   [ cstate_laisha_patch (clmCanopyState r) | r <- results ]
        , vp_fsun   = VU.concat   [ cstate_fsun_patch   (clmCanopyState r) | r <- results ]
+       , vp_fsun_off = patchOffsets [ VU.length (cstate_fsun_patch (clmCanopyState r)) | r <- results ]
        }
 
 -- ============================================================================
