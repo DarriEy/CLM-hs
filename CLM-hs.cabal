@@ -190,6 +190,7 @@ library
                      , CLM.Driver.PhysicsAdapters
                      , CLM.Driver.Simulation
                      , CLM.Driver.PipelineRunner
+                     , CLM.Driver.Vectorized
                      , CLM.Calibration.ADSensitivity
                      , CLM.Calibration.FortranParity
                      , CLM.Calibration.FluxnetReader

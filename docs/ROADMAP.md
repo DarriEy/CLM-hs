@@ -167,7 +167,19 @@ or needs writing (glacier).
     the full SubgridAverage operator set (p2c/c2g/l2g/p2g/c2g2d), L2G scale-type
     selection, and `Filters.buildFilters` classification (11 tests; suite 217/0).
     The remaining per-physics CLMState array rewrite (running each column's physics off
-    these pointers) is genuinely Phase-5-scale.
+    these pointers) is genuinely Phase-5-scale, but its **migration-safe foundation is
+    now in place (2026-06-29):** `CLM.Driver.Vectorized` defines a Structure-of-Arrays
+    `CLMStateV` (per-column `VU.Vector`s; per-(column,layer) flattened `c*nlev+j`, the
+    same layout `SubgridAverage` assumes) that COEXISTS with the scalar `CLMState`,
+    bridged by `gather`/`scatter`. That bridge is a free correctness oracle —
+    `scatter sts (fV cfg ctx (gather sts)) == map (f cfg ctx) sts` must hold bit-for-bit
+    — so vectorization changes only storage + iteration (`VU.zipWith`/`generate`) while
+    reusing the existing per-column physics KERNELS, keeping the suite green throughout.
+    First slice migrated + oracle-tested: `waterBalanceStepV`, `hydrologyDrainageStepV`
+    (suite 224/0). Each remaining adapter is now an independent, swarm-able unit with a
+    built-in equivalence test; the SoA layout is GPU/AD-ready. Recommended first targets
+    for the next wave (small, soil-path, few fields): `drvInitStep`,
+    `soilEvapResistanceStep`, `fracH2oSfcStep`, then the layer-resolved kernels.
 13. **Wire lake to actually run** — DONE (2026-06, lake). `lakeTemperatureStep`
     was a no-op (computed thermal props then returned state unchanged); it now
     chains the full CLM LakeTemperatureMod sequence — thermal props → lake

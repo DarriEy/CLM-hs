@@ -18,7 +18,12 @@ import CLM.Driver.PhysicsAdapters
   ( canopyFluxesStep, canopyHydrologyStep, snowWaterStep
   , lakeFluxesStep, lakeTemperatureStep, glacierSMBStep, urbanFluxesStep
   , aggregateLnd2Atm, cndvStep, dustEmissionStep, vocEmissionStep
-  , cnProductsStep, cnAnnualUpdateStep )
+  , cnProductsStep, cnAnnualUpdateStep
+  , waterBalanceStep, hydrologyDrainageStep )
+import CLM.Types.WaterBalanceData (WaterBalanceData(..))
+import CLM.Driver.Vectorized
+  ( CLMStateV(..), gather, scatter
+  , waterBalanceStepV, hydrologyDrainageStepV )
 import CLM.Types.FrictionVelocityData
   ( FrictionVelocityData(..), defaultFrictionVelocityData )
 import CLM.Types.LandunitData (LandunitData(..), defaultLandunitData)
@@ -2302,6 +2307,44 @@ main = hspec $ do
                 checkVar "FSA"         gd_fsa
                 ncClose nc
         removeFile ncpath
+
+  describe "Vectorized state (SoA) equivalence with scalar adapters" $ do
+    -- Foundation of the per-physics array-vectorization (ROADMAP Option B).
+    -- Build a 3-column synthetic state (distinct per column), run each scalar
+    -- adapter per column AND its vectorized SoA counterpart through the
+    -- gather/scatter bridge, and require the write fields to match bit-for-bit.
+    -- This is the correctness oracle every vectorized step must satisfy.
+    let cfg = defaultDriverConfig
+        ctx = defaultTimestepContext
+                { tcDtime    = 1800.0
+                , tcForcRain = VU.fromList [2.0e-4]
+                , tcForcSnow = VU.fromList [1.0e-4]
+                }
+        mkCol e s d =
+          defaultCLMState
+            { clmWaterFlux = (clmWaterFlux defaultCLMState)
+                { qflx_evap_tot_patch = e, qflx_surf_col = s, qflx_drain_col = d } }
+        sts = [ mkCol 1.0e-5 3.0e-5 2.0e-5
+              , mkCol 4.0e-5 1.0e-5 5.0e-5
+              , mkCol 0.0    8.0e-5 1.0e-6 ]
+
+    it "gather then scatter round-trips the tracked fields" $ do
+      let sts' = scatter sts (gather sts)
+      map (qflx_surf_col  . clmWaterFlux) sts' `shouldBe` map (qflx_surf_col  . clmWaterFlux) sts
+      map (qflx_drain_col . clmWaterFlux) sts' `shouldBe` map (qflx_drain_col . clmWaterFlux) sts
+      vNumCols (gather sts) `shouldBe` 3
+
+    it "waterBalanceStepV matches per-column waterBalanceStep bit-for-bit" $ do
+      let scalar = map (waterBalanceStep cfg ctx) sts
+          vec    = scatter sts (waterBalanceStepV cfg ctx (gather sts))
+          err s  = VU.toList (wb_errh2o_col (clmWaterBalance s))
+      map err vec `shouldBe` map err scalar
+
+    it "hydrologyDrainageStepV matches per-column hydrologyDrainageStep bit-for-bit" $ do
+      let scalar = map (hydrologyDrainageStep cfg ctx) sts
+          vec    = scatter sts (hydrologyDrainageStepV cfg ctx (gather sts))
+          surf s = qflx_surf_col (clmWaterFlux s)
+      map surf vec `shouldBe` map surf scalar
 
   describe "Pipeline initialization" $ do
     it "seeds patch vegetation temperature from cold-start data" $ do
